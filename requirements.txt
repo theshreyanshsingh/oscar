@@ -1,0 +1,7 @@
+pipecat-ai[webrtc,openrouter,silero,websocket]==1.15.0
+fastapi==0.162.2
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+python-dotenv==1.2.4
+python-multipart==0.0.33
+twilio==9.13.0

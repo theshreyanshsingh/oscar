@@ -1,0 +1,11 @@
+.env
+.venv/
+.venv-whatsapp/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# This Mac's own settings for the Claude app (they hold local paths)
+.claude/

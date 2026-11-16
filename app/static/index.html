@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Oscar</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
+    />
+    <link rel="stylesheet" href="/static/style.css?v=7" />
+  </head>
+  <body>
+    <header class="nav-shell">
+      <nav class="nav" aria-label="Sections">
+        <a class="brand" href="#top">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Oscar</span>
+        </a>
+        <div class="nav-links">
+          <a href="#call">Talk</a>
+          <a href="#phone">Phone</a>
+          <a href="#agent">Agent</a>
+          <a href="#whatsapp">WhatsApp</a>
+          <a href="#history">History</a>
+        </div>
+        <div class="status-row" aria-live="polite">
+          <span class="pill" id="agent-pill">Agent: checking…</span>
+          <span class="pill" id="phone-pill">Phone: checking…</span>
+          <span class="pill" id="search-pill">Web search: checking…</span>
+        </div>
+      </nav>
+    </header>
+
+    <div class="notice" id="setup-notice" hidden></div>
+
+    <section class="hero" id="top" aria-labelledby="hero-heading">
+      <div class="hero-bg" aria-hidden="true">
+        <span class="hero-blob h1"></span>
+        <span class="hero-blob h2"></span>
+        <span class="hero-blob h3"></span>
+        <span class="hero-blob h4"></span>
+        <span class="hero-blob h5"></span>
+      </div>
+      <div class="hero-inner">
+        <p class="hero-eyebrow hero-line">Browser · Phone · WhatsApp</p>
+        <h1 class="display hero-line" id="hero-heading">Your own AI agent, on calls and in chats.</h1>
+      </div>
+      <div class="hero-foot">
+        <p class="hero-caption hero-line">
+          Talk to Oscar in your browser, have it phone anyone, or add it to your WhatsApp groups.
+          Set it up once and it shows up everywhere with the same name.
+        </p>
+        <a class="hero-demo hero-line" href="#call">
+          <span>Talk to<br />Oscar now</span>
+          <span class="orb-mini" aria-hidden="true">
+            <span class="orb-swirl">
+              <span class="orb-blob b1"></span>
+              <span class="orb-blob b2"></span>
+              <span class="orb-blob b3"></span>
+            </span>
+          </span>
+        </a>
+      </div>
+    </section>
+
+    <main class="page">
+      <section class="section" id="call" aria-labelledby="call-heading">
+        <div class="section-center reveal">
+          <p class="eyebrow">Live call</p>
+          <h2 class="display display-dark" id="call-heading">Talk to Oscar</h2>
+        </div>
+
+        <div class="demo-grid">
+          <div class="panel panel-outline call-panel reveal">
+            <span class="timer" id="call-timer"></span>
+            <div class="orb-wrap" id="orb" data-state="idle" aria-hidden="true">
+              <div class="orb">
+                <span class="orb-swirl">
+                  <span class="orb-blob b1"></span>
+                  <span class="orb-blob b2"></span>
+                  <span class="orb-blob b3"></span>
+                  <span class="orb-blob b4"></span>
+                </span>
+              </div>
+            </div>
+            <p class="call-status" id="call-status">Press Start call and allow the microphone.</p>
+            <div class="actions actions-center">
+              <button type="button" class="primary" id="call-button">
+                <span class="btn-label">Start call</span>
+              </button>
+            </div>
+            <label class="check call-option">
+              <input type="checkbox" id="call-interrupt" />
+              I'm on headphones, so let me interrupt Oscar
+            </label>
+            <p class="hint call-option-hint">
+              Leave this off on speakers. Oscar then finishes speaking before it listens, so it
+              never mistakes its own voice for yours.
+            </p>
+            <p class="error" id="call-error" role="alert" hidden></p>
+            <audio id="agent-audio" autoplay></audio>
+          </div>
+
+          <div class="panel panel-soft reveal" style="--delay: 0.12s">
+            <p class="lead">Follow the conversation here, turn by turn.</p>
+            <p class="field-label">Live transcript</p>
+            <div class="transcript" id="live-transcript" aria-live="polite">
+              <p class="muted empty">Nothing yet. Start a call and the transcript appears here.</p>
+            </div>
+            <div class="call-summary" id="live-summary" aria-live="polite" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="phone" aria-labelledby="phone-heading">
+        <div class="title-grid reveal">
+          <div>
+            <p class="eyebrow">Phone calls</p>
+            <h2 class="title" id="phone-heading">Have Oscar call<br />any number</h2>
+          </div>
+          <p class="title-side">
+            Oscar can ring anyone and pick up calls to your Twilio number, with the same voice and
+            instructions it uses in the browser.
+          </p>
+        </div>
+
+        <div id="phone-ready" hidden>
+          <div class="demo-grid">
+            <div class="panel panel-soft reveal">
+              <p class="lead">Type a number and Oscar calls it straight away.</p>
+              <form id="phone-form" class="phone-form" novalidate>
+                <label class="field-label" for="phone-to">Number to call</label>
+                <input
+                  id="phone-to"
+                  name="to"
+                  type="tel"
+                  inputmode="tel"
+                  autocomplete="tel"
+                  placeholder="+1 415 555 0123"
+                  required
+                />
+                <p class="hint">Start with + and the country code, like +1 415 555 0123.</p>
+                <div class="actions">
+                  <button type="submit" class="primary" id="phone-button">
+                    <span class="btn-label">Call now</span>
+                  </button>
+                </div>
+              </form>
+              <p class="error" id="phone-error" role="alert" hidden></p>
+            </div>
+
+            <div class="panel panel-outline reveal" style="--delay: 0.12s">
+              <dl class="facts">
+                <dt>Oscar's number</dt>
+                <dd class="fact-big" id="phone-number"></dd>
+                <dt>Webhook for incoming calls</dt>
+                <dd><code id="phone-webhook"></code></dd>
+              </dl>
+              <p class="hint">
+                To let people call Oscar, paste this URL into your Twilio number's "A call comes
+                in" setting (Webhook, HTTP POST).
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div id="phone-setup" class="panel panel-outline reveal" hidden>
+          <p class="lead">Real phone calls need a Twilio number.</p>
+          <p>Add these to your <code>.env</code> file, then restart Oscar:</p>
+          <ul id="phone-missing" class="plain-list"></ul>
+          <p class="hint">The README walks you through Twilio and the ngrok tunnel.</p>
+        </div>
+      </section>
+
+      <section class="section" id="agent" aria-labelledby="agent-heading">
+        <div class="title-grid reveal">
+          <div>
+            <p class="eyebrow">Agent settings</p>
+            <h2 class="title" id="agent-heading">Shape how<br />Oscar talks</h2>
+          </div>
+          <p class="title-side">
+            Give Oscar a name and a voice, then tell it how to behave. Changes apply from the next
+            call.
+          </p>
+        </div>
+
+        <div class="panel panel-soft reveal">
+          <form id="agent-form" class="agent-form" novalidate>
+            <div class="field">
+              <label class="field-label" for="agent-name">Name</label>
+              <input id="agent-name" name="name" maxlength="60" required />
+            </div>
+            <div class="field">
+              <label class="field-label" for="agent-voice">Voice</label>
+              <select id="agent-voice" name="voice" required></select>
+              <p class="hint">How Oscar sounds on calls.</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="agent-accent">Accent</label>
+              <select id="agent-accent" name="accent" required></select>
+              <p class="hint">Spoken with whichever voice you pick. Only Ballad stays British.</p>
+            </div>
+            <div class="field span-all">
+              <label class="field-label" for="agent-model">Chat model</label>
+              <input
+                id="agent-model"
+                name="model"
+                list="model-suggestions"
+                maxlength="200"
+                spellcheck="false"
+                required
+              />
+              <datalist id="model-suggestions">
+                <option value="anthropic/claude-haiku-5.5"></option>
+                <option value="anthropic/claude-sonnet-5.5"></option>
+                <option value="anthropic/claude-opus-5.5"></option>
+              </datalist>
+              <p class="hint">
+                Writes Oscar's WhatsApp replies. Any OpenRouter model. Calls always use OpenAI's
+                gpt-audio, which hears and speaks in one step.
+              </p>
+            </div>
+            <div class="field span-all">
+              <label class="field-label" for="agent-greeting">Opening line</label>
+              <input id="agent-greeting" name="greeting" maxlength="500" />
+              <p class="hint">What Oscar says when a call connects. Leave blank to let the caller go first.</p>
+            </div>
+            <div class="field span-all">
+              <label class="field-label" for="agent-prompt">Call instructions</label>
+              <textarea
+                id="agent-prompt"
+                name="system_prompt"
+                rows="7"
+                maxlength="8000"
+                required
+              ></textarea>
+            </div>
+            <div class="field span-all">
+              <label class="field-label" for="agent-script">Script</label>
+              <textarea
+                id="agent-script"
+                name="script"
+                rows="7"
+                maxlength="4000"
+                placeholder="The steps of a call, one on each line, in order. For example:&#10;Ask who is calling.&#10;Ask what they need help with.&#10;Ask for the best number to reach them on, and repeat it back.&#10;Say you will pass it on, and ask if there is anything else.&#10;Thank them and say goodbye."
+              ></textarea>
+              <p class="hint">
+                Oscar works through these steps on every call, one at a time, after its opening
+                line. If the caller asks something else it answers, then comes back to the step it
+                was on. Write a step as an instruction to Oscar. Leave this empty for no script.
+              </p>
+            </div>
+            <div class="field span-all">
+              <label class="field-label" for="agent-knowledge">What Oscar knows</label>
+              <textarea
+                id="agent-knowledge"
+                name="knowledge"
+                rows="8"
+                maxlength="12000"
+                placeholder="Facts about who Oscar answers for, in plain sentences. For example:&#10;We are Harbour Street Barbers, 14 Harbour Street, Newtown.&#10;Open Monday to Friday 9 am to 6 pm, Saturday 9 am to 4 pm. Closed Sundays.&#10;A men's haircut is $45."
+              ></textarea>
+              <p class="hint">
+                Opening hours, prices, address, services, how to book. On calls and in WhatsApp,
+                Oscar answers questions about you from these facts only, and says it doesn't have
+                the information when they don't cover it. Left empty, it says so for every such
+                question instead of guessing. On a call it says "One moment, let me look that
+                up." first, then the answer.
+                <span id="agent-knowledge-count"></span>
+              </p>
+              <p class="hint">
+                <button type="button" class="link" id="agent-knowledge-import">
+                  Add the text of a file
+                </button>
+                (.txt, .md or .csv). For a PDF or a Word file, copy the text and paste it here.
+                <input type="file" id="agent-knowledge-file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" hidden />
+              </p>
+            </div>
+            <div class="actions span-all">
+              <button type="submit" class="primary" id="agent-save">
+                <span class="btn-label">Save changes</span>
+              </button>
+              <span class="saved" id="agent-saved" aria-live="polite"></span>
+            </div>
+            <p class="error span-all" id="agent-error" role="alert" hidden></p>
+          </form>
+        </div>
+      </section>
+
+      <section class="section" id="whatsapp" aria-labelledby="whatsapp-heading">
+        <div class="title-grid reveal">
+          <div>
+            <p class="eyebrow">WhatsApp</p>
+            <h2 class="title" id="whatsapp-heading">Oscar in your<br />group chats</h2>
+          </div>
+          <div class="title-side">
+            <span class="pill" id="whatsapp-pill">Checking…</span>
+            <p id="whatsapp-detail"></p>
+          </div>
+        </div>
+
+        <div class="demo-grid">
+          <div class="panel panel-outline reveal">
+            <div id="whatsapp-not-running" hidden>
+              <p class="lead">Connect Oscar to WhatsApp</p>
+              <p>Run this in a terminal, in the Oscar folder:</p>
+              <pre class="command"><code id="whatsapp-command">.venv-whatsapp/bin/python -m app.whatsapp</code></pre>
+              <p class="hint" id="whatsapp-install-hint" hidden>
+                First time? Follow the WhatsApp setup in the README.
+              </p>
+              <p class="hint">
+                Heads up: this is an unofficial WhatsApp Web connection. It breaks WhatsApp's terms,
+                and WhatsApp can ban the number, so give Oscar a spare number, never your own.
+              </p>
+            </div>
+
+            <div id="whatsapp-busy" hidden>
+              <p class="lead" id="whatsapp-busy-text">Connecting to WhatsApp…</p>
+              <p class="hint">This box updates on its own. The details are shown above.</p>
+            </div>
+
+            <div id="whatsapp-scan" class="scan" hidden>
+              <img id="whatsapp-qr" alt="WhatsApp linking code" width="260" height="260" />
+              <ol class="steps">
+                <li>
+                  Grab the phone that has Oscar's spare number, not your own phone. Whichever
+                  WhatsApp account scans the code becomes Oscar.
+                </li>
+                <li>Open WhatsApp → Settings → Linked devices → Link a device.</li>
+                <li>
+                  Scan this code. A new one replaces it every 20 to 60 seconds, for up to an
+                  hour.
+                </li>
+              </ol>
+            </div>
+
+            <div id="whatsapp-connected" hidden>
+              <p class="lead">
+                Add <strong id="whatsapp-phone"></strong> to a group, then mention
+                <strong id="whatsapp-handle">@Oscar</strong> in any message.
+              </p>
+              <p>
+                It also answers replies to its own messages, and it can look at photos you send or
+                reply to.
+              </p>
+              <p class="hint">
+                On Oscar's phone, set Privacy → Groups to "My contacts" so strangers can't add it
+                to their groups.
+              </p>
+              <p class="hint">
+                Is <strong id="whatsapp-phone-check"></strong> your own number instead of Oscar's?
+                Then Oscar would answer, as you, whenever someone mentions you or replies to
+                you. Either tick "Oscar shares my own number" below, or unlink it: on that
+                phone, open WhatsApp → Settings → Linked devices, tap Oscar and log out. Then
+                start the WhatsApp connection again and scan with Oscar's phone.
+              </p>
+            </div>
+
+            <div id="whatsapp-connected-own" hidden>
+              <p class="lead">
+                Oscar shares your own number, <strong id="whatsapp-phone-own"></strong>. In any of
+                your groups, write <strong id="whatsapp-handle-own">@Oscar</strong> and a question.
+              </p>
+              <p>
+                You can call it yourself too. Its replies come from your number and start with
+                its name, so nobody takes them for yours. Messages that mention you or reply to
+                you are left for you.
+              </p>
+              <p class="hint">
+                WhatsApp can ban a number that is used like this, and this one is yours.
+              </p>
+            </div>
+          </div>
+
+          <div class="panel panel-soft reveal" style="--delay: 0.12s">
+            <form id="whatsapp-form" class="whatsapp-form" novalidate>
+              <div class="field">
+                <label class="field-label" for="whatsapp-instructions">Chat instructions</label>
+                <textarea
+                  id="whatsapp-instructions"
+                  name="instructions"
+                  rows="4"
+                  maxlength="4000"
+                ></textarea>
+                <p class="hint">
+                  How Oscar should come across in chats. Its name and chat model come from the
+                  Agent section.
+                </p>
+              </div>
+              <label class="check">
+                <input type="checkbox" id="whatsapp-web-search" name="web_search" />
+                Let Oscar search the web for current information
+              </label>
+              <p class="hint" id="whatsapp-search-hint" hidden>
+                Searching needs a Firecrawl key, and there is none yet. Add
+                <code>FIRECRAWL_API_KEY</code> to <code>.env</code>, then restart Oscar and its
+                WhatsApp process.
+              </p>
+              <label class="check">
+                <input type="checkbox" id="whatsapp-private" name="reply_in_private_chats" />
+                Also reply to private messages
+              </label>
+              <label class="check">
+                <input type="checkbox" id="whatsapp-own-number" name="own_number" />
+                Oscar shares my own number
+              </label>
+              <p class="hint">
+                Tick this when the linked WhatsApp account is yours, not one set up for Oscar.
+                Oscar then answers only when someone writes its name after an @, starts each
+                reply with its name, and leaves alone messages meant for you.
+              </p>
+              <div class="actions">
+                <button type="submit" class="primary" id="whatsapp-save">
+                  <span class="btn-label">Save chat settings</span>
+                </button>
+                <span class="saved" id="whatsapp-saved" aria-live="polite"></span>
+              </div>
+              <p class="error" id="whatsapp-error" role="alert" hidden></p>
+            </form>
+          </div>
+        </div>
+
+        <div class="panel panel-outline table-panel reveal">
+          <h3 class="panel-title">Recent questions</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Chat</th>
+                  <th scope="col">From</th>
+                  <th scope="col">Question</th>
+                  <th scope="col">Oscar's reply</th>
+                </tr>
+              </thead>
+              <tbody id="whatsapp-activity">
+                <tr><td colspan="5" class="muted">No questions yet. Mention @Oscar in a group to try it.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="history" aria-labelledby="history-heading">
+        <div class="title-grid reveal">
+          <div>
+            <p class="eyebrow">Call history</p>
+            <h2 class="title" id="history-heading">Every call,<br />summed up</h2>
+          </div>
+          <p class="title-side">
+            Browser and phone calls, newest first. When a call ends, Oscar writes what it was
+            about, what is left for you to do and what its web searches found. Open one to
+            read what was said.
+          </p>
+        </div>
+
+        <div class="panel panel-outline table-panel reveal">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Started</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Number</th>
+                  <th scope="col">Length</th>
+                  <th scope="col">Summary</th>
+                  <th scope="col">Status</th>
+                  <th scope="col"><span class="visually-hidden">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="calls-body">
+                <tr><td colspan="7" class="muted">No calls yet. Your first one will show up here.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="detail" id="call-detail" hidden>
+            <div class="detail-head">
+              <h3 class="panel-title" id="detail-title">Transcript</h3>
+              <button type="button" class="link" id="detail-close">Close</button>
+            </div>
+            <p class="error" id="detail-error" hidden></p>
+            <div class="call-summary" id="detail-summary" hidden></div>
+            <button type="button" class="link" id="detail-summarise" hidden>Write a summary</button>
+            <div class="transcript" id="detail-transcript"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <span class="brand-name">Oscar</span>
+        <span>Runs on your computer. Listening and speaking through OpenRouter.</span>
+      </div>
+    </footer>
+
+    <script src="/static/app.js?v=18"></script>
+  </body>
+</html>

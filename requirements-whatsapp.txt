@@ -1,0 +1,8 @@
+# Oscar's WhatsApp process runs in its own environment (.venv-whatsapp): the
+# WhatsApp library needs protobuf 7, and the voice pipeline needs protobuf 6.
+# It also needs the libmagic system library: brew install libmagic
+neonize==0.10.0
+protobuf==7.36.2
+pydantic==2.14.3
+python-dotenv==1.2.4
+httpx==0.28.1
