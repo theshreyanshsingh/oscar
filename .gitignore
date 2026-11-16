@@ -9,3 +9,6 @@ __pycache__/
 
 # This Mac's own settings for the Claude app (they hold local paths)
 .claude/
+
+# deploy.sh: one deploy at a time
+.deploy.lock

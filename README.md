@@ -168,6 +168,84 @@ minute the caller speaks. A five-minute conversation comes to roughly 20 to 25
 cents. `VOICE_MODEL` in `app/speech.py` can be set to `openai/gpt-audio-mini`,
 which costs a small fraction of that and answers about 0.7 seconds later.
 
+## Run it on a server (pm2)
+
+Oscar can also run on a Linux server, such as an EC2 machine, under pm2. Then it
+answers whether or not your Mac is awake. `deploy.sh` sets it up and brings it
+up to date, in one command.
+
+**Once, on the server** (Ubuntu). Install git, Node.js with pm2, uv (which
+brings Python 3.13) and libmagic (for WhatsApp):
+
+```bash
+sudo apt update && sudo apt install -y git nodejs npm libmagic1 && sudo npm install -g pm2 && curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then get Oscar and start it:
+
+```bash
+git clone https://github.com/theshreyanshsingh/oscar.git ~/oscar && cd ~/oscar && ./deploy.sh
+```
+
+Add your keys, then restart Oscar so it reads them:
+
+```bash
+.venv/bin/python -m scripts.set_keys && pm2 restart oscar
+```
+
+For WhatsApp too, run `./deploy.sh --whatsapp` once. Then link Oscar's phone
+from the dashboard's WhatsApp card, as in [Set up WhatsApp](#set-up-whatsapp).
+
+**Every update:** push to GitHub, then on the server:
+
+```bash
+cd ~/oscar && ./deploy.sh
+```
+
+It stops if Oscar is on a call and changes nothing (`--force` cuts the call
+off). Otherwise it:
+
+1. Gets the latest code.
+2. Installs Python packages only when a requirements file changed.
+3. Checks that the new code starts. If it doesn't, it goes back to the version
+   before, and Oscar keeps running that.
+4. Restarts Oscar under pm2 and waits until it answers.
+
+The first time, it also makes pm2 start Oscar when the server starts, and has
+pm2 rotate its logs so they never fill the disk. When checked on 17 November
+2026 (on a test copy, without keys), a first deploy took 1 minute 44 seconds,
+the next one 15 seconds. A broken commit was turned back, and Oscar answered
+throughout.
+
+| On the server | What it does |
+|---|---|
+| `pm2 ls` | Shows whether `oscar` (and `oscar-whatsapp`) are running |
+| `pm2 logs oscar` | Oscar's log as it is written (`--lines 100` for more) |
+| `pm2 restart oscar` | Restarts Oscar, after a change to `.env`. Unlike `deploy.sh`, it cuts off a call in progress |
+
+- **The dashboard only listens on the server itself,** unless `.env` says
+  otherwise. Reach it from your Mac through SSH, then open
+  <http://127.0.0.1:7860> there (the browser allows the microphone on that
+  address):
+
+  ```bash
+  ssh -L 7860:127.0.0.1:7860 ubuntu@<server address>
+  ```
+
+- **Browser calls send their audio straight to the server over UDP,** not
+  through SSH. If a call connects but stays silent, allow inbound UDP in the
+  server's firewall (on EC2, its security group), at least from your own IP.
+  Phone calls don't need this.
+- **Phone calls** need `PUBLIC_URL` to be a public https address that reaches
+  the server, such as a domain behind Caddy or nginx. See below.
+- **Run WhatsApp in one place only.** If Oscar is linked on your Mac and on the
+  server, it answers twice in groups. Once the server runs it, stop the Mac's
+  copy with `.venv/bin/python -m scripts.autostart --remove`.
+- **Each machine keeps its own `data/`** (call history, settings, the WhatsApp
+  login). It is not in git, so a new server starts empty.
+- On a Mac, `deploy.sh` refuses to run where Oscar already starts at login. Use
+  `scripts.autostart --restart` there.
+
 ## Phone calls (optional)
 
 Twilio has to reach your computer over the internet, so phone calls need a
@@ -624,6 +702,8 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `scripts/live_call_check.py` | One real call with your keys (`--search` to test web search) |
 | `scripts/set_keys.py` | Saves your keys into `.env` without showing them (`--phone` for the Twilio details) |
 | `scripts/autostart.py` | Has macOS start Oscar at login and keep it running (`--status`, `--restart`, `--remove`) |
+| `deploy.sh` | Sets Oscar up on a Linux server, or brings it up to date, under pm2 (`--whatsapp`, `--force`) |
+| `ecosystem.config.cjs` | How pm2 runs Oscar and its WhatsApp connection on a server |
 
 ## Troubleshooting
 
