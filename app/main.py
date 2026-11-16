@@ -1,9 +1,7 @@
 """Web server: the dashboard, its JSON API, browser calls (WebRTC) and Twilio webhooks."""
 
 import asyncio
-import base64
 import json
-import secrets
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -57,47 +55,6 @@ class PhoneCallRequest(BaseModel):
     to: str = Field(pattern=r"^\+[1-9]\d{7,14}$", description="E.164 number, e.g. +14155550123")
 
 
-class BasicAuthMiddleware:
-    """Password-protects the dashboard and API.
-
-    Twilio's webhooks are exempt; they are verified by signature and token in app.phone.
-    """
-
-    def __init__(self, app, password: str):
-        self.app = app
-        self._password = password.encode()
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or self._is_public(scope["path"]):
-            await self.app(scope, receive, send)
-            return
-        headers = dict(scope["headers"])
-        if self._is_authorized(headers.get(b"authorization", b"").decode("latin-1")):
-            await self.app(scope, receive, send)
-            return
-        response = Response(
-            "Password required.",
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Oscar", charset="UTF-8"'},
-        )
-        await response(scope, receive, send)
-
-    @staticmethod
-    def _is_public(path: str) -> bool:
-        return path.startswith("/twilio/") or path == "/healthz"
-
-    def _is_authorized(self, header: str) -> bool:
-        scheme, _, encoded = header.partition(" ")
-        if scheme.lower() != "basic" or not encoded:
-            return False
-        try:
-            decoded = base64.b64decode(encoded, validate=True)
-        except ValueError:
-            return False
-        _, separator, password = decoded.partition(b":")
-        return bool(separator) and secrets.compare_digest(password, self._password)
-
-
 def create_app(cfg: Config | None = None) -> FastAPI:
     cfg = cfg or load_config()
     store = Store(cfg.db_path)
@@ -121,12 +78,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app.state.store = store
     app.state.calls = calls
 
-    if cfg.dashboard_password:
-        app.add_middleware(BasicAuthMiddleware, password=cfg.dashboard_password)
-    else:
-        # No password means local-only use. Refusing other Host names stops web
+    if cfg.local_only:
+        # Only this computer can open it: refusing other Host names stops web
         # pages from reaching this server through DNS rebinding.
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
+    # Otherwise (HOST=0.0.0.0 on a server) anyone who can reach the port can use
+    # it, at any address: there is no password, so the firewall decides who can.
 
     app.include_router(create_phone_router(cfg, calls, store))
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -138,16 +138,6 @@ def test_database_files_are_private(cfg):
     store.close()
 
 
-def test_whatsapp_api_is_password_protected(tmp_path):
-    from tests.conftest import local_client, make_config
-
-    cfg = make_config(tmp_path, dashboard_password="s3cret")
-    with local_client(cfg) as client:
-        assert client.get("/api/whatsapp").status_code == 401
-        assert client.get("/api/whatsapp/qr.svg").status_code == 401
-        assert client.put("/api/whatsapp/settings", json={}).status_code == 401
-
-
 def test_exited_process_is_not_running_but_keeps_its_reason(client, cfg):
     store = Store(cfg.db_path)
     store.set_whatsapp_state("error", detail="The linking code expired before it was scanned.")

@@ -18,7 +18,6 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         twilio_auth_token=TWILIO_AUTH_TOKEN,
         twilio_phone_number="+15005550006",
         public_url=PUBLIC_URL,
-        dashboard_password="",
         host="127.0.0.1",
         port=0,
         db_path=tmp_path / "oscar-test.db",

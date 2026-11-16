@@ -3,7 +3,7 @@
 import pytest
 
 from scripts import set_keys
-from scripts.set_keys import PHONE, Setting, account_sid, password, phone_number, with_value
+from scripts.set_keys import PHONE, Setting, account_sid, phone_number, with_value
 
 
 def test_a_value_replaces_its_own_line_and_leaves_the_rest():
@@ -14,15 +14,15 @@ def test_a_value_replaces_its_own_line_and_leaves_the_rest():
 
 
 def test_a_setting_not_in_the_file_yet_is_added_at_the_end():
-    assert with_value("PORT=7860", "DASHBOARD_PASSWORD", "s3cret-pass") == (
-        "PORT=7860\nDASHBOARD_PASSWORD=s3cret-pass\n"
+    assert with_value("PORT=7860", "TWILIO_AUTH_TOKEN", "s3cret-token") == (
+        "PORT=7860\nTWILIO_AUTH_TOKEN=s3cret-token\n"
     )
 
 
 def test_a_value_with_odd_characters_is_saved_as_typed():
-    # A password may hold characters that mean something in a regular expression.
-    assert with_value("DASHBOARD_PASSWORD=x\n", "DASHBOARD_PASSWORD", r"a\1$&b") == (
-        "DASHBOARD_PASSWORD=a\\1$&b\n"
+    # A key may hold characters that mean something in a regular expression.
+    assert with_value("TWILIO_AUTH_TOKEN=x\n", "TWILIO_AUTH_TOKEN", r"a\1$&b") == (
+        "TWILIO_AUTH_TOKEN=a\\1$&b\n"
     )
 
 
@@ -45,9 +45,6 @@ def test_a_longer_name_is_not_mistaken_for_a_shorter_one():
         (phone_number, "4155550123", False),
         (phone_number, "+1 415 555 0123", False),
         (phone_number, "+0123456789", False),
-        (password, "long-enough", True),
-        (password, "short", False),
-        (password, "has a space in it", False),
     ],
 )
 def test_values_are_checked_before_they_are_saved(check, value, fine):
@@ -72,7 +69,7 @@ def test_phone_setup_saves_what_phone_calls_need_and_never_shows_secrets(tmp_pat
     (tmp_path / ".env").write_text("OPENROUTER_API_KEY=keep-me\nTWILIO_ACCOUNT_SID=\nTWILIO_AUTH_TOKEN=\n")
     monkeypatch.setattr(set_keys, "ROOT_DIR", tmp_path)
     shown = iter(["AC" + "0" * 32, "+14155550123"])
-    hidden = iter(["the-auth-token-value", "my-dashboard-pass"])
+    hidden = iter(["the-auth-token-value"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(shown))
     monkeypatch.setattr(set_keys.getpass, "getpass", lambda prompt: next(hidden))
 
@@ -83,10 +80,9 @@ def test_phone_setup_saves_what_phone_calls_need_and_never_shows_secrets(tmp_pat
         f"TWILIO_ACCOUNT_SID=AC{'0' * 32}\n"
         "TWILIO_AUTH_TOKEN=the-auth-token-value\n"
         "TWILIO_PHONE_NUMBER=+14155550123\n"
-        "DASHBOARD_PASSWORD=my-dashboard-pass\n"
     )
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
     printed = capsys.readouterr().out
-    assert "the-auth-token-value" not in printed and "my-dashboard-pass" not in printed
+    assert "the-auth-token-value" not in printed
     assert "TWILIO_AUTH_TOKEN: saved (20 characters)" in printed
     assert "TWILIO_PHONE_NUMBER: saved (+14155550123)" in printed

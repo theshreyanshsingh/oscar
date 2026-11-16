@@ -1,7 +1,7 @@
 """Save your keys and settings into .env without secrets showing on screen.
 
     .venv/bin/python -m scripts.set_keys            # OpenRouter, and Firecrawl for web search
-    .venv/bin/python -m scripts.set_keys --phone    # Twilio and a dashboard password, for phone calls
+    .venv/bin/python -m scripts.set_keys --phone    # Twilio, for phone calls
 
 OpenRouter's key is needed. Everything else is optional. Press Enter at a
 prompt to keep the value already saved.
@@ -33,12 +33,6 @@ def phone_number(value: str) -> str:
     return "Write the number in international format, such as +14155550123."
 
 
-def password(value: str) -> str:
-    if len(value) < 8:
-        return "Use at least 8 characters."
-    return no_spaces(value)
-
-
 @dataclass(frozen=True)
 class Setting:
     name: str
@@ -62,11 +56,6 @@ PHONE = [
         "Your Twilio phone number, like +14155550123",
         secret=False,
         problem=phone_number,
-    ),
-    Setting(
-        "DASHBOARD_PASSWORD",
-        "A password for the dashboard, which phone calls put on the internet (you choose it)",
-        problem=password,
     ),
 ]
 

@@ -232,6 +232,12 @@ throughout.
   ssh -L 7860:127.0.0.1:7860 ubuntu@<server address>
   ```
 
+- **Or open it at the server's own address,** `http://<server address>:7860`:
+  set `HOST=0.0.0.0` in `.env`, run `pm2 restart oscar`, and allow TCP 7860
+  in the firewall. There is no password, so allow it from your own IP only:
+  the firewall is what keeps everyone else out. Browsers only let a page use
+  the microphone over https or on localhost, so for **Start call** use the
+  SSH address above, or put https in front.
 - **Browser calls send their audio straight to the server over UDP,** not
   through SSH. If a call connects but stays silent, allow inbound UDP in the
   server's firewall (on EC2, its security group), at least from your own IP.
@@ -257,8 +263,8 @@ public https address.
    ngrok http 7860
    ```
 
-2. Save your Twilio details and a dashboard password. This asks for each one
-   (the secrets without showing them) and writes them to `.env`:
+2. Save your Twilio details. This asks for each one (the secret without
+   showing it) and writes them to `.env`:
 
    ```bash
    .venv/bin/python -m scripts.set_keys --phone
@@ -270,9 +276,9 @@ public https address.
    PUBLIC_URL=https://your-tunnel.ngrok-free.app
    ```
 
-   The dashboard password is required once `PUBLIC_URL` is set, because the
-   dashboard is then reachable from the internet. The browser asks for it.
-   Any username works.
+   The dashboard has no password. Once `PUBLIC_URL` is set, anyone who has
+   the tunnel's address can open it, so keep the address to yourself and stop
+   the tunnel when you are done.
 
 3. Restart Oscar. The dashboard's **Phone calls** card shows your incoming-calls webhook.
 
@@ -674,9 +680,11 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 - Each audio stream must present a one-time token created for that call. The
   token stops working when the call ends, and a call whose audio has not
   connected within 3 minutes is marked failed.
-- The dashboard needs a password whenever it can be reached from other
-  machines (`PUBLIC_URL` set, or `HOST` other than `127.0.0.1`). Without a
-  password it only answers requests addressed to `localhost` or `127.0.0.1`.
+- The dashboard has no password. With `HOST=127.0.0.1` (the default) only
+  this computer can open it, and it only answers requests addressed to
+  `localhost` or `127.0.0.1`. With `HOST=0.0.0.0`, anyone who can reach the
+  port can use it, including your OpenRouter key, your call history and calls
+  through Twilio, so let the server's firewall decide who can.
 - Calls are capped at 30 minutes.
 
 ## Project layout
@@ -687,7 +695,7 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/speech.py` | The speech-to-speech model, through OpenRouter |
 | `app/search.py` | Web search through Firecrawl. For calls, also when to search or use the fact sheet, and writing the answer |
 | `app/openrouter.py` | Shared OpenRouter helpers (error messages, headers) |
-| `app/main.py` | Web server: dashboard, JSON API, browser calls, password protection |
+| `app/main.py` | Web server: dashboard, JSON API, browser calls |
 | `app/phone.py` | Twilio: incoming/outgoing calls, signature checks, media stream |
 | `app/script.py` | The owner's script: its steps, the note the speech model gets, and the model that keeps Oscar's place |
 | `app/summary.py` | The note written when a call ends: summary, name, number to call back, what to do |

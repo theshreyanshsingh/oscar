@@ -315,7 +315,6 @@ def setup(tmp_path, monkeypatch, request):
         twilio_auth_token="",
         twilio_phone_number="",
         public_url="",
-        dashboard_password="",
         host="127.0.0.1",
         port=0,
         db_path=tmp_path / "oscar.db",

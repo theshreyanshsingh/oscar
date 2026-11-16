@@ -98,11 +98,8 @@ def is_answering(cfg: Config) -> bool:
 
 def calls_in_progress(cfg: Config) -> int:
     """How many calls Oscar is on right now (none, if it is not answering at all)."""
-    password = cfg.dashboard_password
     try:
-        status = httpx.get(
-            f"{address(cfg)}/api/status", auth=("oscar", password) if password else None, timeout=3
-        ).json()
+        status = httpx.get(f"{address(cfg)}/api/status", timeout=3).json()
         return len(status["active_call_ids"])
     except (httpx.HTTPError, ValueError, LookupError, TypeError):
         return 0

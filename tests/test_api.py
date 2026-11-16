@@ -1,4 +1,3 @@
-import base64
 import json
 
 import pytest
@@ -473,48 +472,33 @@ def test_calls_logged_before_summaries_existed_still_open(tmp_path):
         again.close()
 
 
-# Password protection
+# Who can open Oscar: no password; on this computer only local Host names (blocks
+# DNS rebinding), on a server (HOST=0.0.0.0) anyone who reaches the port.
 
 
-def _basic(password: str, user: str = "admin") -> dict:
-    token = base64.b64encode(f"{user}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
-
-
-def test_password_protects_dashboard_and_api(tmp_path):
-    cfg = make_config(tmp_path, dashboard_password="s3cret")
+def test_nothing_asks_for_a_password(tmp_path):
+    cfg = make_config(tmp_path, host="0.0.0.0")
     with local_client(cfg) as client:
-        for path in ["/", "/api/status", "/api/calls", "/static/app.js", "/api/events"]:
+        for path in ["/", "/api/status", "/api/calls", "/static/app.js", "/healthz"]:
             response = client.get(path)
-            assert response.status_code == 401, path
-            assert response.headers["WWW-Authenticate"].startswith("Basic")
-        assert client.get("/api/status", headers=_basic("wrong")).status_code == 401
-        assert client.get("/api/status", headers={"Authorization": "Basic !!!"}).status_code == 401
-        assert client.get("/api/status", headers={"Authorization": "Bearer s3cret"}).status_code == 401
-        assert client.get("/api/status", headers=_basic("s3cret")).status_code == 200
-        assert client.get("/api/status", headers=_basic("s3cret", user="anyone")).status_code == 200
-        # Health check and Twilio webhooks stay reachable (Twilio requests are signature-checked).
-        assert client.get("/healthz").status_code == 200
+            assert response.status_code == 200, path
+            assert "WWW-Authenticate" not in response.headers
+        # Twilio webhooks are still checked by their signature.
         assert client.post("/twilio/voice", data={}).status_code == 403
 
 
-# Only local Host names are accepted without a password (blocks DNS rebinding)
-
-
-def test_unknown_host_is_refused_without_password(client):
+def test_unknown_host_is_refused_when_local_only(client):
     assert client.get("/api/status").status_code == 200
     assert client.get("/api/status", headers={"host": "127.0.0.1:7860"}).status_code == 200
     assert client.get("/api/status", headers={"host": "attacker.example"}).status_code == 400
     assert client.post("/api/calls/browser", headers={"host": "attacker.example"}).status_code == 400
 
 
-def test_any_host_is_accepted_with_password(tmp_path):
-    cfg = make_config(tmp_path, dashboard_password="s3cret")
+def test_any_host_is_accepted_on_a_server(tmp_path):
+    cfg = make_config(tmp_path, host="0.0.0.0")
     with local_client(cfg) as client:
-        response = client.get(
-            "/api/status", headers={**_basic("s3cret"), "host": "abc.ngrok-free.app"}
-        )
-    assert response.status_code == 200
+        for host in ["13.185.17.24:7860", "abc.ngrok-free.app"]:
+            assert client.get("/api/status", headers={"host": host}).status_code == 200, host
 
 
 # Configuration rules
@@ -525,7 +509,6 @@ def env(monkeypatch):
     """A clean environment for load_config(), whatever is in the developer's .env."""
     for name in [
         "PUBLIC_URL",
-        "DASHBOARD_PASSWORD",
         "HOST",
         "PORT",
         "DATABASE_PATH",
@@ -539,33 +522,25 @@ def env(monkeypatch):
 
 def test_defaults_are_local_only(env):
     cfg = load_config()
-    assert (cfg.host, cfg.port, cfg.public_url, cfg.dashboard_password) == ("127.0.0.1", 7860, "", "")
+    assert (cfg.host, cfg.port, cfg.public_url, cfg.local_only) == ("127.0.0.1", 7860, "", True)
 
 
-def test_public_url_requires_password(env):
-    env.setenv("PUBLIC_URL", "https://abc.ngrok-free.app")
-    with pytest.raises(ConfigError, match="DASHBOARD_PASSWORD"):
-        load_config()
-
-
-def test_network_host_requires_password(env):
+def test_a_server_host_or_public_url_needs_no_password(env):
+    env.setenv("DASHBOARD_PASSWORD", "left over in an old .env")
     env.setenv("HOST", "0.0.0.0")
-    with pytest.raises(ConfigError, match="DASHBOARD_PASSWORD"):
-        load_config()
-    env.setenv("DASHBOARD_PASSWORD", "pw")
-    assert load_config().host == "0.0.0.0"
+    env.setenv("PUBLIC_URL", "https://abc.ngrok-free.app")
+    cfg = load_config()
+    assert (cfg.host, cfg.local_only, cfg.public_url) == ("0.0.0.0", False, "https://abc.ngrok-free.app")
 
 
 def test_public_url_must_be_https(env):
     env.setenv("PUBLIC_URL", "http://abc.ngrok-free.app")
-    env.setenv("DASHBOARD_PASSWORD", "pw")
     with pytest.raises(ConfigError, match="https"):
         load_config()
 
 
 def test_config_trims_trailing_slash_and_builds_stream_url(env):
     env.setenv("PUBLIC_URL", "https://abc.ngrok-free.app/")
-    env.setenv("DASHBOARD_PASSWORD", "pw")
     cfg = load_config()
     assert cfg.public_url == "https://abc.ngrok-free.app"
     assert cfg.media_stream_url == "wss://abc.ngrok-free.app/twilio/media"

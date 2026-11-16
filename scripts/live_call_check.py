@@ -23,7 +23,6 @@ import time
 import httpx
 from aiortc import RTCSessionDescription
 
-from app.config import load_config
 from tests.audio_client import CALLER_CLIP, WEATHER_CLIP, make_caller
 
 
@@ -43,10 +42,7 @@ async def wait_for(check, timeout: float):
 
 
 async def main(url: str, search: bool) -> None:
-    cfg = load_config()
-    auth = ("admin", cfg.dashboard_password) if cfg.dashboard_password else None
-
-    async with httpx.AsyncClient(base_url=url, auth=auth, timeout=30) as http:
+    async with httpx.AsyncClient(base_url=url, timeout=30) as http:
         try:
             status = (await http.get("/api/status")).raise_for_status().json()
         except httpx.HTTPError as exc:

@@ -366,17 +366,13 @@ def test_oscar_is_asked_whether_it_is_up_and_how_many_calls_it_is_on(monkeypatch
         return Answer(body={"active_call_ids": ["a", "b"]} if url.endswith("/api/status") else {"ok": True})
 
     monkeypatch.setattr(autostart.httpx, "get", get)
-    open_cfg = make_config(tmp_path, port=7860)
-    locked_cfg = make_config(tmp_path, port=7861, dashboard_password="s3cret-pass")
+    cfg = make_config(tmp_path, port=7860)
 
-    assert autostart.is_answering(open_cfg) is True
-    assert autostart.calls_in_progress(open_cfg) == 2
-    assert autostart.calls_in_progress(locked_cfg) == 2
+    assert autostart.is_answering(cfg) is True
+    assert autostart.calls_in_progress(cfg) == 2
     assert asked == [
         ("http://127.0.0.1:7860/healthz", {"timeout": 2}),
-        ("http://127.0.0.1:7860/api/status", {"auth": None, "timeout": 3}),
-        # With a dashboard password, the question carries it.
-        ("http://127.0.0.1:7861/api/status", {"auth": ("oscar", "s3cret-pass"), "timeout": 3}),
+        ("http://127.0.0.1:7860/api/status", {"timeout": 3}),
     ]
 
 

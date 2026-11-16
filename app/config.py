@@ -28,13 +28,22 @@ class Config:
     twilio_auth_token: str
     twilio_phone_number: str
     public_url: str
-    dashboard_password: str
     host: str
     port: int
     db_path: Path
     openrouter_base_url: str = DEFAULT_BASE_URL
     firecrawl_api_key: str = ""
     firecrawl_base_url: str = DEFAULT_FIRECRAWL_URL
+
+    @property
+    def local_only(self) -> bool:
+        """Whether only this computer can open Oscar (HOST=127.0.0.1 or localhost).
+
+        Otherwise, such as with HOST=0.0.0.0 on a server, anyone who can reach the
+        port can use the dashboard: there is no password, so the server's firewall
+        decides who can.
+        """
+        return self.host in LOCAL_ONLY_HOSTS
 
     @property
     def search_enabled(self) -> bool:
@@ -77,23 +86,10 @@ LOCAL_ONLY_HOSTS = {"127.0.0.1", "localhost"}
 
 def load_config() -> Config:
     public_url = _env("PUBLIC_URL").rstrip("/")
-    dashboard_password = _env("DASHBOARD_PASSWORD")
     host = _env("HOST", "127.0.0.1")
-
-    if host not in LOCAL_ONLY_HOSTS and not dashboard_password:
-        raise ConfigError(
-            f"HOST={host} lets other devices on your network open the dashboard, so set "
-            "DASHBOARD_PASSWORD too (or use HOST=127.0.0.1)."
-        )
 
     if public_url and not public_url.startswith("https://"):
         raise ConfigError("PUBLIC_URL must start with https:// (Twilio requires a secure URL).")
-    if public_url and not dashboard_password:
-        raise ConfigError(
-            "PUBLIC_URL makes this server reachable from the internet, so set "
-            "DASHBOARD_PASSWORD too. Otherwise anyone could open the dashboard "
-            "and place calls on your Twilio account."
-        )
 
     port_raw = _env("PORT", "7860")
     try:
@@ -109,7 +105,6 @@ def load_config() -> Config:
         twilio_auth_token=_env("TWILIO_AUTH_TOKEN"),
         twilio_phone_number=_env("TWILIO_PHONE_NUMBER"),
         public_url=public_url,
-        dashboard_password=dashboard_password,
         host=host,
         port=port,
         db_path=db_path,
