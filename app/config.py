@@ -4,6 +4,7 @@ See .env.example for what each value does.
 """
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,6 +83,40 @@ def _env(name: str, default: str = "") -> str:
 
 
 LOCAL_ONLY_HOSTS = {"127.0.0.1", "localhost"}
+
+# Where Linux keeps the range of ports it hands out to programs that ask for any port.
+LINUX_PORT_RANGE = Path("/proc/sys/net/ipv4/ip_local_port_range")
+
+
+def browser_call_udp_ports() -> tuple[int, int]:
+    """The UDP ports a browser call's audio arrives on (first and last).
+
+    The audio goes straight between the browser and this machine, not through
+    the dashboard's web address (so not through a proxy such as Cloudflare). Each
+    call takes ports the system picks from its range for programs that ask for
+    any port, so on a server that whole range has to be let in.
+    """
+    try:
+        low, high = LINUX_PORT_RANGE.read_text().split()
+        return int(low), int(high)
+    except (OSError, ValueError):
+        # Linux's own default, or a Mac's.
+        return (32768, 60999) if sys.platform == "linux" else (49152, 65535)
+
+
+def call_audio_unreachable(cfg: Config) -> str:
+    """What to tell the owner when a browser call's audio never connected."""
+    if cfg.local_only:
+        return (
+            "The call's audio could not connect. It goes straight between the browser and "
+            "the computer running Oscar, so make browser calls on that computer."
+        )
+    low, high = browser_call_udp_ports()
+    return (
+        "The call's audio could not reach Oscar's server. It goes straight to the server "
+        f"over UDP, not through the web address: let in UDP ports {low}-{high} in the "
+        "server's firewall (on EC2, its security group), then call again."
+    )
 
 
 def load_config() -> Config:

@@ -239,9 +239,12 @@ throughout.
   the microphone over https or on localhost, so for **Start call** use the
   SSH address above, or put https in front.
 - **Browser calls send their audio straight to the server over UDP,** not
-  through SSH. If a call connects but stays silent, allow inbound UDP in the
-  server's firewall (on EC2, its security group), at least from your own IP.
-  Phone calls don't need this.
+  through SSH or the web address (a proxy in front, such as Cloudflare, does
+  not carry it). Let in **UDP 32768-60999** in the firewall from wherever you
+  call from: on EC2, an inbound Custom UDP rule in the security group. Those
+  are the ports Linux hands out for each call's audio; `deploy.sh` and Oscar's
+  log say the server's own range. Without it a call fails with "The call's
+  audio could not reach Oscar's server". Phone calls don't need this.
 - **Phone calls** need `PUBLIC_URL` to be a public https address that reaches
   the server, such as a domain behind Caddy or nginx. See below.
 - **Run WhatsApp in one place only.** If Oscar is linked on your Mac and on the
@@ -748,6 +751,9 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 - **Phone call fails right away:** check the Twilio number, that `PUBLIC_URL`
   matches the running tunnel, and (for trial accounts) that the number you
   dial is verified.
+- **Browser call fails with "The call's audio could not reach Oscar's
+  server":** the server's firewall does not let the call's audio in. Allow the
+  UDP ports the message names, as in [Run it on a server](#run-it-on-a-server-pm2).
 - **Browser call from another device over the tunnel doesn't connect:** browser
   call audio travels directly between the two devices, not through the tunnel,
   and many networks block that. Make browser calls on the computer running

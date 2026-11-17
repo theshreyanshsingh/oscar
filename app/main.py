@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field
 
 from app import agent as voice_agent
 from app.calls import CallManager
-from app.config import ROOT_DIR, Config, load_config
+from app.config import (
+    ROOT_DIR,
+    Config,
+    browser_call_udp_ports,
+    call_audio_unreachable,
+    load_config,
+)
 from app.events import EventBus
 from app.phone import (
     PhoneCallError,
@@ -51,6 +57,12 @@ class BrowserCallOffer(BaseModel):
     interruptible: bool = False
 
 
+class EndCallRequest(BaseModel):
+    # Why the browser hung up, when it was not the caller's choice: "audio_failed"
+    # when the call's audio never connected (the browser gave up on it).
+    reason: Literal["audio_failed"] | None = None
+
+
 class PhoneCallRequest(BaseModel):
     to: str = Field(pattern=r"^\+[1-9]\d{7,14}$", description="E.164 number, e.g. +14155550123")
 
@@ -68,6 +80,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if stale:
             logger.info(f"Closed {stale} call(s) left open by a previous run")
         store.forget_unfinished_summaries()
+        if not cfg.local_only:
+            low, high = browser_call_udp_ports()
+            logger.info(
+                f"Browser calls send their audio straight to this server over UDP ports {low}-{high}, "
+                "not through the web address: let those in through the firewall (on EC2, the security group)"
+            )
         yield
         await calls.shutdown()
         await webrtc.close()
@@ -204,10 +222,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"call": call}
 
     @app.post("/api/calls/{call_id}/end")
-    async def end_call(call_id: str) -> dict:
+    async def end_call(call_id: str, request: EndCallRequest | None = None) -> dict:
         call = store.get_call(call_id)
         if call is None:
             raise HTTPException(status_code=404, detail="Call not found.")
+        reason = request.reason if request else None
+        if reason == "audio_failed" and call["kind"] == "browser" and call["status"] == "connecting":
+            # Say why before stopping it, so the call is not put down as merely
+            # never connected: on a server this is almost always the firewall.
+            calls.finish(call_id, call_audio_unreachable(cfg))
         if await calls.hang_up(call_id):
             return {"ended": True}
         if call["status"] not in OPEN_STATUSES:

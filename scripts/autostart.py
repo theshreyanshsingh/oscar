@@ -85,8 +85,15 @@ def job_state() -> tuple[bool, int | None]:
     return True, int(pid.group(1)) if pid else None
 
 
+WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
+
+
 def address(cfg: Config) -> str:
-    return f"http://{cfg.host}:{cfg.port}"
+    """Where this machine reaches Oscar. Oscar listening at every address (HOST=0.0.0.0) is asked at 127.0.0.1."""
+    host = "127.0.0.1" if cfg.host in WILDCARD_HOSTS else cfg.host
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 address
+    return f"http://{host}:{cfg.port}"
 
 
 def is_answering(cfg: Config) -> bool:

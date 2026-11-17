@@ -5,7 +5,7 @@ import pytest
 from app.config import ConfigError, load_config
 import sqlite3
 
-from app import summary
+from app import config, summary
 from app.store import (
     ACCENTS,
     DEFAULT_AGENT,
@@ -277,6 +277,55 @@ def test_end_call_that_is_not_running_marks_it_ended(client, cfg):
     assert client.post(f"/api/calls/{call['id']}/end").json() == {"ended": True}
     assert client.get(f"/api/calls/{call['id']}").json()["call"]["status"] == "ended"
     assert client.post(f"/api/calls/{call['id']}/end").json() == {"ended": False}
+
+
+def test_a_browser_call_whose_audio_never_connected_says_which_ports_to_open(tmp_path, monkeypatch):
+    port_range = tmp_path / "ip_local_port_range"
+    port_range.write_text("32768\t60999\n")
+    monkeypatch.setattr(config, "LINUX_PORT_RANGE", port_range)
+    cfg = make_config(tmp_path, host="0.0.0.0")
+    with local_client(cfg) as client:
+        call = client.app.state.store.create_call("browser", status="connecting")
+        ended = client.post(f"/api/calls/{call['id']}/end", json={"reason": "audio_failed"})
+        assert ended.json() == {"ended": True}
+        call = client.get(f"/api/calls/{call['id']}").json()["call"]
+    assert call["status"] == "failed"
+    assert "UDP ports 32768-60999" in call["error"]
+    assert "security group" in call["error"]
+
+
+def test_on_this_computer_an_audio_failure_says_where_to_call_from(client):
+    call = client.app.state.store.create_call("browser", status="connecting")
+    client.post(f"/api/calls/{call['id']}/end", json={"reason": "audio_failed"})
+    call = client.get(f"/api/calls/{call['id']}").json()["call"]
+    assert call["status"] == "failed"
+    assert "make browser calls on that computer" in call["error"]
+
+
+@pytest.mark.parametrize(("kind", "status"), [("browser", "live"), ("phone_outbound", "connecting")])
+def test_an_audio_failure_is_only_recorded_for_a_browser_call_still_connecting(client, kind, status):
+    call = client.app.state.store.create_call(kind, status=status)
+    client.post(f"/api/calls/{call['id']}/end", json={"reason": "audio_failed"})
+    call = client.get(f"/api/calls/{call['id']}").json()["call"]
+    assert call["status"] == "ended"
+    assert call["error"] == ""
+
+
+def test_hanging_up_takes_no_other_reason(client):
+    call = client.app.state.store.create_call("browser", status="connecting")
+    response = client.post(f"/api/calls/{call['id']}/end", json={"reason": "anything else"})
+    assert response.status_code == 422
+    assert client.get(f"/api/calls/{call['id']}").json()["call"]["status"] == "connecting"
+
+
+def test_the_udp_ports_are_read_from_the_system(tmp_path, monkeypatch):
+    port_range = tmp_path / "ip_local_port_range"
+    port_range.write_text("40000 40999\n")
+    monkeypatch.setattr(config, "LINUX_PORT_RANGE", port_range)
+    assert config.browser_call_udp_ports() == (40000, 40999)
+    monkeypatch.setattr(config, "LINUX_PORT_RANGE", tmp_path / "missing")
+    monkeypatch.setattr(config.sys, "platform", "linux")
+    assert config.browser_call_udp_ports() == (32768, 60999)
 
 
 # Call summaries

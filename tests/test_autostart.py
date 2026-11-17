@@ -390,6 +390,19 @@ def test_an_oscar_that_does_not_answer_properly_counts_as_on_no_call(monkeypatch
     assert autostart.calls_in_progress(cfg) == 0
 
 
+@pytest.mark.parametrize(
+    ("host", "url"),
+    [
+        ("127.0.0.1", "http://127.0.0.1:7860"),
+        ("0.0.0.0", "http://127.0.0.1:7860"),
+        ("::", "http://127.0.0.1:7860"),
+        ("::1", "http://[::1]:7860"),
+    ],
+)
+def test_oscar_listening_at_every_address_is_asked_on_this_machine(tmp_path, host, url):
+    assert autostart.address(make_config(tmp_path, host=host, port=7860)) == url
+
+
 def test_an_oscar_that_is_unreachable_or_unwell_is_not_answering(monkeypatch, cfg):
     def refuse(url, **options):
         raise httpx.ConnectError("refused")

@@ -49,6 +49,10 @@ const state = {
 
 let peer = null;
 let micStream = null;
+// Gives up on a call whose audio has not connected by then. It takes well under a
+// second when it works; browsers can take half a minute to admit it never will.
+const AUDIO_CONNECT_TIMEOUT_MS = 15000;
+let audioConnectTimer = null;
 
 // ---------- helpers ----------
 
@@ -869,10 +873,19 @@ async function startBrowserCall() {
       audio.play().catch(() => {});
       startOrbMeter(audio.srcObject);
     };
+    let audioConnected = false;
     peer.onconnectionstatechange = () => {
-      if (peer && peer.connectionState === "failed") {
-        showError("call-error", "The call dropped. Check your connection and try again.");
-        endBrowserCall();
+      if (!peer) return;
+      if (peer.connectionState === "connected") {
+        audioConnected = true;
+        clearTimeout(audioConnectTimer);
+      } else if (peer.connectionState === "failed") {
+        if (audioConnected) {
+          showError("call-error", "The call dropped. Check your connection and try again.");
+          endBrowserCall();
+        } else {
+          audioNeverConnected();
+        }
       }
     };
 
@@ -891,6 +904,7 @@ async function startBrowserCall() {
     state.callUi = "active";
     focusCall(answer.call_id);
     await peer.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+    if (!audioConnected) audioConnectTimer = setTimeout(audioNeverConnected, AUDIO_CONNECT_TIMEOUT_MS);
   } catch (error) {
     const callId = state.browserCallId;
     cleanupBrowserCall();
@@ -900,7 +914,18 @@ async function startBrowserCall() {
   }
 }
 
+// The call's audio could not get between this browser and Oscar. The server
+// records why (on a server, the firewall's UDP ports), and that reason replaces
+// this message as soon as it arrives.
+function audioNeverConnected() {
+  if (!peer || !state.browserCallId) return; // that call is over already
+  showError("call-error", "The call's audio could not connect to Oscar.");
+  endBrowserCall("audio_failed");
+}
+
 function cleanupBrowserCall() {
+  clearTimeout(audioConnectTimer);
+  audioConnectTimer = null;
   if (peer) {
     peer.ontrack = null;
     peer.onconnectionstatechange = null;
@@ -918,12 +943,15 @@ function cleanupBrowserCall() {
   updateCallUi();
 }
 
-async function endBrowserCall() {
+async function endBrowserCall(reason) {
   const callId = state.browserCallId;
   cleanupBrowserCall();
   if (!callId) return;
   try {
-    await api(`/api/calls/${callId}/end`, { method: "POST" });
+    await api(`/api/calls/${callId}/end`, {
+      method: "POST",
+      body: reason ? JSON.stringify({ reason }) : undefined,
+    });
   } catch {
     // Closing the connection also ends the call on the server.
   }

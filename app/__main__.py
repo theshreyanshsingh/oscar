@@ -21,7 +21,10 @@ def main() -> None:
             "Note: calls stay off until your OpenRouter key is saved. "
             "Run: .venv/bin/python -m scripts.set_keys"
         )
-    print(f"Oscar dashboard: http://{cfg.host}:{cfg.port}")
+    if cfg.host in ("0.0.0.0", "::"):
+        print(f"Oscar dashboard: port {cfg.port}, at every address of this machine")
+    else:
+        print(f"Oscar dashboard: http://{cfg.host}:{cfg.port}")
     # The dashboard's live-update stream never closes on its own, so don't wait
     # on it forever when stopping (Ctrl+C).
     uvicorn.run(
