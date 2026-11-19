@@ -955,3 +955,30 @@ async def test_an_answer_that_cannot_be_had_from_the_fact_sheet_is_explained(ans
     lookup, _ = facts_lookup(answer)
     with pytest.raises(LookupFailed, match=re.escape(reason)):
         await lookup.answer_from_facts("When do you open?", EARLIER)
+
+
+# Connections
+
+
+async def test_the_lookup_opens_its_connection_as_the_call_starts():
+    lookup, requests = lookup_with(openrouter=lambda request: httpx.Response(200, json={"data": {"count": 1}}))
+    await lookup.warm_up()
+    assert [(r.method, str(r.url)) for r in requests] == [("GET", f"{OPENROUTER}/models/count")]
+    assert "authorization" not in requests[0].headers  # nothing the warm-up needs a key for
+
+
+async def test_a_warm_up_that_fails_is_no_failure():
+    def unreachable(request):
+        raise httpx.ConnectError("no route to host")
+
+    lookup, requests = lookup_with(openrouter=unreachable)
+    await lookup.warm_up()  # does not raise
+    assert len(requests) == 1
+
+
+def test_connections_to_openrouter_stay_open_between_turns():
+    from app.openrouter import KEEPALIVE_SECONDS, LIMITS, new_client
+
+    assert LIMITS.keepalive_expiry == KEEPALIVE_SECONDS >= 60
+    client = new_client()
+    assert client._transport._pool._keepalive_expiry == KEEPALIVE_SECONDS

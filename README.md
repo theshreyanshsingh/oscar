@@ -158,6 +158,21 @@ seconds before each reply (1.7 to 2.0 seconds on four real calls on 11 November
 2026; nearly all of it is the model's own time to start speaking). If you carry
 on talking before Oscar answers, it hears everything you said as one piece.
 
+The greeting plays as soon as the call connects. It is the same words each
+time, so it is recorded on the first call and kept in `data/recordings/` (as is
+the "one moment" line), and recorded again after you change the greeting, the
+voice, the accent or the instructions. Asked for on every call, it took 1.8
+seconds to start; recorded, 0.35 seconds after the call was placed (19 November
+2026, on this Mac).
+
+Oscar's log has one line for each reply, saying how long it took to be heard
+and where the time went, for example `Turn 3: heard after 1.19s (answer began
+1.04s, lookup decided 1.19s)`. The time counts from when Oscar judged your turn
+over, about 0.2 seconds after you stopped. With web search on, the reply waits
+for the decision whether to search: a decision later than "answer began" is
+time spent waiting for it (0 to 0.7 seconds on calls measured on 19 November
+2026). On a server, `pm2 logs oscar` shows these lines.
+
 OpenRouter has no live two-way audio connection, which is what the fastest
 voice agents use (well under a second). Getting there would mean a second key,
 straight from a provider that offers one.
@@ -640,8 +655,8 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   text, whether the turn needs a search or the fact sheet (`app/search.py`).
   Nothing of the spoken reply plays until that is known, which is usually
   before the reply is ready. If a search is needed, the reply is dropped, the
-  caller hears a "one moment" line recorded in Oscar's voice when the call
-  began, Firecrawl searches, a text model writes a one or two sentence answer
+  caller hears a "one moment" line recorded in Oscar's voice (once, and kept in
+  `data/recordings/`), Firecrawl searches, a text model writes a one or two sentence answer
   from what was found, and the speech model says that answer word for word. A
   question for the fact sheet goes the same way, without the search.
 - What each search found is kept for the call (`WebLookup` in `app/search.py`).
@@ -665,6 +680,10 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   provider returns an error, or the connection drops) is made once more. A
   refusal that would only repeat, such as a rejected key or an empty account,
   is not, and an answer cut off part-way is not said over again.
+- Connections to OpenRouter stay open between turns (`new_client` in
+  `app/openrouter.py`) and are opened as each call starts, so a turn never
+  waits for a new one. httpx's own default closed them after 5 idle seconds,
+  which is less than a turn and its reply take.
 - Each finished turn is saved to SQLite (`data/oscar.db`) and pushed to the
   dashboard live over Server-Sent Events (`/api/events`).
 - With a script, a text model is asked after each reply which step Oscar is on

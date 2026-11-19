@@ -20,10 +20,15 @@ whether the turn needs looking up (app/search.py). If it does, the model's own
 reply is dropped: the caller hears a "one moment" line (recorded when the call
 began, so it starts at once), and then the model is asked to say the answer
 that was found, word for word.
+
+Lines said the same way on every call (the greeting, the "one moment" line)
+are recorded once and kept (`Recordings`): asked for on each call, the
+greeting took about 1.3 seconds to start.
 """
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import re
@@ -31,7 +36,8 @@ import time
 import wave
 from collections import deque
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 from loguru import logger
@@ -65,7 +71,14 @@ from pipecat.services.settings import ServiceSettings
 from pipecat.utils.text.base_text_aggregator import TextType
 from pipecat.utils.time import time_now_iso8601
 
-from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure, error_detail
+from app.openrouter import (
+    DEFAULT_BASE_URL,
+    auth_headers,
+    describe_failure,
+    error_detail,
+    new_client,
+    warm_up,
+)
 from app.script import ScriptKeeper, ScriptLost
 from app.search import FactsRequest, LookupFailed, SearchRequest, Source, WebLookup
 
@@ -113,7 +126,8 @@ REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 # What the caller hears while a search runs. Asking the model for it only once
 # a search is needed left 4 seconds of silence on real calls, so it is recorded
-# in the agent's voice as each call begins and played the moment it is needed.
+# in the agent's voice ahead of time (as the first call begins, then kept: see
+# `Recordings`) and played the moment it is needed.
 HOLD_LINE = "One moment, let me look that up."
 SEARCH_FAILED_LINE = "Sorry, I couldn't look that up just now."
 # Said when the first results call for one more search (app/search.py), which
@@ -246,6 +260,91 @@ class EchoGate(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class Recordings:
+    """Lines Oscar says the same way on every call, kept as the model said them.
+
+    Each is a file of the model's raw audio, named after everything that shapes
+    how it sounds: the words, the voice, the model and what it was told. When
+    any of those change, the line is recorded again on the next call (and the
+    old recording is removed).
+    """
+
+    def __init__(self, folder: Path):
+        self.folder = folder
+
+    @staticmethod
+    def key(*shaped_by: str) -> str:
+        return hashlib.sha256("\0".join(shaped_by).encode()).hexdigest()[:24]
+
+    def _path(self, line: str, key: str) -> Path:
+        return self.folder / f"{line}-{key}.pcm"
+
+    def get(self, line: str, key: str) -> bytes | None:
+        try:
+            audio = self._path(line, key).read_bytes()
+        except OSError:
+            return None
+        return audio if len(audio) >= 2 else None
+
+    def put(self, line: str, key: str, audio: bytes) -> None:
+        path = self._path(line, key)
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            partial = path.with_suffix(".partial")
+            partial.write_bytes(audio)
+            partial.replace(path)  # never a half-written recording
+            for older in self.folder.glob(f"{line}-*.pcm"):
+                if older != path:
+                    older.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"Could not keep the recording of the {line}: {exc}")
+
+
+@dataclass
+class _Capture:
+    """The audio and words of one answer, as the model sends them, to keep as a recording."""
+
+    audio: bytearray = field(default_factory=bytearray)
+    words: str = ""
+    complete: bool = False  # the answer arrived in full
+
+
+class TurnTiming:
+    """How long one reply took to be heard, step by step, for the log.
+
+    Times are seconds after the caller's turn was judged over (or the greeting
+    was asked for). The caller stopped speaking a little before that: the voice
+    detector waits for 0.2 seconds of silence first. A turn with web search on
+    reads, for example:
+
+        Turn 3: heard after 1.19s (answer began 1.04s, lookup decided 1.19s)
+
+    The answer cannot be played before the lookup is decided, so a decision
+    later than the answer's start is time the caller waited for it.
+    """
+
+    def __init__(self, what: str):
+        self.what = what
+        self._start = time.monotonic()
+        self.marks: dict[str, float] = {}
+
+    def mark(self, step: str) -> None:
+        """Note when `step` first happened (later times of the same step are ignored)."""
+        self.marks.setdefault(step, round(time.monotonic() - self._start, 2))
+
+    def summary(self) -> str | None:
+        """One line for the log, or None when nothing was heard."""
+        heard = self.marks.get("heard")
+        if heard is None:
+            return None
+        steps = [
+            f"{label} {self.marks[step]:.2f}s"
+            for step, label in (("answer", "answer began"), ("decided", "lookup decided"))
+            if step in self.marks
+        ]
+        return f"{self.what}: heard after {heard:.2f}s" + (f" ({', '.join(steps)})" if steps else "")
+
+
 class OpenRouterVoiceService(AIService):
     """Hears each turn of the caller and answers in speech.
 
@@ -269,6 +368,8 @@ class OpenRouterVoiceService(AIService):
         base_url: str = DEFAULT_BASE_URL,
         model: str = VOICE_MODEL,
         client: httpx.AsyncClient | None = None,
+        recordings: Recordings | None = None,
+        warm_up: bool = False,
         **kwargs,
     ):
         super().__init__(settings=ServiceSettings(model=model), **kwargs)
@@ -300,7 +401,17 @@ class OpenRouterVoiceService(AIService):
         self._chat_url = f"{base_url}/chat/completions"
         self._transcript_url = f"{base_url}/audio/transcriptions"
         self._headers = auth_headers(api_key)
-        self._client = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+        self._base_url = base_url
+        self._client = client or new_client(timeout=REQUEST_TIMEOUT)
+        # Transcripts get connections of their own: sent at the same moment as
+        # the request for an answer, one could otherwise take the open
+        # connection and leave the answer to set up a new one.
+        self._transcript_client = client or new_client(timeout=REQUEST_TIMEOUT)
+        # The greeting and the "one moment" line, kept between calls.
+        self._recordings = recordings
+        self._capture: _Capture | None = None
+        # Opens the connections the first turn will use as the call starts.
+        self._warm_up = warm_up
         self._resampler = create_stream_resampler()
         self._in_rate = 16000
         self._out_rate = VOICE_SAMPLE_RATE
@@ -328,6 +439,9 @@ class OpenRouterVoiceService(AIService):
         self._starting_part = True  # the next words open a new part of the reply
         self._reply_text = ""  # the words of the reply so far
         self._transcript_tasks: set[asyncio.Task] = set()
+        # How long the reply in progress is taking, step by step (for the log).
+        self._timing: TurnTiming | None = None
+        self._turns_heard = 0  # for the log: "Turn 3: ..."
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -344,8 +458,16 @@ class OpenRouterVoiceService(AIService):
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
+        if self._warm_up:
+            self.create_task(warm_up(self._client, self._base_url))
+            if self._lookup is not None:
+                self.create_task(self._lookup.warm_up())
         if self._lookup is not None:
-            self._hold_line_task = self.create_task(self._record_hold_line())
+            recorded = self._recorded("hold-line", self._line_instructions, HOLD_LINE)
+            if recorded:
+                self._hold_line = (recorded, HOLD_LINE)
+            else:
+                self._hold_line_task = self.create_task(self._record_hold_line())
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
@@ -358,6 +480,7 @@ class OpenRouterVoiceService(AIService):
     async def cleanup(self):
         await super().cleanup()
         await self._client.aclose()
+        await self._transcript_client.aclose()
         if self._lookup:
             await self._lookup.aclose()
         if self._script:
@@ -449,10 +572,45 @@ class OpenRouterVoiceService(AIService):
     # Replies
 
     async def _speak_greeting(self, greeting: str) -> None:
+        await self._abort_response()
+        self._response_task = self.create_task(self._greet(greeting))
+
+    async def _greet(self, greeting: str) -> None:
+        """Open the call with the greeting: as recorded on an earlier call, or asked for now (and kept)."""
+        # Kept by what shapes how it sounds (who Oscar is, its accent, the owner's
+        # instructions), not by the date or the note about searching that the
+        # full instructions also carry: those would record it again every day.
+        recorded = self._recorded("greeting", self._line_instructions, greeting)
+        if recorded:
+            self._timing = timing = TurnTiming("Greeting (recorded)")
+            await self._play_recorded(recorded, greeting)
+            await self._end_reply(timing)
+            return
+        self._capture = _Capture() if self._recordings else None
         instructions = {"role": "system", "content": self._instructions}
-        await self._start_response(
-            [instructions], {"role": "user", "content": greeting_request(greeting)}
-        )
+        try:
+            await self._respond(
+                [instructions], {"role": "user", "content": greeting_request(greeting)}, None
+            )
+        finally:
+            # Cut off (the caller spoke over it, or hung up), it is not kept,
+            # and no later answer is collected.
+            capture, self._capture = self._capture, None
+        if capture and capture.complete and capture.audio and same_words(capture.words, greeting):
+            self._keep("greeting", bytes(capture.audio), self._line_instructions, greeting)
+
+    def _recording_key(self, *shaped_by: str) -> str:
+        """What a recorded line depends on: its words and how the model was asked to say them."""
+        return Recordings.key(self._settings.model, self._voice, self._reminder, *shaped_by)
+
+    def _recorded(self, line: str, *shaped_by: str) -> bytes | None:
+        if not self._recordings:
+            return None
+        return self._recordings.get(line, self._recording_key(*shaped_by))
+
+    def _keep(self, line: str, audio: bytes, *shaped_by: str) -> None:
+        if self._recordings:
+            self._recordings.put(line, self._recording_key(*shaped_by), audio[: len(audio) & ~1])
 
     def _history(self) -> list[dict]:
         """The agent's instructions and the conversation so far, as text."""
@@ -508,6 +666,7 @@ class OpenRouterVoiceService(AIService):
         """Answer one turn: the model's own reply, or what was looked up for it."""
         from_caller = heard is not None  # not the greeting
         self._reply_text = ""
+        self._timing = timing = TurnTiming("Turn" if from_caller else "Greeting")
         note = self._reminder_message()
         if from_caller:
             await self._settle_place()
@@ -535,9 +694,19 @@ class OpenRouterVoiceService(AIService):
             # The reply is already playing; this only orders the transcript, so
             # the caller's words are written down before Oscar's answer.
             await asyncio.wait({heard[-1]}, timeout=TRANSCRIPT_WAIT_SECONDS)
+        await self._end_reply(timing)
+
+    async def _end_reply(self, timing: TurnTiming) -> None:
+        """Close the reply downstream, and log how long it took to be heard."""
         if self._responding:
             await self.push_frame(LLMFullResponseEndFrame())
         self._responding = self._speaking = self._wrote_text = False
+        if timing.what == "Turn" and "heard" in timing.marks:
+            self._turns_heard += 1
+            timing.what = f"Turn {self._turns_heard}"
+        summary = timing.summary()
+        if summary:
+            logger.info(f"{self}: {summary}")
 
     async def _settle_place(self) -> None:
         """Give a place in the script that is still being worked out a moment to arrive."""
@@ -598,6 +767,8 @@ class OpenRouterVoiceService(AIService):
         """Whether the turn needs the web or the fact sheet. Without a clear yes, neither."""
         try:
             lookup = await self._lookup.decide(earlier, turn)
+            if self._timing:
+                self._timing.mark("decided")
         except LookupFailed as exc:
             logger.warning(f"{self}: {exc}")
             return None
@@ -681,7 +852,10 @@ class OpenRouterVoiceService(AIService):
         if self._hold_line is None:
             await self._say_line(asked, HOLD_LINE)  # not recorded (yet): ask for it now
             return
-        speech, words = self._hold_line
+        await self._play_recorded(*self._hold_line)
+
+    async def _play_recorded(self, speech: bytes, words: str) -> None:
+        """Play a recorded line (audio at the model's rate) and pass on its words."""
         if not self._responding:
             self._responding = True
             await self.push_frame(LLMFullResponseStartFrame())
@@ -718,6 +892,7 @@ class OpenRouterVoiceService(AIService):
             speech = speech[: len(speech) & ~1]
             if speech and same_words(said, HOLD_LINE):
                 self._hold_line = (speech, HOLD_LINE)
+                self._keep("hold-line", speech, self._line_instructions, HOLD_LINE)
                 return
             logger.warning(f"{self}: asked for the hold line, the model said {said!r}")
 
@@ -870,8 +1045,17 @@ class OpenRouterVoiceService(AIService):
         written = 0  # characters of text passed on so far
         sent_seconds = 0.0  # audio passed on so far
         self._starting_part = True
+        capture = self._capture
+        if capture:
+            capture.audio.clear()
+            capture.words, capture.complete = "", False
         try:
             async for speech, text in self._pieces(response):
+                if capture:
+                    capture.audio += speech
+                    capture.words += text
+                if self._timing:
+                    self._timing.mark("answer")
                 if deciding is not None:
                     # The reply is ready to play. Does the turn need a lookup instead?
                     search, deciding = await self._decision(deciding), None
@@ -901,6 +1085,9 @@ class OpenRouterVoiceService(AIService):
                 # Its words may have come, but none of its speech: nothing was said.
                 raise _NotAnswered(reason) from None
             await self.push_error(f"Oscar could not answer: {reason}")
+        else:
+            if capture:
+                capture.complete = True
         # All the audio has been sent, so the rest of the text follows it.
         for text in words:
             await self._write(text)
@@ -920,6 +1107,8 @@ class OpenRouterVoiceService(AIService):
     async def _say(self, audio: bytes) -> None:
         if not self._speaking:
             self._speaking = True
+            if self._timing:
+                self._timing.mark("heard")
             await self.stop_ttfb_metrics()
             await self.push_frame(TTSStartedFrame())
         audio = await self._resampler.resample(audio, VOICE_SAMPLE_RATE, self._out_rate)
@@ -945,7 +1134,7 @@ class OpenRouterVoiceService(AIService):
             },
         }
         try:
-            response = await self._client.post(
+            response = await self._transcript_client.post(
                 self._transcript_url, json=payload, headers=self._headers
             )
         except httpx.HTTPError as exc:

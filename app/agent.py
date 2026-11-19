@@ -34,7 +34,7 @@ from app.calls import CallManager
 from app.config import Config
 from app.script import ScriptKeeper, script_steps
 from app.search import WebLookup
-from app.speech import EchoGate, GreetingFrame, OpenRouterVoiceService
+from app.speech import EchoGate, GreetingFrame, OpenRouterVoiceService, Recordings
 from app.store import ACCENTS, AgentSettings
 from app.summary import start_summary
 
@@ -218,6 +218,9 @@ def build_voice(cfg: Config, agent: AgentSettings, context: LLMContext) -> OpenR
         script=build_script(cfg, agent),
         script_reminder=accent_kept(agent),
         context=context,
+        # Next to the database: each machine records its own.
+        recordings=Recordings(cfg.db_path.parent / "recordings"),
+        warm_up=True,
     )
 
 

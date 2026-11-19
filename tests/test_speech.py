@@ -52,7 +52,9 @@ from app.speech import (
     EchoGate,
     GreetingFrame,
     OpenRouterVoiceService,
+    Recordings,
     SearchingFrame,
+    TurnTiming,
     greeting_request,
     same_words,
     say_request,
@@ -261,6 +263,8 @@ async def run_voice(
     service: type[OpenRouterVoiceService] = OpenRouterVoiceService,
     in_rate: int = 16000,
     out_rate: int = 24000,
+    recordings: Recordings | None = None,
+    warm_up: bool = False,
 ):
     chat = chat or spoken()
     transcription = transcription or written()
@@ -282,6 +286,8 @@ async def run_voice(
         context=context or LLMContext(),
         base_url=BASE_URL,
         client=httpx.AsyncClient(transport=httpx.MockTransport(openrouter)),
+        recordings=recordings,
+        warm_up=warm_up,
     )
     searches: list[tuple[str, str]] = []  # (what was searched for, what went wrong)
     pages: list[list[Source]] = []  # the pages each of them found
@@ -513,6 +519,143 @@ async def test_the_greeting_is_asked_for_word_for_word():
     assert samples_in(call.audio) == int(0.06 * len("Hi, this is Oscar.") * 24000)
     assert call.of(GreetingFrame) == []  # an instruction to the service, not passed on
     assert call.transcriptions == []
+
+
+GREETING = "Hi, this is Oscar."
+
+
+def refusing(request):
+    """A chat endpoint that should not be asked anything."""
+    return httpx.Response(500, json={"error": {"message": "not expected"}})
+
+
+async def test_the_greeting_is_recorded_once_and_played_from_then_on(tmp_path):
+    recordings = Recordings(tmp_path)
+    first = await run_voice(
+        [GreetingFrame(GREETING), SleepFrame(0.5)], chat=spoken(GREETING), recordings=recordings
+    )
+    assert len(first.chat) == 1
+    assert len(list(tmp_path.glob("greeting-*.pcm"))) == 1
+
+    # The next call plays it at once, without asking the model.
+    again = await run_voice(
+        [GreetingFrame(GREETING), SleepFrame(0.5)], chat=refusing, recordings=recordings
+    )
+    assert again.chat == [] and again.errors == []
+    assert again.text == GREETING
+    assert samples_in(again.audio) == samples_in(first.audio) == int(0.06 * len(GREETING) * 24000)
+    assert len(again.of(LLMFullResponseStartFrame)) == len(again.of(LLMFullResponseEndFrame)) == 1
+    assert len(again.of(TTSStartedFrame)) == len(again.of(TTSStoppedFrame)) == 1
+
+
+async def test_a_greeting_said_otherwise_is_not_kept(tmp_path):
+    call = await run_voice(
+        [GreetingFrame(GREETING), SleepFrame(0.5)],
+        chat=spoken("Hello there, Oscar speaking."),
+        recordings=Recordings(tmp_path),
+    )
+    assert call.text == "Hello there, Oscar speaking."  # said as it came
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_greeting_cut_off_is_not_kept(tmp_path):
+    call = await run_voice(
+        [GreetingFrame(GREETING), SleepFrame(0.15), InterruptionFrame(), SleepFrame(0.5)],
+        chat=slowly(GREETING, gap=0.1),
+        recordings=Recordings(tmp_path),
+    )
+    assert call.audio  # some of it was said
+    assert list(tmp_path.iterdir()) == []
+
+
+def failing_part_way(text: str):
+    """A chat endpoint whose answer stops with the provider's error before its last audio."""
+    chunks = list(answer_stream(text))
+    body = "".join(chunks[:-3]) + PROVIDER_ERROR
+    return lambda request: httpx.Response(
+        200, content=body.encode(), headers={"content-type": "text/event-stream"}
+    )
+
+
+async def test_a_greeting_that_failed_part_way_is_not_kept(tmp_path):
+    call = await run_voice(
+        [GreetingFrame(GREETING), SleepFrame(0.5)],
+        chat=failing_part_way(GREETING),
+        recordings=Recordings(tmp_path),
+    )
+    assert call.audio and call.errors
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_new_greeting_is_recorded_in_place_of_the_old(tmp_path):
+    recordings = Recordings(tmp_path)
+    await run_voice([GreetingFrame(GREETING), SleepFrame(0.5)], chat=spoken(GREETING), recordings=recordings)
+    (old,) = tmp_path.glob("greeting-*.pcm")
+    changed = "Hello, Oscar here. How can I help?"
+    call = await run_voice(
+        [GreetingFrame(changed), SleepFrame(0.5)], chat=spoken(changed), recordings=recordings
+    )
+    assert len(call.chat) == 1  # a recording of other words is no use
+    (new,) = tmp_path.glob("greeting-*.pcm")
+    assert new != old
+
+
+def test_a_recording_depends_on_everything_that_shapes_how_it_sounds(tmp_path):
+    def key(**changes):
+        options = {"voice": "cedar", "reminder": "(Indian accent.)", "instructions": INSTRUCTIONS, **changes}
+        service = OpenRouterVoiceService(
+            api_key="sk-or-test",
+            voice=options["voice"],
+            instructions=options["instructions"],
+            reminder=options["reminder"],
+            context=LLMContext(),
+            recordings=Recordings(tmp_path),
+        )
+        return service._recording_key(options["instructions"], GREETING)
+
+    keys = {key(), key(voice="marin"), key(reminder="(British accent.)"), key(instructions="Be chatty.")}
+    assert len(keys) == 4
+    assert key() == key()
+
+
+async def test_a_recorded_hold_line_is_not_asked_for_again(tmp_path):
+    recordings = Recordings(tmp_path)
+    first = await run_voice(
+        [*caller_turn(), SleepFrame(0.8)], chat=saying_lines(), lookup=Lookup(SEARCH, answer=FOUND),
+        recordings=recordings,
+    )
+    assert len(list(tmp_path.glob("hold-line-*.pcm"))) == 1
+    assert any(body["messages"][-1]["content"] == say_request(HOLD_LINE) for body in first.chat)
+
+    again = await run_voice(
+        [*caller_turn(), SleepFrame(0.8)], chat=saying_lines(), lookup=Lookup(SEARCH, answer=FOUND),
+        recordings=recordings,
+    )
+    assert not any(body["messages"][-1]["content"] == say_request(HOLD_LINE) for body in again.chat)
+    assert again.text == f"{HOLD_LINE} {FOUND}"
+    assert samples_in(again.audio) == samples_in(first.audio)
+
+
+async def test_warming_up_opens_a_connection_as_the_call_starts():
+    call = await run_voice([SleepFrame(0.2)], warm_up=True)
+    assert [(r.method, r.url.path) for r in call.requests] == [("GET", "/api/v1/models/count")]
+
+
+async def test_no_warm_up_unless_asked():
+    call = await run_voice([SleepFrame(0.2)])
+    assert call.requests == []
+
+
+def test_the_timing_of_a_reply_is_summed_up_in_one_line(monkeypatch):
+    clock = iter([10.0, 11.04, 11.19, 11.19, 12.0])
+    monkeypatch.setattr(speech.time, "monotonic", lambda: next(clock))
+    timing = TurnTiming("Turn 3")
+    timing.mark("answer")
+    timing.mark("decided")
+    assert timing.summary() is None  # not heard yet
+    timing.mark("heard")
+    timing.mark("heard")  # only the first time counts
+    assert timing.summary() == "Turn 3: heard after 1.19s (answer began 1.04s, lookup decided 1.19s)"
 
 
 def test_greeting_request_quotes_the_greeting():

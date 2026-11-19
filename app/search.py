@@ -49,7 +49,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure
+from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure, new_client, warm_up
 
 DEFAULT_FIRECRAWL_URL = "https://api.firecrawl.dev/v2"
 
@@ -612,10 +612,15 @@ class WebLookup:
         self._facts_reader_instructions = FACTS_READER_INSTRUCTIONS.format(
             name=agent_name, today=today, knowledge=tagged
         )
-        self._client = client or httpx.AsyncClient()
+        self._openrouter_base_url = openrouter_base_url
+        self._client = client or new_client()
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def warm_up(self) -> None:
+        """Open the connection the decision on the first turn will use."""
+        await warm_up(self._client, self._openrouter_base_url)
 
     async def decide(self, earlier: list[dict], turn: dict) -> SearchRequest | FactsRequest | None:
         """Whether the caller's turn (`turn`, as audio) needs a search or the fact sheet, given the talk so far.

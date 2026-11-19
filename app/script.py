@@ -36,7 +36,7 @@ import re
 
 import httpx
 
-from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure
+from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure, new_client
 
 KEEPER_MODEL = "anthropic/claude-haiku-5.5"
 # Room for the thinking before the answer.
@@ -146,7 +146,7 @@ class ScriptKeeper:
         self._instructions = KEEPER_INSTRUCTIONS.format(name=agent_name)
         self._chat_url = f"{base_url}/chat/completions"
         self._headers = auth_headers(api_key)
-        self._client = client or httpx.AsyncClient()
+        self._client = client or new_client()
 
     async def aclose(self) -> None:
         await self._client.aclose()
