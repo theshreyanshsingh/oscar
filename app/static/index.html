@@ -10,7 +10,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=7" />
+    <link rel="stylesheet" href="/static/style.css?v=9" />
   </head>
   <body>
     <header class="nav-shell">
@@ -30,6 +30,7 @@
           <span class="pill" id="agent-pill">Agent: checking…</span>
           <span class="pill" id="phone-pill">Phone: checking…</span>
           <span class="pill" id="search-pill">Web search: checking…</span>
+          <span class="pill" id="credit-pill" hidden>Key: checking…</span>
         </div>
       </nav>
     </header>
@@ -456,6 +457,24 @@
           </p>
         </div>
 
+        <div class="panel panel-soft spend reveal" id="spend" aria-live="polite">
+          <div class="spend-item">
+            <p class="spend-label">Calls, last 24 hours</p>
+            <p class="spend-figure" id="spend-day">—</p>
+            <p class="spend-note">What Oscar counted for each call.</p>
+          </div>
+          <div class="spend-item">
+            <p class="spend-label">Calls, last 30 days</p>
+            <p class="spend-figure" id="spend-month">—</p>
+            <p class="spend-note">Answers, transcripts, searches and summaries.</p>
+          </div>
+          <div class="spend-item">
+            <p class="spend-label">Left on the OpenRouter key</p>
+            <p class="spend-figure" id="spend-left">—</p>
+            <p class="spend-note" id="spend-key-note">Checking with OpenRouter…</p>
+          </div>
+        </div>
+
         <div class="panel panel-outline table-panel reveal">
           <div class="table-wrap">
             <table>
@@ -465,13 +484,14 @@
                   <th scope="col">Type</th>
                   <th scope="col">Number</th>
                   <th scope="col">Length</th>
+                  <th scope="col">Cost</th>
                   <th scope="col">Summary</th>
                   <th scope="col">Status</th>
                   <th scope="col"><span class="visually-hidden">Actions</span></th>
                 </tr>
               </thead>
               <tbody id="calls-body">
-                <tr><td colspan="7" class="muted">No calls yet. Your first one will show up here.</td></tr>
+                <tr><td colspan="8" class="muted">No calls yet. Your first one will show up here.</td></tr>
               </tbody>
             </table>
           </div>
@@ -486,6 +506,36 @@
             <div class="transcript" id="detail-transcript"></div>
           </div>
         </div>
+
+        <div class="panel panel-outline notify reveal">
+          <div class="notify-copy">
+            <h3 class="panel-title">Send each summary to you</h3>
+            <p class="hint">
+              When a call ends and its summary is written, Oscar posts it to this address: a
+              Slack, Discord or Google Chat webhook, or Zapier, Make or your own server.
+            </p>
+          </div>
+          <form id="notify-form" class="notify-form" novalidate>
+            <label class="field-label" for="notify-url">Webhook address</label>
+            <input
+              id="notify-url"
+              name="url"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="https://hooks.slack.com/services/…"
+            />
+            <div class="actions">
+              <button type="submit" class="primary" id="notify-save">
+                <span class="btn-label">Save</span>
+              </button>
+              <button type="button" class="link" id="notify-test" hidden>Send a test</button>
+            </div>
+            <p class="hint" id="notify-status" aria-live="polite"></p>
+            <p class="error" id="notify-error" role="alert" hidden></p>
+          </form>
+        </div>
       </section>
     </main>
 
@@ -496,6 +546,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=18"></script>
+    <script src="/static/app.js?v=20"></script>
   </body>
 </html>

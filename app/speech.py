@@ -71,6 +71,7 @@ from pipecat.services.settings import ServiceSettings
 from pipecat.utils.text.base_text_aggregator import TextType
 from pipecat.utils.time import time_now_iso8601
 
+from app.costs import USAGE, CostMeter
 from app.openrouter import (
     DEFAULT_BASE_URL,
     auth_headers,
@@ -370,6 +371,7 @@ class OpenRouterVoiceService(AIService):
         client: httpx.AsyncClient | None = None,
         recordings: Recordings | None = None,
         warm_up: bool = False,
+        meter: CostMeter | None = None,
         **kwargs,
     ):
         super().__init__(settings=ServiceSettings(model=model), **kwargs)
@@ -412,6 +414,8 @@ class OpenRouterVoiceService(AIService):
         self._capture: _Capture | None = None
         # Opens the connections the first turn will use as the call starts.
         self._warm_up = warm_up
+        # Counts what the call's requests cost (app/costs.py).
+        self._meter = meter
         self._resampler = create_stream_resampler()
         self._in_rate = 16000
         self._out_rate = VOICE_SAMPLE_RATE
@@ -882,9 +886,13 @@ class OpenRouterVoiceService(AIService):
                     if response.status_code != 200:
                         await response.aread()
                         raise _AnswerFailed(describe_failure(response, not_found=_MODEL_MISSING))
-                    async for piece, text in self._pieces(response):
-                        speech += piece
-                        said += text
+                    receipt = {"paid": False}
+                    try:
+                        async for piece, text in self._pieces(response, receipt):
+                            speech += piece
+                            said += text
+                    finally:
+                        self._settle(response, receipt)
             except (httpx.HTTPError, _AnswerFailed) as exc:
                 # Not worth failing a call over: the line is asked for when needed instead.
                 logger.warning(f"{self}: could not record the hold line: {exc!r}")
@@ -968,7 +976,11 @@ class OpenRouterVoiceService(AIService):
                         # A wrong key, an empty account or a missing model stays that way.
                         may_pass=response.status_code >= 500,
                     )
-                return await self._play(response, deciding)
+                receipt = {"paid": False}
+                try:
+                    return await self._play(response, deciding, receipt)
+                finally:
+                    self._settle(response, receipt)
         except httpx.HTTPError as exc:
             # (One that broke off an answer part-way is dealt with in _play.)
             raise _NotAnswered(f"OpenRouter was unreachable ({exc}).") from None
@@ -980,7 +992,13 @@ class OpenRouterVoiceService(AIService):
             "modalities": ["text", "audio"],
             "audio": {"voice": self._voice, "format": "pcm16"},
             "messages": messages,
+            "usage": USAGE,
         }
+
+    def _settle(self, response: httpx.Response, receipt: dict) -> None:
+        """Count a streamed answer that stopped before saying what it cost (it was cut off)."""
+        if self._meter and not receipt["paid"]:
+            self._meter.charge_later(response.headers.get("x-generation-id", ""))
 
     async def _finish_speaking(self) -> None:
         """Close off a stretch of speech (the reply may go on after a pause)."""
@@ -1002,11 +1020,14 @@ class OpenRouterVoiceService(AIService):
             logger.warning("The decision whether to look something up came too late: answering without.")
             return None
 
-    @staticmethod
-    async def _pieces(response: httpx.Response) -> AsyncIterator[tuple[bytes, str]]:
+    async def _pieces(
+        self, response: httpx.Response, receipt: dict | None = None
+    ) -> AsyncIterator[tuple[bytes, str]]:
         """The (speech, its text) pieces of a streamed answer, as they arrive.
 
-        Raises _AnswerFailed when the provider reports an error part-way.
+        What the answer cost comes in its last chunk: it is counted, and
+        `receipt["paid"]` set. Raises _AnswerFailed when the provider reports an
+        error part-way.
         """
         async for line in response.aiter_lines():
             if not line.startswith("data:"):
@@ -1020,6 +1041,10 @@ class OpenRouterVoiceService(AIService):
                 continue
             if not isinstance(chunk, dict):
                 continue
+            if chunk.get("usage") and receipt is not None:
+                if self._meter:
+                    self._meter.charge(chunk)
+                receipt["paid"] = True
             if chunk.get("error"):
                 raise _AnswerFailed(error_detail(chunk) or "the model's provider failed.")
             for choice in chunk.get("choices") or []:
@@ -1033,7 +1058,7 @@ class OpenRouterVoiceService(AIService):
                     yield speech, text or ""
 
     async def _play(
-        self, response: httpx.Response, deciding: asyncio.Task | None
+        self, response: httpx.Response, deciding: asyncio.Task | None, receipt: dict | None = None
     ) -> SearchRequest | FactsRequest | None:
         """Turn the model's streamed answer into speech and text frames.
 
@@ -1050,7 +1075,7 @@ class OpenRouterVoiceService(AIService):
             capture.audio.clear()
             capture.words, capture.complete = "", False
         try:
-            async for speech, text in self._pieces(response):
+            async for speech, text in self._pieces(response, receipt):
                 if capture:
                     capture.audio += speech
                     capture.words += text
@@ -1128,6 +1153,7 @@ class OpenRouterVoiceService(AIService):
         payload = {
             "model": TRANSCRIPT_MODEL,
             "language": TRANSCRIPT_LANGUAGE,
+            "usage": USAGE,
             "input_audio": {
                 "data": base64.b64encode(wav_file(audio, self._in_rate)).decode(),
                 "format": "wav",
@@ -1144,9 +1170,12 @@ class OpenRouterVoiceService(AIService):
             logger.warning(f"{self}: could not transcribe the caller: {describe_failure(response)}")
             return None
         try:
-            text = response.json().get("text")
+            body = response.json()
+            text = body.get("text")
         except (ValueError, AttributeError):
-            text = None
+            body, text = None, None
+        if self._meter:
+            self._meter.charge(body)
         if not isinstance(text, str) or not text.strip():
             return None
         await self.push_frame(

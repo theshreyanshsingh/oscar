@@ -260,7 +260,7 @@ async def test_browser_call_listens_and_speaks(server):
 
         # The caller's words were also written down, for the transcript.
         written = sent(server, "transcriptions")
-        assert written and all(set(body) == {"model", "language", "input_audio"} for body in written)
+        assert written and all(set(body) == {"model", "language", "input_audio", "usage"} for body in written)
         assert all(body["model"] == TRANSCRIPT_MODEL for body in written)
         assert all(body["language"] == "multi" for body in written)  # Hindi too, not English alone
 
@@ -368,8 +368,17 @@ async def test_browser_caller_hanging_up_ends_the_call(server):
         assert call["error"] == ""
 
 
-async def test_a_call_is_summed_up_when_it_ends(server):
+async def test_a_call_is_summed_up_when_it_ends(server, monkeypatch):
     peer, _, _ = make_caller(lead_silence=3.5)
+    # The owner has a webhook for summaries (app/notify.py).
+    delivered: list[dict] = []
+
+    async def deliver(url, payload, client=None):
+        delivered.append({"url": url, **payload})
+        return ""
+
+    monkeypatch.setattr("app.summary.send_summary", deliver)
+    server.app.state.store.save_summary_webhook_url("https://hooks.example.test/oscar")
 
     async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
         recorder = EventRecorder(http)
@@ -422,6 +431,12 @@ async def test_a_call_is_summed_up_when_it_ends(server):
         assert seen[-3:] == [("ended", ""), ("ended", "writing"), ("ended", "ready")]
         assert recorder.events[-1]["call"]["summary"] == call["summary"]
         await recorder.stop()
+
+        # And the summary was sent to the owner, once.
+        ((sent_summary),) = delivered
+        assert sent_summary["url"] == "https://hooks.example.test/oscar"
+        assert sent_summary["call"]["id"] == call_id
+        assert sent_summary["call"]["summary"] == call["summary"]
 
     await peer.close()
 

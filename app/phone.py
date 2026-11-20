@@ -25,6 +25,7 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 from app import agent as voice_agent
 from app.calls import AUDIO_NEVER_CONNECTED, CallManager
 from app.config import Config
+from app.costs import KeyCredit
 from app.store import OPEN_STATUSES, Store
 
 FAILED_CALL_REASONS = {
@@ -117,7 +118,9 @@ async def _read_start_message(websocket: WebSocket) -> dict | None:
     return None
 
 
-def create_phone_router(cfg: Config, calls: CallManager, store: Store) -> APIRouter:
+def create_phone_router(
+    cfg: Config, calls: CallManager, store: Store, credit: KeyCredit | None = None
+) -> APIRouter:
     router = APIRouter(prefix="/twilio")
     validator = RequestValidator(cfg.twilio_auth_token) if cfg.twilio_auth_token else None
 
@@ -145,6 +148,21 @@ def create_phone_router(cfg: Config, calls: CallManager, store: Store) -> APIRou
         if cfg.missing_agent_keys():
             response = VoiceResponse()
             response.say("Sorry, this agent is not set up yet. Goodbye.")
+            response.hangup()
+            return _twiml_response(str(response))
+
+        too_little = await credit.too_little_for_a_call() if credit else ""
+        if too_little:
+            # Kept in the call history, so the owner sees the call it missed and why.
+            missed = calls.create(
+                "phone_inbound",
+                status="connecting",
+                from_number=form.get("From", ""),
+                to_number=form.get("To", ""),
+            )
+            calls.finish(missed["id"], too_little)
+            response = VoiceResponse()
+            response.say("Sorry, this agent cannot take calls right now. Please try again later. Goodbye.")
             response.hangup()
             return _twiml_response(str(response))
 

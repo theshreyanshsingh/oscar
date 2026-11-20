@@ -32,6 +32,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from app.calls import CallManager
 from app.config import Config
+from app.costs import CostMeter
 from app.script import ScriptKeeper, script_steps
 from app.search import WebLookup
 from app.speech import EchoGate, GreetingFrame, OpenRouterVoiceService, Recordings
@@ -175,7 +176,9 @@ def line_instruction(agent: AgentSettings) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
-def build_lookup(cfg: Config, agent: AgentSettings, today: date) -> WebLookup | None:
+def build_lookup(
+    cfg: Config, agent: AgentSettings, today: date, meter: CostMeter | None = None
+) -> WebLookup | None:
     """What a call can look things up in: the web with a Firecrawl key, and the owner's fact sheet."""
     if not cfg.search_enabled and not agent.knowledge.strip():
         return None
@@ -188,10 +191,11 @@ def build_lookup(cfg: Config, agent: AgentSettings, today: date) -> WebLookup | 
         agent_instructions=agent.system_prompt,
         knowledge=agent.knowledge,
         today=spoken_date(today),
+        meter=meter,
     )
 
 
-def build_script(cfg: Config, agent: AgentSettings) -> ScriptKeeper | None:
+def build_script(cfg: Config, agent: AgentSettings, meter: CostMeter | None = None) -> ScriptKeeper | None:
     """What keeps Oscar's place in the owner's script, when there is one."""
     steps = script_steps(agent.script)
     if not steps:
@@ -201,12 +205,15 @@ def build_script(cfg: Config, agent: AgentSettings) -> ScriptKeeper | None:
         agent_name=agent.name,
         api_key=cfg.openrouter_api_key,
         base_url=cfg.openrouter_base_url,
+        meter=meter,
     )
 
 
-def build_voice(cfg: Config, agent: AgentSettings, context: LLMContext) -> OpenRouterVoiceService:
+def build_voice(
+    cfg: Config, agent: AgentSettings, context: LLMContext, meter: CostMeter | None = None
+) -> OpenRouterVoiceService:
     today = date.today()
-    lookup = build_lookup(cfg, agent, today)
+    lookup = build_lookup(cfg, agent, today, meter)
     return OpenRouterVoiceService(
         api_key=cfg.openrouter_api_key,
         base_url=cfg.openrouter_base_url,
@@ -215,12 +222,13 @@ def build_voice(cfg: Config, agent: AgentSettings, context: LLMContext) -> OpenR
         reminder=accent_reminder(agent),
         line_instructions=line_instruction(agent),
         lookup=lookup,
-        script=build_script(cfg, agent),
+        script=build_script(cfg, agent, meter),
         script_reminder=accent_kept(agent),
         context=context,
         # Next to the database: each machine records its own.
         recordings=Recordings(cfg.db_path.parent / "recordings"),
         warm_up=True,
+        meter=meter,
     )
 
 
@@ -245,7 +253,14 @@ async def run_call(
     watchdog: asyncio.Task | None = None
     try:
         context = LLMContext()
-        voice = build_voice(cfg, agent, context)
+        # Everything this call asks OpenRouter for is counted toward it.
+        meter = CostMeter(
+            lambda dollars: calls.add_cost(call_id, dollars),
+            api_key=cfg.openrouter_api_key,
+            base_url=cfg.openrouter_base_url,
+            spawn=calls.spawn,
+        )
+        voice = build_voice(cfg, agent, context, meter)
         # Realtime mode: the caller's turn ends on their silence alone, without
         # waiting for a transcript (the model hears the audio itself).
         end_of_turn = LocalSmartTurnAnalyzerV3(
@@ -374,4 +389,4 @@ async def run_call(
         # never delays a reply or the hang-up.
         call = calls.store.get_call(call_id)
         if call:
-            start_summary(cfg, calls, call, agent)
+            start_summary(cfg, calls, call, agent, notify=True)

@@ -104,8 +104,16 @@ def is_answering(cfg: Config) -> bool:
 
 
 def calls_in_progress(cfg: Config) -> int:
-    """How many calls Oscar is on right now (none, if it is not answering at all)."""
+    """How many calls Oscar is on right now (none, if it is not answering at all).
+
+    Asked of /healthz, which stays open when Cloudflare Access guards the rest.
+    An Oscar from before 20 November 2026 does not say there, so it is asked
+    the old way, at /api/status.
+    """
     try:
+        health = httpx.get(f"{address(cfg)}/healthz", timeout=3).json()
+        if isinstance(health, dict) and isinstance(health.get("calls"), int):
+            return health["calls"]
         status = httpx.get(f"{address(cfg)}/api/status", timeout=3).json()
         return len(status["active_call_ids"])
     except (httpx.HTTPError, ValueError, LookupError, TypeError):

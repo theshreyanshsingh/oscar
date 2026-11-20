@@ -564,6 +564,8 @@ def env(monkeypatch):
         "OPENROUTER_BASE_URL",
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_BASE_URL",
+        "CF_ACCESS_TEAM_DOMAIN",
+        "CF_ACCESS_AUD",
     ]:
         monkeypatch.delenv(name, raising=False)
     return monkeypatch

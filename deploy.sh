@@ -205,14 +205,18 @@ fi
 
 step "Done: commit $(git log -1 --format='%h') is live"
 [ -f .env ] || echo "Oscar has no keys yet: run .venv/bin/python -m scripts.set_keys, then pm2 restart oscar."
-# Reachable from other machines (HOST=0.0.0.0): browser calls also need their UDP ports let in.
-udp="$(.venv/bin/python -c '
+# Reachable from other machines (HOST=0.0.0.0): browser calls also need their UDP ports let in, and without
+# Cloudflare Access anyone who reaches the port can use Oscar.
+.venv/bin/python -c '
 from app.config import browser_call_udp_ports, load_config
-print("" if load_config().local_only else "%d-%d" % browser_call_udp_ports())
-' 2>/dev/null || true)"
-if [ -n "$udp" ]; then
-  echo "Browser calls send their audio straight to this server, not through its web address: let in UDP $udp in the firewall (on EC2, the security group)."
-fi
+cfg = load_config()
+if not cfg.local_only:
+    print("Browser calls send their audio straight to this server, not through its web address: let in UDP %d-%d in the firewall (on EC2, the security group)." % browser_call_udp_ports())
+    if cfg.access_required:
+        print("The dashboard only opens for people signed in through Cloudflare Access (%s)." % cfg.access_team_domain)
+    else:
+        print("WARNING: anyone who can reach this server on port %d can use Oscar, your OpenRouter credit and its call history. Put Cloudflare Access in front of it: README.md, Protect the dashboard." % cfg.port)
+' 2>/dev/null || true
 if [ -x .venv-whatsapp/bin/python ] && [ ! -f data/whatsapp-session.sqlite3 ]; then
   echo "WhatsApp is not linked yet: link it from the dashboard's WhatsApp card (README.md, Set up WhatsApp)."
 fi

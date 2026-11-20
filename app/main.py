@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
@@ -20,7 +21,10 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pydantic import BaseModel, Field
 
 from app import agent as voice_agent
+from app.access import CloudflareAccess, RequireAccess
 from app.calls import CallManager
+from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
+from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
 from app.config import (
     ROOT_DIR,
     Config,
@@ -63,12 +67,29 @@ class EndCallRequest(BaseModel):
     reason: Literal["audio_failed"] | None = None
 
 
+class SummaryWebhook(BaseModel):
+    url: str = Field(default="", max_length=4000)
+
+
 class PhoneCallRequest(BaseModel):
     to: str = Field(pattern=r"^\+[1-9]\d{7,14}$", description="E.164 number, e.g. +14155550123")
 
 
-def create_app(cfg: Config | None = None) -> FastAPI:
+def create_app(
+    cfg: Config | None = None,
+    *,
+    access: CloudflareAccess | None = None,
+    credit: KeyCredit | None = None,
+) -> FastAPI:
+    """The web server.
+
+    `access` and `credit` replace the Cloudflare Access checker the settings ask
+    for and the reader of what is left on the OpenRouter key (for tests).
+    """
     cfg = cfg or load_config()
+    credit = credit or KeyCredit(api_key=cfg.openrouter_api_key, base_url=cfg.openrouter_base_url)
+    if access is None and cfg.access_required:
+        access = CloudflareAccess(cfg.access_team_domain, cfg.access_audience)
     store = Store(cfg.db_path)
     bus = EventBus()
     calls = CallManager(store, bus)
@@ -80,6 +101,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if stale:
             logger.info(f"Closed {stale} call(s) left open by a previous run")
         store.forget_unfinished_summaries()
+        if access is not None:
+            logger.info(
+                f"Only people signed in through Cloudflare Access ({access.team_domain}) can use the "
+                "dashboard. /healthz and Twilio's webhooks stay open."
+            )
+        elif not cfg.local_only:
+            logger.warning(
+                "Anyone who can reach this port can use the dashboard: it has no password. "
+                "Put Cloudflare Access in front of it (README.md, Protect the dashboard)."
+            )
         if not cfg.local_only:
             low, high = browser_call_udp_ports()
             logger.info(
@@ -90,6 +121,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         await calls.shutdown()
         await webrtc.close()
         store.close()
+        if access is not None:
+            await access.aclose()
+        await credit.aclose()
 
     app = FastAPI(title="Oscar", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.cfg = cfg
@@ -100,10 +134,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         # Only this computer can open it: refusing other Host names stops web
         # pages from reaching this server through DNS rebinding.
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
-    # Otherwise (HOST=0.0.0.0 on a server) anyone who can reach the port can use
-    # it, at any address: there is no password, so the firewall decides who can.
+    # Otherwise (HOST=0.0.0.0 on a server) it answers at any address. There is no
+    # password: Cloudflare Access decides who gets in when it is set up, and
+    # otherwise the firewall does.
+    if access is not None:
+        app.add_middleware(RequireAccess, access=access)
 
-    app.include_router(create_phone_router(cfg, calls, store))
+    app.include_router(create_phone_router(cfg, calls, store, credit))
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     def require_agent_keys() -> None:
@@ -114,13 +151,21 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 detail=f"Add {' and '.join(missing)} to the .env file, then restart the server.",
             )
 
+    async def require_credit() -> None:
+        """No new call when the OpenRouter key's own limit is all but used up."""
+        too_little = await credit.too_little_for_a_call()
+        if too_little:
+            raise HTTPException(status_code=402, detail=too_little)
+
     @app.get("/", include_in_schema=False)
     async def dashboard() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/healthz")
     async def healthz() -> dict:
-        return {"ok": True}
+        # Open even behind Cloudflare Access: deploy.sh and scripts/autostart.py
+        # ask it whether Oscar is up and how many calls it is on.
+        return {"ok": True, "calls": len(calls.active_call_ids)}
 
     @app.get("/api/status")
     async def status() -> dict:
@@ -137,6 +182,44 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "accents": ACCENTS,
             "active_call_ids": calls.active_call_ids,
         }
+
+    @app.get("/api/spending")
+    async def spending() -> dict:
+        """What Oscar's calls cost lately, and what the OpenRouter key has spent and has left."""
+        now = datetime.now(timezone.utc)
+        return {
+            # As OpenRouter counts it: everything that uses the key (WhatsApp too,
+            # and any other app given the same key). None when it could not say.
+            "key": await credit.get(),
+            # What Oscar counted for its own calls (app/costs.py).
+            "calls": {
+                "last_24_hours": round(store.calls_cost_since(now - timedelta(days=1)), 4),
+                "last_30_days": round(store.calls_cost_since(now - timedelta(days=30)), 4),
+            },
+            "call_minimum": CALL_MINIMUM_DOLLARS,
+        }
+
+    @app.get("/api/summary-webhook")
+    async def get_summary_webhook() -> dict:
+        return store.get_summary_webhook()
+
+    @app.put("/api/summary-webhook")
+    async def save_summary_webhook(webhook: SummaryWebhook) -> dict:
+        try:
+            url = webhook_url(webhook.url)
+        except WebhookRefused as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return store.save_summary_webhook_url(url)
+
+    @app.post("/api/summary-webhook/test")
+    async def test_summary_webhook() -> dict:
+        """Send a made-up summary to the saved address, to see it arrive."""
+        url = store.get_summary_webhook()["url"]
+        if not url:
+            raise HTTPException(status_code=400, detail="Save an address first.")
+        problem = await send_summary(url, summary_payload(SAMPLE_CALL, agent_name=store.get_agent().name))
+        store.record_summary_webhook_result(problem or "sent")
+        return {"sent": not problem, "problem": problem, **store.get_summary_webhook()}
 
     @app.get("/api/agent")
     async def get_agent() -> AgentSettings:
@@ -165,6 +248,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.post("/api/calls/browser")
     async def start_browser_call(offer: BrowserCallOffer) -> dict:
         require_agent_keys()
+        await require_credit()
         agent = store.get_agent()
         started: dict[str, str] = {}
 
@@ -209,6 +293,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.post("/api/calls/phone")
     async def start_phone_call(request: PhoneCallRequest) -> dict:
         require_agent_keys()
+        await require_credit()
         missing = cfg.missing_phone_settings()
         if missing:
             raise HTTPException(

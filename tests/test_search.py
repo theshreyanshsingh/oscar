@@ -238,7 +238,7 @@ async def test_the_decision_is_asked_of_the_speech_model_in_text():
     assert str(request.url) == f"{OPENROUTER}/chat/completions"
     assert request.headers["authorization"] == "Bearer sk-or-test"
     body = json_of(request)
-    assert set(body) == {"model", "modalities", "temperature", "max_tokens", "messages"}
+    assert set(body) == {"model", "modalities", "temperature", "max_tokens", "messages", "usage"}
     # The model that hears the caller, answering in text only and in one piece.
     assert (body["model"], body["modalities"]) == (ROUTER_MODEL, ["text"])
     system, *earlier, turn = body["messages"]
@@ -403,7 +403,7 @@ async def test_a_text_model_writes_the_answer_from_the_results():
     assert text == ' It is "sunny".\n'  # as the model wrote it: answer() makes of it what Oscar says
 
     body = json_of(requests[0])
-    assert set(body) == {"model", "temperature", "max_tokens", "reasoning", "messages"}
+    assert set(body) == {"model", "temperature", "max_tokens", "reasoning", "messages", "usage"}
     assert body["model"] == READER_MODEL
     # Thinking first doubled the wait and ate the answer's own token budget.
     assert body["reasoning"] == {"enabled": False}

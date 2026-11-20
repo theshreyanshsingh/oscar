@@ -1413,3 +1413,97 @@ td.summary .has-research {
     font-size: 12px;
   }
 }
+
+/* Spending: what calls cost, and what is left on the OpenRouter key */
+
+.spend {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  padding: 24px 30px;
+}
+
+.spend-item {
+  min-width: 0;
+}
+
+.spend-item + .spend-item {
+  padding-left: 24px;
+  border-left: 1px solid var(--line);
+}
+
+.spend-label {
+  margin: 0;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.spend-figure {
+  margin: 6px 0 4px;
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.spend-figure.low {
+  color: var(--red);
+}
+
+.spend-note {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+td.cost {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 860px) {
+  .spend {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    padding: 20px;
+  }
+
+  .spend-item + .spend-item {
+    padding: 16px 0 0;
+    border-left: none;
+    border-top: 1px solid var(--line);
+  }
+}
+
+/* Summaries sent to the owner */
+
+.notify {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 32px;
+  align-items: start;
+  margin-top: var(--gutter);
+}
+
+.notify-copy .hint {
+  max-width: 420px;
+  margin-top: 8px;
+}
+
+.notify-form .actions {
+  align-items: center;
+  gap: 20px;
+}
+
+.notify-form .hint {
+  margin-top: 12px;
+}
+
+@media (max-width: 860px) {
+  .notify {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+}

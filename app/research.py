@@ -29,6 +29,7 @@ import re
 
 import httpx
 
+from app.costs import USAGE, CostMeter
 from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure
 
 RESEARCH_MODEL = "anthropic/claude-haiku-5.5"
@@ -231,6 +232,7 @@ async def write_research(
     api_key: str,
     base_url: str = DEFAULT_BASE_URL,
     client: httpx.AsyncClient | None = None,
+    meter: CostMeter | None = None,
 ) -> list[dict]:
     """The research notes of a call, from its transcript (as text) and what its searches found.
 
@@ -244,6 +246,7 @@ async def write_research(
         return []
     payload = {
         "model": RESEARCH_MODEL,
+        "usage": USAGE,
         "temperature": 0,
         "max_tokens": RESEARCH_MAX_TOKENS,
         # A little thinking first, as for the summary: nobody is waiting on the line.
@@ -274,8 +277,14 @@ async def write_research(
             describe_failure(response, not_found=f"OpenRouter no longer offers {RESEARCH_MODEL}.")
         )
     try:
-        text = response.json()["choices"][0]["message"]["content"]
-    except (ValueError, LookupError, TypeError):
+        body = response.json()
+    except ValueError:
+        body = None
+    if meter:
+        meter.charge(body)
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except (LookupError, TypeError):
         text = None
     # What was asked about: the caller's own words, and what was searched for
     # on their behalf (the transcriber may write "seven seven four seven" where

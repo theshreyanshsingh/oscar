@@ -266,6 +266,12 @@ class Store:
                     reply_in_private_chats INTEGER NOT NULL,
                     own_number INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS summary_webhook (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    url TEXT NOT NULL DEFAULT '',
+                    last_result TEXT NOT NULL DEFAULT '',
+                    last_at TEXT NOT NULL DEFAULT ''
+                );
                 CREATE TABLE IF NOT EXISTS whatsapp_activity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_name TEXT NOT NULL,
@@ -286,6 +292,8 @@ class Store:
             ("agent", "knowledge", "TEXT NOT NULL DEFAULT ''"),
             ("agent", "script", "TEXT NOT NULL DEFAULT ''"),
             ("whatsapp_settings", "own_number", "INTEGER NOT NULL DEFAULT 0"),
+            # What the call cost on OpenRouter, in dollars (app/costs.py).
+            ("calls", "cost", "REAL NOT NULL DEFAULT 0"),
             *(("calls", column, "TEXT NOT NULL DEFAULT ''") for column in _SUMMARY_COLUMNS),
         ):
             columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
@@ -386,6 +394,20 @@ class Store:
                 )
         return self.get_call(call_id)
 
+    def add_call_cost(self, call_id: str, dollars: float) -> None:
+        """Add what one of the call's requests cost to what the call has cost so far."""
+        with self._lock:
+            self._db.execute("UPDATE calls SET cost = cost + ? WHERE id = ?", (dollars, call_id))
+
+    def calls_cost_since(self, since: datetime) -> float:
+        """What the calls started since then cost, in dollars."""
+        stamp = since.astimezone(timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COALESCE(SUM(cost), 0) AS total FROM calls WHERE started_at >= ?", (stamp,)
+            ).fetchone()
+        return float(row["total"])
+
     def get_call(self, call_id: str) -> dict | None:
         with self._lock:
             row = self._db.execute("SELECT * FROM calls WHERE id = ?", (call_id,)).fetchone()
@@ -482,6 +504,34 @@ class Store:
         call["duration_seconds"] = _duration_seconds(call["started_at"], call["ended_at"])
         call["research"] = json.loads(call["research"]) if call["research"] else []
         return call
+
+    # Where each call's summary is sent (app/notify.py)
+
+    def get_summary_webhook(self) -> dict:
+        """{"url", "last_result" ("sent" or what went wrong), "last_at"}; url "" when none is set."""
+        with self._lock:
+            row = self._db.execute("SELECT * FROM summary_webhook WHERE id = 1").fetchone()
+        if row is None:
+            return {"url": "", "last_result": "", "last_at": ""}
+        return {"url": row["url"], "last_result": row["last_result"], "last_at": row["last_at"]}
+
+    def save_summary_webhook_url(self, url: str) -> dict:
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO summary_webhook (id, url) VALUES (1, ?)
+                ON CONFLICT (id) DO UPDATE SET url = excluded.url, last_result = '', last_at = ''
+                """,
+                (url,),
+            )
+        return self.get_summary_webhook()
+
+    def record_summary_webhook_result(self, result: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE summary_webhook SET last_result = ?, last_at = ? WHERE id = 1",
+                (result[:500], utc_now()),
+            )
 
     # WhatsApp (written by the WhatsApp process, read by the dashboard)
 

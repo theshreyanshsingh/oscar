@@ -36,6 +36,7 @@ import re
 
 import httpx
 
+from app.costs import USAGE, CostMeter
 from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure, new_client
 
 KEEPER_MODEL = "anthropic/claude-haiku-5.5"
@@ -138,6 +139,7 @@ class ScriptKeeper:
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
         client: httpx.AsyncClient | None = None,
+        meter: CostMeter | None = None,
     ):
         self.steps = steps
         # The step Oscar is on, counted from 0. len(steps) once the script is finished.
@@ -147,6 +149,7 @@ class ScriptKeeper:
         self._chat_url = f"{base_url}/chat/completions"
         self._headers = auth_headers(api_key)
         self._client = client or new_client()
+        self._meter = meter  # counts what the call's requests cost (app/costs.py)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -162,6 +165,7 @@ class ScriptKeeper:
         script = "\n".join(f"{number}. {step}" for number, step in enumerate(self.steps, 1))
         payload = {
             "model": KEEPER_MODEL,
+            "usage": USAGE,
             "temperature": 0,
             "max_tokens": KEEPER_MAX_TOKENS,
             "reasoning": {"effort": "low"},  # see KEEPER_INSTRUCTIONS
@@ -187,8 +191,14 @@ class ScriptKeeper:
                 describe_failure(response, not_found=f"OpenRouter no longer offers {KEEPER_MODEL}.")
             )
         try:
-            text = response.json()["choices"][0]["message"]["content"]
-        except (ValueError, LookupError, TypeError):
+            body = response.json()
+        except ValueError:
+            body = None
+        if self._meter:
+            self._meter.charge(body)
+        try:
+            text = body["choices"][0]["message"]["content"]
+        except (LookupError, TypeError):
             text = None
         place = parse_place(text, self.steps)
         if place is None:

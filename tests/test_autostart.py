@@ -363,17 +363,32 @@ def test_oscar_is_asked_whether_it_is_up_and_how_many_calls_it_is_on(monkeypatch
 
     def get(url, **options):
         asked.append((url, options))
-        return Answer(body={"active_call_ids": ["a", "b"]} if url.endswith("/api/status") else {"ok": True})
+        return Answer(body={"ok": True, "calls": 2})
 
     monkeypatch.setattr(autostart.httpx, "get", get)
     cfg = make_config(tmp_path, port=7860)
 
     assert autostart.is_answering(cfg) is True
     assert autostart.calls_in_progress(cfg) == 2
+    # Both at /healthz, which stays open when Cloudflare Access guards the rest.
     assert asked == [
         ("http://127.0.0.1:7860/healthz", {"timeout": 2}),
-        ("http://127.0.0.1:7860/api/status", {"timeout": 3}),
+        ("http://127.0.0.1:7860/healthz", {"timeout": 3}),
     ]
+
+
+def test_an_older_oscar_is_asked_for_its_calls_the_old_way(monkeypatch, tmp_path):
+    # Before 20 November 2026 /healthz said only {"ok": true}. Restarting such an
+    # Oscar after pulling the new code must still notice a call in progress.
+    asked = []
+
+    def get(url, **options):
+        asked.append(url)
+        return Answer(body={"active_call_ids": ["a"]} if url.endswith("/api/status") else {"ok": True})
+
+    monkeypatch.setattr(autostart.httpx, "get", get)
+    assert autostart.calls_in_progress(make_config(tmp_path, port=7860)) == 1
+    assert asked == ["http://127.0.0.1:7860/healthz", "http://127.0.0.1:7860/api/status"]
 
 
 @pytest.mark.parametrize(

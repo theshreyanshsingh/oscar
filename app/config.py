@@ -4,6 +4,7 @@ See .env.example for what each value does.
 """
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,11 @@ class Config:
     openrouter_base_url: str = DEFAULT_BASE_URL
     firecrawl_api_key: str = ""
     firecrawl_base_url: str = DEFAULT_FIRECRAWL_URL
+    # Cloudflare Access, when it guards the dashboard (app/access.py): the team
+    # domain, such as "yourteam.cloudflareaccess.com", and the application's
+    # audience (AUD) tag. Both or neither.
+    access_team_domain: str = ""
+    access_audience: str = ""
 
     @property
     def local_only(self) -> bool:
@@ -45,6 +51,11 @@ class Config:
         decides who can.
         """
         return self.host in LOCAL_ONLY_HOSTS
+
+    @property
+    def access_required(self) -> bool:
+        """Whether only people signed in through Cloudflare Access may use the dashboard."""
+        return bool(self.access_team_domain and self.access_audience)
 
     @property
     def search_enabled(self) -> bool:
@@ -134,6 +145,14 @@ def load_config() -> Config:
 
     db_path = Path(_env("DATABASE_PATH") or ROOT_DIR / "data" / "oscar.db")
 
+    team_domain = access_team_domain(_env("CF_ACCESS_TEAM_DOMAIN"))
+    audience = _env("CF_ACCESS_AUD")
+    if bool(team_domain) != bool(audience):
+        raise ConfigError(
+            "Cloudflare Access needs both CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD in .env "
+            "(or neither, to leave the dashboard open)."
+        )
+
     return Config(
         openrouter_api_key=_env("OPENROUTER_API_KEY"),
         twilio_account_sid=_env("TWILIO_ACCOUNT_SID"),
@@ -146,4 +165,24 @@ def load_config() -> Config:
         openrouter_base_url=_env("OPENROUTER_BASE_URL").rstrip("/") or DEFAULT_BASE_URL,
         firecrawl_api_key=_env("FIRECRAWL_API_KEY"),
         firecrawl_base_url=_env("FIRECRAWL_BASE_URL").rstrip("/") or DEFAULT_FIRECRAWL_URL,
+        access_team_domain=team_domain,
+        access_audience=audience,
     )
+
+
+def access_team_domain(value: str) -> str:
+    """The team domain as Cloudflare writes it ("yourteam.cloudflareaccess.com"), from what was given.
+
+    "https://yourteam.cloudflareaccess.com/" is taken too. Anything that is not a
+    Cloudflare Access team domain is refused: the dashboard's own address in its
+    place would let nobody in, without saying why.
+    """
+    domain = value.strip().removeprefix("https://").removeprefix("http://").rstrip("/").lower()
+    if not domain:
+        return ""
+    if "/" in domain or not re.fullmatch(r"[a-z0-9-]+\.cloudflareaccess\.com", domain):
+        raise ConfigError(
+            f"CF_ACCESS_TEAM_DOMAIN must be your Cloudflare Access team domain, like "
+            f"yourteam.cloudflareaccess.com (got {value.strip()!r})."
+        )
+    return domain

@@ -111,6 +111,17 @@ function formatDuration(totalSeconds) {
   return `${minutes}:${seconds}`;
 }
 
+// Dollars, as precisely as a call's cost needs: "$0.031", "$1.24".
+function formatCost(dollars) {
+  if (typeof dollars !== "number" || !(dollars > 0)) return "—";
+  if (dollars < 0.001) return "<$0.001";
+  return dollars < 1 ? `$${dollars.toFixed(3)}` : `$${dollars.toFixed(2)}`;
+}
+
+function formatDollars(dollars) {
+  return `$${Math.max(dollars, 0).toFixed(2)}`;
+}
+
 function formatTime(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
@@ -253,6 +264,10 @@ function summaryRows(call) {
 function renderSummary(container, call, searches = []) {
   const rows = call ? summaryRows(call) : [];
   if (call && searches.length) rows.push(["Searches", searchList(searches)]);
+  if (call && call.cost > 0) {
+    const sofar = OPEN_STATUSES.has(call.status) || call.summary_status === "writing";
+    rows.push(["Cost", `${formatCost(call.cost)}${sofar ? " so far" : ""}, on OpenRouter`]);
+  }
   const list = document.createElement("dl");
   list.className = "facts";
   for (const [label, content] of rows) {
@@ -264,6 +279,112 @@ function renderSummary(container, call, searches = []) {
   }
   container.replaceChildren(list);
   container.hidden = !rows.length;
+}
+
+// ---------- spending ----------
+
+const SPENDING_POLL_MS = 30000;
+let spendingTimer = null;
+
+async function loadSpending() {
+  const spending = await api("/api/spending");
+  $("spend-day").textContent = formatDollars(spending.calls.last_24_hours);
+  $("spend-month").textContent = formatDollars(spending.calls.last_30_days);
+
+  const key = spending.key;
+  const left = $("spend-left");
+  const note = $("spend-key-note");
+  const pill = $("credit-pill");
+  const low = Boolean(key && key.left !== null && key.left < spending.call_minimum);
+  left.classList.toggle("low", low);
+  if (!key) {
+    left.textContent = "—";
+    note.textContent = "OpenRouter did not say just now.";
+    pill.hidden = true;
+    return;
+  }
+  const spent = `${formatDollars(key.today)} spent today, ${formatDollars(key.this_month)} this month`;
+  if (key.left === null) {
+    left.textContent = "No limit";
+    note.textContent = `${spent}. The key has no spending limit of its own.`;
+    pill.hidden = true;
+    return;
+  }
+  left.textContent = formatDollars(key.left);
+  const resets = key.resets ? `, resets ${key.resets}` : "";
+  note.textContent = low
+    ? `Calls are off until the limit resets or is raised. Limit ${formatDollars(key.limit)}${resets}.`
+    : `of its ${formatDollars(key.limit)} limit${resets}. ${spent}, counting everything that uses the key.`;
+  pill.textContent = `Key: ${formatDollars(key.left)} left`;
+  pill.classList.toggle("off", low);
+  pill.hidden = false;
+}
+
+// A call's cost grows after it ends too (its summary), so look again shortly after a change.
+function refreshSpendingSoon() {
+  clearTimeout(spendingTimer);
+  spendingTimer = setTimeout(() => loadSpending().catch(() => {}), 2000);
+}
+
+function pollSpending() {
+  setInterval(() => {
+    if (document.visibilityState === "visible") loadSpending().catch(() => {});
+  }, SPENDING_POLL_MS);
+}
+
+// ---------- summaries sent to the owner ----------
+
+function renderNotify(webhook, { fill = false } = {}) {
+  if (fill) $("notify-url").value = webhook.url;
+  $("notify-test").hidden = !webhook.url;
+  const status = $("notify-status");
+  if (!webhook.url) {
+    status.textContent = "Nothing is sent until you save an address.";
+  } else if (!webhook.last_at) {
+    status.textContent = "Saved. Summaries are sent from the next call.";
+  } else if (webhook.last_result === "sent") {
+    status.textContent = `Last sent ${formatTime(webhook.last_at)}: it arrived.`;
+  } else {
+    status.textContent = `Last tried ${formatTime(webhook.last_at)}: ${webhook.last_result}`;
+  }
+}
+
+async function loadNotify() {
+  renderNotify(await api("/api/summary-webhook"), { fill: true });
+}
+
+async function saveNotify(event) {
+  event.preventDefault();
+  showError("notify-error", "");
+  const button = $("notify-save");
+  button.disabled = true;
+  try {
+    const webhook = await api("/api/summary-webhook", {
+      method: "PUT",
+      body: JSON.stringify({ url: $("notify-url").value }),
+    });
+    renderNotify(webhook, { fill: true });
+  } catch (error) {
+    showError("notify-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testNotify() {
+  showError("notify-error", "");
+  const button = $("notify-test");
+  button.disabled = true;
+  $("notify-status").textContent = "Sending a test…";
+  try {
+    const result = await api("/api/summary-webhook/test", { method: "POST" });
+    renderNotify(result);
+    if (!result.sent) showError("notify-error", result.problem);
+  } catch (error) {
+    showError("notify-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ---------- status & setup ----------
@@ -429,7 +550,7 @@ function renderCalls() {
   if (!calls.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 7;
+    cell.colSpan = 8;
     cell.className = "muted";
     cell.textContent = "No calls yet. Your first one will show up here.";
     row.append(cell);
@@ -449,6 +570,7 @@ function renderCallRow(call) {
     KIND_LABELS[call.kind] || call.kind,
     callNumber(call),
     formatDuration(call.duration_seconds),
+    formatCost(call.cost),
     call.error ? `${status}: ${call.error}` : status,
   ];
   for (const text of cells) {
@@ -456,8 +578,9 @@ function renderCallRow(call) {
     cell.textContent = text;
     row.append(cell);
   }
-  row.cells[4].className = "wrap";
-  row.insertBefore(summaryCell(call), row.cells[4]);
+  row.cells[4].className = "cost";
+  row.cells[5].className = "wrap";
+  row.insertBefore(summaryCell(call), row.cells[5]);
 
   const actions = document.createElement("td");
   const view = document.createElement("button");
@@ -642,6 +765,8 @@ function tickTimer() {
 // ---------- events from the server ----------
 
 function onCallChanged(call) {
+  const before = state.calls.get(call.id);
+  if (before && before.cost !== call.cost) refreshSpendingSoon();
   state.calls.set(call.id, call);
   renderCalls();
 
@@ -1173,6 +1298,8 @@ async function init() {
   $("detail-close").addEventListener("click", closeDetail);
   $("detail-summarise").addEventListener("click", writeSummary);
   $("whatsapp-form").addEventListener("submit", saveWhatsApp);
+  $("notify-form").addEventListener("submit", saveNotify);
+  $("notify-test").addEventListener("click", testNotify);
   window.addEventListener("beforeunload", () => {
     if (state.browserCallId) {
       navigator.sendBeacon(`/api/calls/${state.browserCallId}/end`);
@@ -1183,7 +1310,7 @@ async function init() {
   try {
     // Status first: it fills the voice and accent lists, which the agent form then selects from.
     await loadStatus();
-    await Promise.all([loadAgent(), loadCalls(), loadWhatsApp()]);
+    await Promise.all([loadAgent(), loadCalls(), loadWhatsApp(), loadSpending(), loadNotify()]);
   } catch (error) {
     const notice = $("setup-notice");
     notice.textContent = `Could not reach the server: ${error.message}`;
@@ -1192,6 +1319,7 @@ async function init() {
   }
   connectEvents();
   pollWhatsApp();
+  pollSpending();
 }
 
 init();

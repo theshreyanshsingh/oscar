@@ -265,6 +265,7 @@ async def run_voice(
     out_rate: int = 24000,
     recordings: Recordings | None = None,
     warm_up: bool = False,
+    meter=None,
 ):
     chat = chat or spoken()
     transcription = transcription or written()
@@ -288,6 +289,7 @@ async def run_voice(
         client=httpx.AsyncClient(transport=httpx.MockTransport(openrouter)),
         recordings=recordings,
         warm_up=warm_up,
+        meter=meter,
     )
     searches: list[tuple[str, str]] = []  # (what was searched for, what went wrong)
     pages: list[list[Source]] = []  # the pages each of them found
@@ -382,7 +384,7 @@ async def test_the_callers_turn_goes_to_the_model_as_audio(in_rate):
     assert request.headers["authorization"] == "Bearer sk-or-test"
 
     (body,) = call.chat
-    assert set(body) == {"model", "stream", "modalities", "audio", "messages"}
+    assert set(body) == {"model", "stream", "modalities", "audio", "messages", "usage"}
     assert (body["model"], body["stream"]) == (VOICE_MODEL, True)
     assert body["modalities"] == ["text", "audio"]
     assert body["audio"] == {"voice": "cedar", "format": "pcm16"}
@@ -458,7 +460,7 @@ async def test_the_callers_words_are_written_down_for_the_transcript():
     )
     assert call.heard == [HEARD]
     (body,) = call.transcriptions
-    assert set(body) == {"model", "language", "input_audio"}
+    assert set(body) == {"model", "language", "input_audio", "usage"}
     assert body["model"] == TRANSCRIPT_MODEL
     # Not English alone: a caller's Hindi used to be written as nothing, and
     # what is not written down is not remembered on the next turn.
@@ -752,7 +754,7 @@ async def test_a_turn_that_needs_no_search_is_answered_as_usual():
     assert clip(turn)[1] == pytest.approx(1.4, abs=0.05)
     # The request that produces Oscar's voice is the same as without web search.
     _, reply_request = call.chat
-    assert set(reply_request) == {"model", "stream", "modalities", "audio", "messages"}
+    assert set(reply_request) == {"model", "stream", "modalities", "audio", "messages", "usage"}
     assert reply_request["messages"][-1] == turn
 
 

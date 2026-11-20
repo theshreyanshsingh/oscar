@@ -192,6 +192,7 @@ async def test_the_notes_are_asked_for_in_one_request_to_a_text_model():
     assert request.headers["authorization"] == "Bearer sk-or-test"
     assert json.loads(request.content) == {
         "model": RESEARCH_MODEL,
+        "usage": {"include": True},
         "temperature": 0,
         "max_tokens": 2500,
         "reasoning": {"effort": "low"},

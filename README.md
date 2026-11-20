@@ -183,6 +183,33 @@ minute the caller speaks. A five-minute conversation comes to roughly 20 to 25
 cents. `VOICE_MODEL` in `app/speech.py` can be set to `openai/gpt-audio-mini`,
 which costs a small fraction of that and answers about 0.7 seconds later.
 
+### Spending
+
+**Call history** shows what each call cost and, above the table, what calls
+cost in the last 24 hours and the last 30 days. Oscar adds up what OpenRouter
+reports for each request a call makes: its answers, the transcripts, the
+lookups, and the summary and research notes written afterwards. An answer cut
+off part-way (you carried on talking) is looked up by its id 10 to 15 seconds
+later. A request cut off before OpenRouter answered at all can't be looked up,
+so a call's cost is a close account rather than an exact one: on test calls
+on 20 November 2026 it came to 80% of what OpenRouter billed, on a connection
+so slow that nearly every request was cut off. Calls from before this was
+added show "—".
+
+The exact figure is OpenRouter's own, for the key: the dashboard shows what is
+left of the key's limit (also in the top bar as **Key: $… left**) and what the
+key spent today and this month. That counts everything that uses the key:
+WhatsApp too, and any other app given the same key. To see Oscar on its own,
+give it a key of its own.
+
+**A spending cap.** Set it on the key itself, on openrouter.ai under **Keys**:
+a credit limit, which OpenRouter can reset daily, weekly or monthly.
+OpenRouter enforces it, so it can't be overspent. Oscar reads it and, once
+less than 5 cents is left, starts no new call. A browser call or a call you
+place says why, and someone phoning in hears "Sorry, this agent cannot take
+calls right now" and the call shows in **Call history** with the reason. A
+call already going carries on.
+
 ## Run it on a server (pm2)
 
 Oscar can also run on a Linux server, such as an EC2 machine, under pm2. Then it
@@ -249,9 +276,9 @@ throughout.
 
 - **Or open it at the server's own address,** `http://<server address>:7860`:
   set `HOST=0.0.0.0` in `.env`, run `pm2 restart oscar`, and allow TCP 7860
-  in the firewall. There is no password, so allow it from your own IP only:
-  the firewall is what keeps everyone else out. Browsers only let a page use
-  the microphone over https or on localhost, so for **Start call** use the
+  in the firewall. There is no password, so put Cloudflare Access in front
+  (below), or allow the port from your own IP only. Browsers only let a page
+  use the microphone over https or on localhost, so for **Start call** use the
   SSH address above, or put https in front.
 - **Browser calls send their audio straight to the server over UDP,** not
   through SSH or the web address (a proxy in front, such as Cloudflare, does
@@ -260,6 +287,7 @@ throughout.
   are the ports Linux hands out for each call's audio; `deploy.sh` and Oscar's
   log say the server's own range. Without it a call fails with "The call's
   audio could not reach Oscar's server". Phone calls don't need this.
+- **Protect the dashboard** before anyone else can reach it. See below.
 - **Phone calls** need `PUBLIC_URL` to be a public https address that reaches
   the server, such as a domain behind Caddy or nginx. See below.
 - **Run WhatsApp in one place only.** If Oscar is linked on your Mac and on the
@@ -269,6 +297,59 @@ throughout.
   login). It is not in git, so a new server starts empty.
 - On a Mac, `deploy.sh` refuses to run where Oscar already starts at login. Use
   `scripts.autostart --restart` there.
+
+### Protect the dashboard (Cloudflare Access)
+
+Oscar has no password. Once its web address is public, anyone who finds it can
+talk to Oscar on your OpenRouter credit, read every call's transcript (callers'
+names and numbers too) and change the agent. If the address is on Cloudflare,
+let Cloudflare Access decide who gets in: it asks for your email and sends a
+one-time code to it, and Oscar then refuses every request that did not come
+through that sign-in, including requests made straight to the server's own
+address and port. Nothing in the firewall has to change.
+
+1. **In Cloudflare:** open **Zero Trust**. The first time, pick a team name
+   (your sign-in page becomes `<team name>.cloudflareaccess.com`) and the free
+   plan.
+2. Under **Access** (called **Access controls** in newer dashboards), open
+   **Applications** → **Add an application** → **Self-hosted**:
+   - **Application domain:** Oscar's web address, for example subdomain
+     `oscar`, domain `example.com`, with no path.
+   - **Policy:** action **Allow**, include **Emails**, and your email address
+     (and anyone else who should get in).
+   - **Login method:** **One-time PIN** is enough.
+   - Save it.
+3. Open the application again and copy its **Application Audience (AUD) Tag**.
+4. **On the server,** add two lines to `~/oscar/.env`: the team domain and the
+   tag.
+
+   ```
+   CF_ACCESS_TEAM_DOMAIN=<team name>.cloudflareaccess.com
+   CF_ACCESS_AUD=<the Application Audience (AUD) Tag>
+   ```
+
+5. Then run `./deploy.sh` (or `pm2 restart oscar`). Its last lines say that
+   the dashboard only opens for people signed in through Cloudflare Access.
+
+Do steps 1 to 3 first. With the two lines in `.env` and no application in
+Cloudflare yet, the dashboard turns everyone away, you too.
+
+Then check:
+
+- Oscar's web address asks for your email and a code, then opens the dashboard.
+- `http://<server address>:7860` answers "This Oscar only opens through
+  Cloudflare Access."
+
+What stays open: `/healthz`, which only says Oscar is up and how many calls it
+is on (`deploy.sh` asks it), and Twilio's webhooks under `/twilio/`, each
+checked by Twilio's signature. **If you set up phone calls on this server,**
+Twilio cannot sign in, so add a second application in Cloudflare for the same
+domain with the path `twilio`, and a policy whose action is **Bypass** for
+**Everyone**. Browser call audio does not go through Cloudflare at all, so it
+needs nothing more.
+
+`scripts.live_call_check` cannot sign in either, so run it on a computer where
+Oscar is not behind Cloudflare Access.
 
 ## Phone calls (optional)
 
@@ -526,6 +607,36 @@ call when measured on 2026-11-12.
 - A summary is a model's reading of the call. The transcript below it is the
   record.
 
+### Summaries sent to you
+
+Under **Call history**, **Send each summary to you** takes a webhook address.
+When a call ends and its summary is written, Oscar posts it there, so it
+arrives where you already look:
+
+- **Slack:** create an incoming webhook (api.slack.com, *Incoming Webhooks*)
+  and paste its `https://hooks.slack.com/…` address.
+- **Discord:** a channel's *Integrations → Webhooks* address.
+- **Google Chat:** a space's *Apps & integrations → Webhooks* address.
+- **Zapier, Make, n8n or your own server:** a "catch hook" address. Besides the
+  message, the post has the call's details as data: who called, when, how
+  long, what it cost, the summary, the caller's name and number, the to-do and
+  the research notes.
+
+The message reads, for example:
+
+```
+Oscar's incoming call with +14155550123 (2:05, $0.031)
+Summary: Sam asked for a quote for a new fence and left a number.
+Name: Sam Taylor
+Call back on: 0412345678
+To do: Call Sam back about the quote.
+```
+
+**Send a test** posts a made-up summary so you can see it arrive, and the card
+says whether the last one did. A webhook that fails for a moment is tried once
+more three seconds later. Only `https://` addresses are taken. Not sent: calls
+where only Oscar spoke, and summaries written again from the dashboard.
+
 ## Research notes
 
 On a call Oscar has time to say a sentence or two of what a search found. The
@@ -706,7 +817,12 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   this computer can open it, and it only answers requests addressed to
   `localhost` or `127.0.0.1`. With `HOST=0.0.0.0`, anyone who can reach the
   port can use it, including your OpenRouter key, your call history and calls
-  through Twilio, so let the server's firewall decide who can.
+  through Twilio, unless Cloudflare Access is set up (`app/access.py`, see
+  "Protect the dashboard"). Then every request but `/healthz` and Twilio's
+  webhooks needs the token Cloudflare signs for a visitor it let through:
+  signed with one of the team's keys, made for this application and not
+  expired. Oscar fetches the keys from Cloudflare, and fetches them again when
+  Cloudflare changes them.
 - Calls are capped at 30 minutes.
 
 ## Project layout

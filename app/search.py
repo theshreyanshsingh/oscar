@@ -49,6 +49,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.costs import USAGE, CostMeter
 from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure, new_client, warm_up
 
 DEFAULT_FIRECRAWL_URL = "https://api.firecrawl.dev/v2"
@@ -587,6 +588,7 @@ class WebLookup:
         firecrawl_base_url: str = DEFAULT_FIRECRAWL_URL,
         openrouter_base_url: str = DEFAULT_BASE_URL,
         client: httpx.AsyncClient | None = None,
+        meter: CostMeter | None = None,
     ):
         self._firecrawl_api_key = firecrawl_api_key
         self._firecrawl_base_url = firecrawl_base_url
@@ -614,6 +616,8 @@ class WebLookup:
         )
         self._openrouter_base_url = openrouter_base_url
         self._client = client or new_client()
+        # Counts what the call's requests cost (app/costs.py).
+        self._meter = meter
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -622,6 +626,20 @@ class WebLookup:
         """Open the connection the decision on the first turn will use."""
         await warm_up(self._client, self._openrouter_base_url)
 
+    def _answer_of(self, response: httpx.Response) -> str | None:
+        """The text of a model's answer (None when there is none), its cost counted."""
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        if self._meter:
+            self._meter.charge(body)
+        try:
+            text = body["choices"][0]["message"]["content"]
+        except (LookupError, TypeError):
+            return None
+        return text if isinstance(text, str) else None
+
     async def decide(self, earlier: list[dict], turn: dict) -> SearchRequest | FactsRequest | None:
         """Whether the caller's turn (`turn`, as audio) needs a search or the fact sheet, given the talk so far.
 
@@ -629,6 +647,7 @@ class WebLookup:
         """
         payload = {
             "model": ROUTER_MODEL,
+            "usage": USAGE,
             "modalities": ["text"],
             "temperature": 0,
             "max_tokens": ROUTER_MAX_TOKENS,
@@ -650,10 +669,7 @@ class WebLookup:
             raise LookupFailed(
                 f"Could not decide whether to search the web: {describe_failure(response)}"
             )
-        try:
-            text = response.json()["choices"][0]["message"]["content"]
-        except (ValueError, LookupError, TypeError):
-            text = None
+        text = self._answer_of(response)
         verdict = parse_verdict(text)
         # Only what this lookup can do: a stray SEARCH without a key, or FACTS
         # without a sheet, is answered by Oscar itself.
@@ -670,6 +686,7 @@ class WebLookup:
         """
         payload = {
             "model": READER_MODEL,
+            "usage": USAGE,
             "temperature": 0,
             "max_tokens": READER_MAX_TOKENS,
             "reasoning": {"enabled": False},  # as for search results: see read()
@@ -694,10 +711,7 @@ class WebLookup:
                     response, not_found=f"OpenRouter no longer offers {READER_MODEL}."
                 )
             )
-        try:
-            text = response.json()["choices"][0]["message"]["content"]
-        except (ValueError, LookupError, TypeError):
-            text = None
+        text = self._answer_of(response)
         answer = spoken(untag_long_numbers(text if isinstance(text, str) else "", self._long_numbers))
         if not answer:
             raise LookupFailed("The model reading the fact sheet said nothing.")
@@ -778,6 +792,7 @@ class WebLookup:
         """
         payload = {
             "model": READER_MODEL,
+            "usage": USAGE,
             "temperature": 0,
             "max_tokens": READER_MAX_TOKENS,
             # Thinking first would double the wait, and its tokens count
@@ -808,8 +823,5 @@ class WebLookup:
                     response, not_found=f"OpenRouter no longer offers {READER_MODEL}."
                 )
             )
-        try:
-            text = response.json()["choices"][0]["message"]["content"]
-        except (ValueError, LookupError, TypeError):
-            text = None
+        text = self._answer_of(response)
         return text if isinstance(text, str) else ""

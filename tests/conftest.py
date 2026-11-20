@@ -39,3 +39,28 @@ def cfg(tmp_path) -> Config:
 def client(cfg):
     with local_client(cfg) as test_client:
         yield test_client
+
+
+class NoKeyCredit:
+    """Stands in for app.costs.KeyCredit: OpenRouter never says, so no call is held back.
+
+    Keeps tests off the network. A test about spending passes its own KeyCredit
+    to create_app.
+    """
+
+    def __init__(self, **options):
+        pass
+
+    async def get(self, *, fresh: bool = False):
+        return None
+
+    async def too_little_for_a_call(self) -> str:
+        return ""
+
+    async def aclose(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def offline_key_credit(monkeypatch):
+    monkeypatch.setattr("app.main.KeyCredit", NoKeyCredit)

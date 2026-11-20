@@ -141,7 +141,7 @@ async def test_the_place_is_asked_for_in_one_request_to_a_text_model():
     assert str(request.url) == f"{OPENROUTER}/chat/completions"
     assert request.headers["authorization"] == "Bearer sk-or-test"
     body = json.loads(request.content)
-    assert set(body) == {"model", "temperature", "max_tokens", "reasoning", "messages"}
+    assert set(body) == {"model", "temperature", "max_tokens", "reasoning", "messages", "usage"}
     assert (body["model"], body["temperature"]) == (KEEPER_MODEL, 0)
     # A little thinking first: asked straight off, it named the wrong step one time in three.
     assert body["reasoning"] == {"effort": "low"} and body["max_tokens"] >= 1000

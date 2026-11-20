@@ -29,6 +29,8 @@ from loguru import logger
 
 from app.calls import CallManager
 from app.config import Config
+from app.costs import USAGE, CostMeter
+from app.notify import send_summary, summary_payload
 from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure
 from app.research import ResearchFailed, write_research
 from app.store import AgentSettings, CallKind
@@ -231,10 +233,12 @@ async def write_summary(
     api_key: str,
     base_url: str = DEFAULT_BASE_URL,
     client: httpx.AsyncClient | None = None,
+    meter: CostMeter | None = None,
 ) -> CallSummary:
     """The summary of a call from its transcript. Raises SummaryFailed when it could not be written."""
     payload = {
         "model": SUMMARY_MODEL,
+        "usage": USAGE,
         "temperature": 0,
         "max_tokens": SUMMARY_MAX_TOKENS,
         # A little thinking first. Without it the model corrected itself in
@@ -266,16 +270,26 @@ async def write_summary(
             describe_failure(response, not_found=f"OpenRouter no longer offers {SUMMARY_MODEL}.")
         )
     try:
-        text = response.json()["choices"][0]["message"]["content"]
-    except (ValueError, LookupError, TypeError):
+        body = response.json()
+    except ValueError:
+        body = None
+    if meter:
+        meter.charge(body)
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except (LookupError, TypeError):
         text = None
     return only_what_was_said(parse_summary(text), messages)
 
 
-def start_summary(cfg: Config, calls: CallManager, call: dict, agent: AgentSettings) -> dict | None:
+def start_summary(
+    cfg: Config, calls: CallManager, call: dict, agent: AgentSettings, *, notify: bool = False
+) -> dict | None:
     """Begin the summary of a finished call, written in the background.
 
-    Returns the call as it now stands, or None when nothing was said on it.
+    With `notify` (as a call ends), the summary is also sent to the owner's
+    webhook once it is written (app/notify.py). Returns the call as it now
+    stands, or None when nothing was said on it.
     """
     messages = calls.store.get_messages(call["id"])
     if not messages:
@@ -287,24 +301,50 @@ def start_summary(cfg: Config, calls: CallManager, call: dict, agent: AgentSetti
     writing = calls.update(
         call["id"], summary_status="writing", summary_error="", research_error=""
     )
-    calls.spawn(_write_and_save(cfg, calls, call, agent, messages))
+    calls.spawn(_write_and_save(cfg, calls, call, agent, messages, notify=notify))
     return writing
 
 
 async def _write_and_save(
-    cfg: Config, calls: CallManager, call: dict, agent: AgentSettings, messages: list[dict]
+    cfg: Config,
+    calls: CallManager,
+    call: dict,
+    agent: AgentSettings,
+    messages: list[dict],
+    *,
+    notify: bool = False,
 ) -> None:
     # The summary and the research notes are two requests, made side by side.
     # Either can fail without the other.
-    summary, research = await asyncio.gather(
-        _summary_fields(cfg, call, agent, messages),
-        _research_fields(cfg, call, agent, messages, calls.store.get_searches(call["id"])),
+    # What they cost counts toward the call they are about.
+    meter = CostMeter(
+        lambda dollars: calls.add_cost(call["id"], dollars),
+        api_key=cfg.openrouter_api_key,
+        base_url=cfg.openrouter_base_url,
+        spawn=calls.spawn,
     )
-    calls.update(call["id"], **summary, **research)
+    summary, research = await asyncio.gather(
+        _summary_fields(cfg, call, agent, messages, meter),
+        _research_fields(cfg, call, agent, messages, calls.store.get_searches(call["id"]), meter),
+    )
+    done = calls.update(call["id"], **summary, **research)
+    if notify and done and done["summary_status"] == "ready":
+        await send_to_owner(calls, done, agent)
+
+
+async def send_to_owner(calls: CallManager, call: dict, agent: AgentSettings) -> None:
+    """Send the call's summary to the owner's webhook, if one is set, and note how it went."""
+    url = calls.store.get_summary_webhook()["url"]
+    if not url:
+        return
+    problem = await send_summary(url, summary_payload(call, agent_name=agent.name))
+    if problem:
+        logger.warning(f"Call {call['id']}: its summary could not be sent: {problem}")
+    calls.store.record_summary_webhook_result(problem or "sent")
 
 
 async def _summary_fields(
-    cfg: Config, call: dict, agent: AgentSettings, messages: list[dict]
+    cfg: Config, call: dict, agent: AgentSettings, messages: list[dict], meter: CostMeter | None = None
 ) -> dict:
     """The call's summary, as what to save of it. A failure is saved too."""
     call_id = call["id"]
@@ -315,6 +355,7 @@ async def _summary_fields(
             agent_name=agent.name,
             api_key=cfg.openrouter_api_key,
             base_url=cfg.openrouter_base_url,
+            meter=meter,
         )
     except SummaryFailed as exc:
         logger.warning(f"Call {call_id}: its summary could not be written: {exc}")
@@ -334,7 +375,12 @@ async def _summary_fields(
 
 
 async def _research_fields(
-    cfg: Config, call: dict, agent: AgentSettings, messages: list[dict], searches: list[dict]
+    cfg: Config,
+    call: dict,
+    agent: AgentSettings,
+    messages: list[dict],
+    searches: list[dict],
+    meter: CostMeter | None = None,
 ) -> dict:
     """What the call's searches found, as what to save of it. A failure is saved too."""
     call_id = call["id"]
@@ -348,6 +394,7 @@ async def _research_fields(
             agent_name=agent.name,
             api_key=cfg.openrouter_api_key,
             base_url=cfg.openrouter_base_url,
+            meter=meter,
         )
     except ResearchFailed as exc:
         logger.warning(f"Call {call_id}: its research notes could not be written: {exc}")

@@ -83,6 +83,15 @@ class CallManager:
         if call and not call["error"]:
             self.update(call_id, error=error[:500])
 
+    def add_cost(self, call_id: str, dollars: float) -> None:
+        """Count what one of the call's requests cost (app/costs.py), and show the new total."""
+        if dollars <= 0:
+            return
+        self.store.add_call_cost(call_id, dollars)
+        call = self.store.get_call(call_id)
+        if call:
+            self._publish_call(call)
+
     def add_message(self, call_id: str, role: MessageRole, text: str) -> None:
         text = text.strip()
         if not text:

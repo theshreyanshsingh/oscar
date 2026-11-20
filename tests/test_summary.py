@@ -12,6 +12,7 @@ import pytest
 
 from app import calls as call_bookkeeping
 from app import summary
+from app.costs import CostMeter
 from app.calls import CallManager
 from app.events import EventBus
 from app.research import ResearchFailed
@@ -161,7 +162,7 @@ async def test_the_summary_is_asked_for_in_one_request_to_a_text_model():
     assert str(request.url) == f"{OPENROUTER}/chat/completions"
     assert request.headers["authorization"] == "Bearer sk-or-test"
     body = json.loads(request.content)
-    assert set(body) == {"model", "temperature", "max_tokens", "reasoning", "messages"}
+    assert set(body) == {"model", "temperature", "max_tokens", "reasoning", "messages", "usage"}
     assert (body["model"], body["temperature"]) == (SUMMARY_MODEL, 0)
     # A little thinking first: without it, notes on Hindi calls had second thoughts in them.
     assert body["reasoning"] == {"effort": "low"}
@@ -590,6 +591,8 @@ async def test_what_the_searches_found_is_written_up_beside_the_summary(calls, t
     assert (done["summary_status"], done["summary"]) == ("ready", "The caller asked about a listing.")
     # One request for the notes: the call as the summary reads it, and the pages as they were found.
     (asked,) = seen
+    # Its cost counts toward the call (app/costs.py).
+    assert isinstance(asked.pop("meter"), CostMeter)
     assert asked == {
         "transcript": transcript_text(calls.store.get_messages(call["id"]), kind="phone_outbound", agent_name="Oscar"),
         "searches": calls.store.get_searches(call["id"]),
