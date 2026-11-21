@@ -64,3 +64,22 @@ class NoKeyCredit:
 @pytest.fixture(autouse=True)
 def offline_key_credit(monkeypatch):
     monkeypatch.setattr("app.main.KeyCredit", NoKeyCredit)
+
+
+class NoModelCatalog:
+    """Stands in for app.catalog.ModelCatalog: no models are known. Keeps tests off
+    the network; a test about the list passes its own ModelCatalog to create_app."""
+
+    def __init__(self, **options):
+        pass
+
+    async def get(self) -> list[dict]:
+        return []
+
+    async def aclose(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def offline_model_catalog(monkeypatch):
+    monkeypatch.setattr("app.main.ModelCatalog", NoModelCatalog)

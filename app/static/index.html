@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=12" />
+    <link rel="stylesheet" href="/static/style.css?v=13" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -91,7 +91,7 @@
         </div>
 
         <div class="demo-grid">
-          <div class="panel panel-outline call-panel reveal">
+          <div class="panel panel-outline call-panel reveal" id="call-panel">
             <span class="timer" id="call-timer"></span>
             <div class="orb-wrap" id="orb" data-state="idle" aria-hidden="true">
               <div class="orb">
@@ -108,6 +108,11 @@
               <button type="button" class="primary" id="call-button">
                 <span class="btn-label">Start call</span>
               </button>
+              <button type="button" class="secondary" id="call-mute" aria-pressed="false" hidden>Mute</button>
+            </div>
+            <div class="mic-choice" id="mic-choice" hidden>
+              <label class="field-label" for="call-mic">Microphone</label>
+              <select id="call-mic"></select>
             </div>
             <label class="check call-option">
               <input type="checkbox" id="call-interrupt" />
@@ -167,6 +172,13 @@
                 </div>
               </form>
               <p class="error" id="phone-error" role="alert" hidden></p>
+              <label class="check ring-option">
+                <input type="checkbox" id="phone-ring" />
+                Ring here when someone calls Oscar
+              </label>
+              <p class="hint" id="phone-ring-hint">
+                A chime in this tab, and a notification while you are in another one.
+              </p>
             </div>
 
             <div class="panel panel-outline reveal" style="--delay: 0.12s">
@@ -240,7 +252,7 @@
                 <option value="anthropic/claude-sonnet-5.5"></option>
                 <option value="anthropic/claude-opus-5.5"></option>
               </datalist>
-              <p class="hint">
+              <p class="hint" id="agent-model-hint">
                 Writes Oscar's WhatsApp replies. Any OpenRouter model. Calls always use OpenAI's
                 gpt-audio, which hears and speaks in one step.
               </p>
@@ -497,6 +509,27 @@
             <p class="spend-figure" id="spend-left">—</p>
             <p class="spend-note" id="spend-key-note">Checking with OpenRouter…</p>
           </div>
+          <div class="spend-chart" id="spend-chart" hidden>
+            <div class="spend-chart-head">
+              <p class="spend-label" id="spend-chart-title">Calls, day by day</p>
+              <p class="spend-note" id="spend-chart-note"></p>
+            </div>
+            <div
+              class="bars"
+              id="spend-bars"
+              tabindex="0"
+              role="group"
+              aria-labelledby="spend-chart-title"
+              aria-describedby="spend-chart-help"
+            ></div>
+            <p class="visually-hidden" id="spend-chart-help">Use the left and right arrow keys to read each day.</p>
+            <p class="visually-hidden" id="spend-chart-live" aria-live="polite"></p>
+            <table class="visually-hidden" id="spend-table">
+              <caption>What calls cost each day, last 14 days</caption>
+              <thead><tr><th scope="col">Day</th><th scope="col">Cost</th><th scope="col">Calls</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
 
         <div class="panel panel-outline table-panel reveal">
@@ -541,7 +574,10 @@
           </div>
           <div class="history-foot">
             <p class="hint" id="history-count" aria-live="polite"></p>
-            <button type="button" class="secondary" id="history-older" hidden>Show older calls</button>
+            <div class="history-foot-actions">
+              <a class="button-link" id="history-export" href="/api/calls.csv" download>Download as CSV</a>
+              <button type="button" class="secondary" id="history-older" hidden>Show older calls</button>
+            </div>
           </div>
         </div>
 
@@ -590,9 +626,20 @@
         <h3 class="panel-title" id="detail-title" tabindex="-1">Transcript</h3>
         <button type="button" class="link" id="detail-close">Close</button>
       </div>
-      <div class="detail-actions" id="detail-actions" hidden>
+      <div class="detail-actions" id="detail-actions">
         <button type="button" class="secondary" id="detail-callback" hidden>Call back</button>
         <button type="button" class="link" id="detail-copy" hidden>Copy number</button>
+        <button type="button" class="link" id="detail-link">Copy link</button>
+        <button type="button" class="link danger" id="detail-delete" hidden>Delete</button>
+      </div>
+      <div class="detail-confirm" id="detail-confirm" role="alertdialog" aria-labelledby="detail-confirm-text" hidden>
+        <p id="detail-confirm-text">
+          Delete this call for good? Its transcript, summary and what its searches found go with it.
+        </p>
+        <div class="actions">
+          <button type="button" class="danger-button" id="detail-delete-yes">Delete call</button>
+          <button type="button" class="link" id="detail-delete-no">Keep it</button>
+        </div>
       </div>
       <p class="error" id="detail-error" hidden></p>
       <div class="call-summary" id="detail-summary" hidden></div>
@@ -607,6 +654,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=25"></script>
+    <script src="/static/app.js?v=26"></script>
   </body>
 </html>

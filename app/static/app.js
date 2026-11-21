@@ -164,6 +164,8 @@ function renderLine(container, call, message) {
     const who = document.createElement("span");
     who.className = "who";
     who.textContent = speakerLabel(call, message.role);
+    const at = lineTime(call, message);
+    if (at) who.append(" ", at);
     line.append(who, document.createTextNode(message.text));
   }
   container.append(line);
@@ -303,6 +305,7 @@ async function loadSpending() {
   const spending = await api("/api/spending");
   $("spend-day").textContent = formatDollars(spending.calls.last_24_hours);
   $("spend-month").textContent = formatDollars(spending.calls.last_30_days);
+  renderSpendChart(spending.recent_calls || []);
 
   const key = spending.key;
   const left = $("spend-left");
@@ -800,6 +803,10 @@ async function loadCalls({ older = false } = {}) {
   const asked = `${history.query}\n${history.show}`;
   const params = new URLSearchParams({ limit: String(HISTORY_PAGE), show: history.show });
   if (history.query) params.set("q", history.query);
+  // The download holds every call the search and filter find, not only the pages shown.
+  const exported = new URLSearchParams({ show: history.show });
+  if (history.query) exported.set("q", history.query);
+  $("history-export").href = `/api/calls.csv?${exported}`;
   const last = older ? state.calls.get(history.ids[history.ids.length - 1]) : null;
   if (last) {
     params.set("before_id", last.id);
@@ -858,6 +865,7 @@ function renderCalls() {
     keepFocus(body, () => body.replaceChildren(...calls.map(renderCallRow)));
   }
   $("history-older").hidden = !history.more;
+  $("history-export").hidden = !calls.length; // nothing to download
   $("history-count").textContent = calls.length
     ? `${calls.length} call${calls.length === 1 ? "" : "s"} shown${history.more ? ", older ones below" : ""}.`
     : "";
@@ -1114,7 +1122,12 @@ function renderDetailActions(call) {
   callback.hidden = !number || !phoneReady;
   callback.textContent = `Call back ${number}`;
   $("detail-copy").hidden = !number || !navigator.clipboard;
-  $("detail-actions").hidden = callback.hidden && $("detail-copy").hidden;
+  $("detail-link").hidden = !navigator.clipboard;
+  // Not while the call is on, or while its summary is being written.
+  const deletable = Boolean(call) && !OPEN_STATUSES.has(call.status) && call.summary_status !== "writing";
+  $("detail-delete").hidden = !deletable;
+  if (!deletable) $("detail-confirm").hidden = true;
+  $("detail-actions").hidden = [...$("detail-actions").children].every((button) => button.hidden);
 }
 
 // Puts the number in "Call a number", for a look before Oscar dials it.
@@ -1149,6 +1162,8 @@ async function openDetail(callId) {
   setPageInert(true);
   document.documentElement.classList.add("drawer-open");
   document.addEventListener("keydown", onDrawerKey);
+  showCallInAddress(callId);
+  $("detail-confirm").hidden = true;
   $("detail-title").textContent = "Transcript";
   $("detail-title").focus();
   renderDetailActions(state.calls.get(callId));
@@ -1183,6 +1198,8 @@ function closeDetail({ restoreFocus = true } = {}) {
   $("call-detail").hidden = true;
   $("detail-backdrop").hidden = true;
   setPageInert(false); // before focus goes back to the page
+  showCallInAddress(null);
+  $("detail-confirm").hidden = true;
   document.documentElement.classList.remove("drawer-open");
   document.removeEventListener("keydown", onDrawerKey);
   renderCalls();
@@ -1287,6 +1304,7 @@ function updateTitle(call) {
 
 function onCallChanged(call) {
   const before = state.calls.get(call.id);
+  if (!before && call.kind === "phone_inbound" && OPEN_STATUSES.has(call.status)) ringFor(call);
   if (before && before.cost !== call.cost) refreshSpendingSoon();
   state.calls.set(call.id, call);
   const history = state.history;
@@ -1401,6 +1419,7 @@ function connectEvents() {
     if (data.type === "call") onCallChanged(data.call);
     else if (data.type === "message") onMessage(data.message);
     else if (data.type === "search") onSearch(data.search);
+    else if (data.type === "call_deleted") onCallDeleted(data.id);
   };
 }
 
@@ -1422,6 +1441,7 @@ function updateCallUi() {
   }
   // The choice is made when a call starts, so it cannot change during one.
   $("call-interrupt").disabled = state.callUi !== "idle";
+  $("call-mute").hidden = state.callUi !== "active";
   const phoneButton = $("phone-button");
   if (phoneButton) phoneButton.disabled = !ready || phoneCallPending;
   updateOrb();
@@ -1539,9 +1559,8 @@ async function startBrowserCall() {
   updateCallUi();
   $("call-status").textContent = "Waiting for microphone permission…";
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
+    micStream = await openMicrophone();
+    listMicrophones(); // their names are known now
     startOrbMeter(micStream);
     peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
     // The server expects an audio transceiver first, then a video one.
@@ -1620,6 +1639,7 @@ function cleanupBrowserCall() {
     for (const track of micStream.getTracks()) track.stop();
     micStream = null;
   }
+  setMuted(false);
   stopOrbMeter();
   $("agent-audio").srcObject = null;
   state.browserCallId = null;
@@ -1895,6 +1915,439 @@ function revealOnScroll() {
   for (const item of items) observer.observe(item);
 }
 
+// ---------- microphone: which one, and mute ----------
+
+const MIC_CHOICE = "oscar.microphone";
+let muted = false;
+
+function chosenMicrophone() {
+  try {
+    return localStorage.getItem(MIC_CHOICE) || "";
+  } catch {
+    return "";
+  }
+}
+
+// The microphone chosen in the list, or the browser's own pick when there is none
+// (or the chosen one is unplugged).
+async function openMicrophone(deviceId = chosenMicrophone()) {
+  const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  if (deviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: { exact: deviceId } } });
+    } catch (error) {
+      if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") throw error;
+    }
+  }
+  return navigator.mediaDevices.getUserMedia({ audio });
+}
+
+// The microphones to pick from. Browsers name them only once the page may use one,
+// so the list shows after the first call, and only when there is a choice.
+async function listMicrophones() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  let devices;
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch {
+    return;
+  }
+  const mics = devices.filter((device) => device.kind === "audioinput" && device.deviceId && device.label);
+  const select = $("call-mic");
+  const track = micStream && micStream.getAudioTracks()[0];
+  const using = (track && track.getSettings && track.getSettings().deviceId) || "";
+  const wanted = mics.some((mic) => mic.deviceId === chosenMicrophone()) ? chosenMicrophone() : using;
+  select.replaceChildren(...mics.map((mic) => new Option(mic.label, mic.deviceId)));
+  if (mics.some((mic) => mic.deviceId === wanted)) select.value = wanted;
+  $("mic-choice").hidden = mics.length < 2;
+}
+
+// A microphone picked from the list: kept for next time, and during a call, swapped in at once.
+async function onMicrophoneChosen() {
+  const deviceId = $("call-mic").value;
+  try {
+    localStorage.setItem(MIC_CHOICE, deviceId);
+  } catch {
+    // Private browsing: used for this call only.
+  }
+  const sender = peer && peer.getSenders().find((each) => each.track && each.track.kind === "audio");
+  if (!sender || !micStream) return;
+  try {
+    const stream = await openMicrophone(deviceId);
+    if (!peer || !micStream) {
+      for (const track of stream.getTracks()) track.stop(); // the call ended meanwhile
+      return;
+    }
+    const track = stream.getAudioTracks()[0];
+    track.enabled = !muted;
+    await sender.replaceTrack(track);
+    for (const old of micStream.getTracks()) old.stop();
+    micStream = stream;
+    startOrbMeter(stream);
+  } catch (error) {
+    showError("call-error", microphoneErrorMessage(error));
+  }
+}
+
+// Muted, Oscar hears silence: the call goes on, and nothing you say reaches it.
+function setMuted(on) {
+  muted = on;
+  if (micStream) for (const track of micStream.getAudioTracks()) track.enabled = !on;
+  const button = $("call-mute");
+  button.setAttribute("aria-pressed", String(on));
+  button.textContent = on ? "Unmute" : "Mute";
+  $("call-panel").classList.toggle("muted", on);
+}
+
+// ---------- ringing for incoming phone calls ----------
+
+const RING_CHOICE = "oscar.ring";
+const rungFor = new Set();
+let chimeContext = null;
+
+function ringWanted() {
+  try {
+    return localStorage.getItem(RING_CHOICE) === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function showRingHint() {
+  const hint = $("phone-ring-hint");
+  if (!("Notification" in window)) {
+    hint.textContent = "A chime in this tab. This browser can't show notifications.";
+  } else if (Notification.permission === "denied") {
+    hint.textContent = "A chime in this tab. Notifications are blocked for this site in the browser's settings.";
+  } else {
+    hint.textContent = "A chime in this tab, and a notification while you are in another one.";
+  }
+}
+
+function setUpRing() {
+  const box = $("phone-ring");
+  box.checked = ringWanted();
+  showRingHint();
+  box.addEventListener("change", async () => {
+    try {
+      localStorage.setItem(RING_CHOICE, box.checked ? "yes" : "no");
+    } catch {
+      // Private browsing: on until the tab closes.
+    }
+    if (box.checked) {
+      chime(); // how it sounds, and it lets this tab play sound from now on
+      if ("Notification" in window && Notification.permission === "default") {
+        await Notification.requestPermission().catch(() => {});
+      }
+    }
+    showRingHint();
+  });
+}
+
+// Two soft notes, made here: no sound file to fetch.
+function chime() {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    chimeContext = chimeContext || new AudioContextClass();
+    chimeContext.resume().catch(() => {});
+    const now = chimeContext.currentTime;
+    [880, 1175].forEach((frequency, index) => {
+      const tone = chimeContext.createOscillator();
+      const volume = chimeContext.createGain();
+      const start = now + index * 0.18;
+      tone.type = "sine";
+      tone.frequency.value = frequency;
+      volume.gain.setValueAtTime(0.0001, start);
+      volume.gain.exponentialRampToValueAtTime(0.2, start + 0.02);
+      volume.gain.exponentialRampToValueAtTime(0.0001, start + 0.5);
+      tone.connect(volume).connect(chimeContext.destination);
+      tone.start(start);
+      tone.stop(start + 0.55);
+    });
+  } catch {
+    // A courtesy: the call goes ahead without it.
+  }
+}
+
+// Once for each incoming call, when it first shows up here.
+function ringFor(call) {
+  if (!ringWanted() || rungFor.has(call.id)) return;
+  rungFor.add(call.id);
+  chime();
+  if (!document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const note = new Notification(`Someone is calling ${state.agentName}`, {
+      body: `From ${call.from_number || "an unknown number"}. ${state.agentName} is answering.`,
+      tag: call.id,
+    });
+    note.onclick = () => {
+      window.focus();
+      $("call").scrollIntoView({ block: "start" });
+      note.close();
+    };
+  } catch {
+    // Some browsers only allow notifications from a service worker.
+  }
+}
+
+// ---------- one call: its link, deleting it ----------
+
+// The page's address with this call open, so a reload, a bookmark or a copied
+// link opens it again.
+function callLink(callId) {
+  const url = new URL(location.href);
+  url.hash = "";
+  url.searchParams.set("call", callId);
+  return url.href;
+}
+
+function showCallInAddress(callId) {
+  const url = new URL(location.href);
+  if (callId) url.searchParams.set("call", callId);
+  else url.searchParams.delete("call");
+  if (url.href !== location.href) window.history.replaceState(window.history.state, "", url);
+}
+
+async function copyCallLink() {
+  const button = $("detail-link");
+  try {
+    await navigator.clipboard.writeText(callLink(state.detailCallId));
+    button.textContent = "Link copied";
+    setTimeout(() => (button.textContent = "Copy link"), 1500);
+  } catch {
+    button.textContent = "Couldn't copy";
+  }
+}
+
+function askToDelete() {
+  showError("detail-error", "");
+  $("detail-confirm").hidden = false;
+  $("detail-delete").setAttribute("aria-expanded", "true");
+  $("detail-delete-no").focus(); // the safe choice comes first
+}
+
+function keepCall() {
+  $("detail-confirm").hidden = true;
+  $("detail-delete").setAttribute("aria-expanded", "false");
+  $("detail-delete").focus();
+}
+
+async function deleteCall() {
+  const callId = state.detailCallId;
+  if (!callId) return;
+  const button = $("detail-delete-yes");
+  button.disabled = true;
+  // Where focus goes afterwards: the next call down the list, else the search box.
+  const ids = state.history.ids;
+  const next = ids[ids.indexOf(callId) + 1] || ids[ids.indexOf(callId) - 1];
+  try {
+    await api(`/api/calls/${callId}`, { method: "DELETE" });
+    onCallDeleted(callId);
+    const nextButton = next && document.querySelector(`button[data-call-id="${CSS.escape(next)}"]`);
+    (nextButton || $("history-search")).focus();
+  } catch (error) {
+    $("detail-confirm").hidden = true;
+    showError("detail-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// A call deleted here or in another tab: gone from the list, the side panel and the live panel.
+function onCallDeleted(callId) {
+  const call = state.calls.get(callId);
+  const history = state.history;
+  if (hasOpenTodo(call)) history.openTodos = Math.max(0, history.openTodos - 1);
+  state.calls.delete(callId);
+  history.ids = history.ids.filter((id) => id !== callId);
+  if (state.detailCallId === callId) closeDetail({ restoreFocus: false });
+  if (state.focusCallId === callId) {
+    state.focusCallId = null;
+    state.liveSince = null;
+    resetTranscript($("live-transcript"), "Nothing yet. Start a call and the transcript appears here.");
+    $("live-summary").hidden = true;
+    $("call-status").textContent = IDLE_CALL_TEXT;
+    $("call-timer").textContent = "";
+    updateTitle(null);
+    updateCallUi();
+  }
+  renderCalls();
+  refreshSpendingSoon();
+}
+
+// How far into the call a line was said ("1:05"), with the time of day on hover.
+function lineTime(call, message) {
+  const said = Date.parse(message.created_at);
+  const began = call ? Date.parse(call.started_at) : NaN;
+  if (Number.isNaN(said) || Number.isNaN(began)) return null;
+  const time = document.createElement("time");
+  time.className = "said-at";
+  time.dateTime = message.created_at;
+  time.textContent = formatDuration(Math.max(0, Math.floor((said - began) / 1000)));
+  time.title = new Date(said).toLocaleTimeString();
+  return time;
+}
+
+// ---------- spending, day by day ----------
+
+const CHART_DAYS = 14;
+const chart = { days: [], active: -1 };
+
+function dayKey(date) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function dayName(date) {
+  return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+}
+
+function dayDetail(day) {
+  const calls = day.calls === 1 ? "1 call" : `${day.calls} calls`;
+  return day.calls ? `${formatCost(day.cost)}, ${calls}` : "No cost";
+}
+
+// What calls cost on each of the last 14 days, in this computer's time zone.
+function renderSpendChart(recent) {
+  const today = new Date();
+  const days = [];
+  for (let back = CHART_DAYS - 1; back >= 0; back--) {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - back);
+    days.push({ key: dayKey(date), date, cost: 0, calls: 0 });
+  }
+  const byKey = new Map(days.map((day) => [day.key, day]));
+  for (const [startedAt, cost] of recent) {
+    const when = new Date(startedAt);
+    const day = Number.isNaN(when.getTime()) ? null : byKey.get(dayKey(when));
+    if (day && typeof cost === "number") {
+      day.cost += cost;
+      day.calls += 1;
+    }
+  }
+  chart.days = days;
+  const total = days.reduce((sum, day) => sum + day.cost, 0);
+  const most = Math.max(...days.map((day) => day.cost));
+  $("spend-chart").hidden = false;
+  $("spend-chart-note").textContent = total
+    ? `${formatCost(total)} over the last ${CHART_DAYS} days.`
+    : `No call has cost anything in the last ${CHART_DAYS} days.`;
+  const bars = $("spend-bars");
+  bars.hidden = !total;
+  const tip = document.createElement("div");
+  tip.className = "bar-tip";
+  tip.hidden = true;
+  tip.setAttribute("aria-hidden", "true");
+  const slots = days.map((day, index) => {
+    const slot = document.createElement("div");
+    slot.className = "bar-slot";
+    slot.dataset.index = String(index);
+    const plot = document.createElement("div");
+    plot.className = "bar-plot";
+    if (day.cost > 0 && day.cost === most) {
+      const value = document.createElement("span");
+      value.className = "bar-value";
+      value.textContent = formatCost(day.cost);
+      plot.append(value);
+    }
+    const bar = document.createElement("span");
+    bar.className = "bar";
+    // At least 2px, so a day that cost a little still shows.
+    bar.style.height = day.cost > 0 ? `max(2px, ${((day.cost / most) * 100).toFixed(2)}%)` : "0";
+    plot.append(bar);
+    const label = document.createElement("span");
+    label.className = "bar-day";
+    label.textContent = index === CHART_DAYS - 1 ? "Today" : String(day.date.getDate());
+    slot.append(plot, label);
+    slot.setAttribute("aria-hidden", "true");
+    return slot;
+  });
+  bars.replaceChildren(...slots, tip);
+  chart.active = -1;
+  $("spend-table").tBodies[0].replaceChildren(
+    ...days.map((day) => {
+      const row = document.createElement("tr");
+      for (const text of [dayName(day.date), day.calls ? formatCost(day.cost) : "$0", String(day.calls)]) {
+        const cell = document.createElement("td");
+        cell.textContent = text;
+        row.append(cell);
+      }
+      return row;
+    }),
+  );
+}
+
+// Shows one day's figures over its bar (from the pointer or the arrow keys).
+function showDay(index, { announce = false } = {}) {
+  const bars = $("spend-bars");
+  const tip = bars.querySelector(".bar-tip");
+  const slots = bars.querySelectorAll(".bar-slot");
+  for (const slot of slots) slot.classList.toggle("active", Number(slot.dataset.index) === index);
+  chart.active = index;
+  const day = chart.days[index];
+  if (!day || !tip) {
+    if (tip) tip.hidden = true;
+    return;
+  }
+  tip.replaceChildren();
+  const when = document.createElement("strong");
+  when.textContent = dayName(day.date);
+  tip.append(when, document.createElement("br"), dayDetail(day));
+  tip.hidden = false;
+  // Just above the day's bar, kept inside the chart at either end.
+  const slot = slots[index];
+  const middle = slot.offsetLeft + slot.offsetWidth / 2;
+  const half = tip.offsetWidth / 2;
+  tip.style.left = `${Math.min(Math.max(middle, half), bars.clientWidth - half)}px`;
+  const barTop = slot.querySelector(".bar").getBoundingClientRect().top - bars.getBoundingClientRect().top;
+  tip.style.top = `${Math.max(barTop - 8, 0)}px`;
+  if (announce) $("spend-chart-live").textContent = `${dayName(day.date)}: ${dayDetail(day)}`;
+}
+
+function setUpSpendChart() {
+  const bars = $("spend-bars");
+  bars.addEventListener("pointermove", (event) => {
+    const slot = event.target.closest(".bar-slot");
+    if (slot && Number(slot.dataset.index) !== chart.active) showDay(Number(slot.dataset.index));
+  });
+  bars.addEventListener("pointerleave", () => {
+    if (document.activeElement !== bars) showDay(-1);
+  });
+  bars.addEventListener("focus", () => showDay(chart.active >= 0 ? chart.active : CHART_DAYS - 1, { announce: true }));
+  bars.addEventListener("blur", () => showDay(-1));
+  bars.addEventListener("keydown", (event) => {
+    const moves = { ArrowLeft: chart.active - 1, ArrowRight: chart.active + 1, Home: 0, End: CHART_DAYS - 1 };
+    if (!(event.key in moves)) return;
+    event.preventDefault();
+    // Nothing shown yet (focus came without its event): start from today.
+    const to = chart.active < 0 ? CHART_DAYS - 1 : moves[event.key];
+    showDay(Math.min(Math.max(to, 0), CHART_DAYS - 1), { announce: true });
+  });
+}
+
+// ---------- OpenRouter's models, as suggestions ----------
+
+async function loadModelSuggestions() {
+  let models;
+  try {
+    ({ models } = await api("/api/models"));
+  } catch {
+    return; // the page's own few suggestions stay
+  }
+  if (!Array.isArray(models) || !models.length) return;
+  $("model-suggestions").replaceChildren(
+    ...models.map((model) => {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.label = model.name;
+      return option;
+    }),
+  );
+  $("agent-model-hint").textContent =
+    `Writes Oscar's WhatsApp replies. Type to pick from OpenRouter's ${models.length} chat models. ` +
+    "Calls always use OpenAI's gpt-audio, which hears and speaks in one step.";
+}
+
 // ---------- start ----------
 
 async function init() {
@@ -1916,6 +2369,19 @@ async function init() {
   $("detail-backdrop").addEventListener("click", () => closeDetail());
   $("detail-callback").addEventListener("click", callBack);
   $("detail-copy").addEventListener("click", copyNumber);
+  $("detail-link").addEventListener("click", copyCallLink);
+  $("detail-delete").addEventListener("click", askToDelete);
+  $("detail-delete-yes").addEventListener("click", deleteCall);
+  $("detail-delete-no").addEventListener("click", keepCall);
+  $("call-mute").addEventListener("click", () => setMuted(!muted));
+  $("call-mic").addEventListener("change", onMicrophoneChosen);
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener("devicechange", listMicrophones);
+  }
+  listMicrophones();
+  setUpRing();
+  setUpSpendChart();
+  loadModelSuggestions();
   // Unsaved settings are not lost to a closed tab or a reload without a warning.
   window.addEventListener("beforeunload", (event) => {
     if (unsavedChanges()) {
@@ -1950,6 +2416,9 @@ async function init() {
     // Status first: it fills the voice and accent lists, which the agent form then selects from.
     await loadStatus();
     await Promise.all([loadAgent(), loadCalls(), loadWhatsApp(), loadSpending(), loadNotify()]);
+    // A link to one call (?call=…) opens it.
+    const linked = new URL(location.href).searchParams.get("call");
+    if (linked) openDetail(linked);
   } catch (error) {
     const notice = $("setup-notice");
     notice.textContent = `Could not reach the server: ${error.message}`;

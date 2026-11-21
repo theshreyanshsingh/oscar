@@ -354,6 +354,7 @@ def test_the_dashboard_is_told_what_calls_and_the_key_cost(tmp_path):
         "key": {"limit": 50.0, "left": 7.5405, "resets": "monthly", "today": 0.5874, "this_month": 42.4595},
         "calls": {"last_24_hours": 0.0123, "last_30_days": 0.0123},
         "call_minimum": CALL_MINIMUM_DOLLARS,
+        "recent_calls": [[call["started_at"], 0.0123]],  # for the day-by-day chart
     }
 
 

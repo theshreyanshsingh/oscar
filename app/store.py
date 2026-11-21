@@ -521,6 +521,31 @@ class Store:
             ).fetchall()
         return [self._call_dict(row) for row in rows[:limit]], len(rows) > limit
 
+    def delete_call(self, call_id: str) -> bool:
+        """Forget a call for good: what was said, what its searches found, and its summary."""
+        with self._lock:
+            # All of it or none of it: never a call without its words, or words without a call.
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute("DELETE FROM messages WHERE call_id = ?", (call_id,))
+                self._db.execute("DELETE FROM searches WHERE call_id = ?", (call_id,))
+                cursor = self._db.execute("DELETE FROM calls WHERE id = ?", (call_id,))
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+        return cursor.rowcount > 0
+
+    def call_costs_since(self, since: datetime) -> list[tuple[str, float]]:
+        """(started_at, cost) of each call started since then that cost something, oldest first."""
+        stamp = since.astimezone(timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT started_at, cost FROM calls WHERE started_at >= ? AND cost > 0 ORDER BY started_at",
+                (stamp,),
+            ).fetchall()
+        return [(row["started_at"], float(row["cost"])) for row in rows]
+
     def count_open_todos(self) -> int:
         with self._lock:
             row = self._db.execute(

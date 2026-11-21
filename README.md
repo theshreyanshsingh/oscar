@@ -115,6 +115,12 @@ not heard. On headphones, switch on **I'm on headphones** under the Start call
 button and you can interrupt it mid-sentence. Callers on the phone can always
 interrupt.
 
+**Mute and microphone.** During a browser call, **Mute** stops your microphone
+reaching Oscar (it hears silence, and the call goes on) until you press
+**Unmute**. With more than one microphone, a **Microphone** list shows under the
+call button once the browser has let Oscar use one: pick another and it takes
+over at once, mid-call too, and is used for the next call.
+
 **Web search.** With a Firecrawl key in `.env`, the top of the dashboard says
 **Web search: on** and Oscar looks things up when a caller asks for something
 current: the weather, the news, a price, a score, opening hours. You hear "One
@@ -186,7 +192,9 @@ which costs a small fraction of that and answers about 0.7 seconds later.
 ### Spending
 
 **Call history** shows what each call cost and, above the table, what calls
-cost in the last 24 hours and the last 30 days. Oscar adds up what OpenRouter
+cost in the last 24 hours and the last 30 days, and a chart of what they cost
+on each of the last 14 days (in your computer's time zone; point at a day, or
+focus the chart and use the arrow keys, to see its total and number of calls). Oscar adds up what OpenRouter
 reports for each request a call makes: its answers, the transcripts, the
 lookups, and the summary and research notes written afterwards. An answer cut
 off part-way (you carried on talking) is looked up by its id 10 to 15 seconds
@@ -390,6 +398,11 @@ public https address.
 4. In the Twilio console, open your phone number. Under **Voice → A call comes
    in**, choose **Webhook**, paste the webhook URL (it ends in `/twilio/voice`)
    and select **HTTP POST**. Save.
+
+**Ring here when someone calls Oscar** (under **Call now**) plays a chime in
+the dashboard tab when a call comes in, and shows a notification while you are
+in another tab (the browser asks once whether to allow them). It is kept per
+browser.
 
 Now call your Twilio number to talk to the agent, or type a number in
 **Call a number** to have the agent call out. Trial Twilio accounts can only
@@ -600,7 +613,17 @@ Two things to know:
   notes, cost and transcript. Escape closes it. **Copy number** copies the
   number to call back on. With phone calls set up, **Call back** puts it in
   **Call a number**, so you can check it (and add the country code) before
-  Oscar dials.
+  Oscar dials. Each line of the transcript shows how far into the call it was
+  said (hover for the time of day).
+- **Copy link** copies the dashboard's address with that call open
+  (`/?call=…`): opening it, or reloading, opens the call again.
+- **Delete** removes a call for good, with its transcript, summary and what its
+  searches found, after you confirm. Not while the call is on or its summary
+  is being written.
+- **Download as CSV** saves the calls the search and filter find (all of them,
+  not only the pages shown) as a spreadsheet: when, type, numbers, length,
+  cost, name, summary and to-do. Anything a caller said that starts like a
+  spreadsheet formula is kept from running as one.
 
 On a phone each call is a card, and the section links are under **Menu**.
 
@@ -735,7 +758,8 @@ Edit these on the dashboard. They apply from the next call.
   service lists no others (checked on 2026-11-22).
 - **Chat model:** the OpenRouter model that writes Oscar's WhatsApp replies
   (`anthropic/claude-haiku-5.5` by default). Calls do not use it: they always
-  run on the speech model.
+  run on the speech model. Typing in the box suggests from OpenRouter's whole
+  list of chat models, fetched from its public list and kept for six hours.
 - **Opening line:** what Oscar says when a call connects. Leave it blank to let
   the caller speak first.
 - **Call instructions:** the agent's system prompt for voice calls. WhatsApp

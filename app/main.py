@@ -1,7 +1,10 @@
 """Web server: the dashboard, its JSON API, browser calls (WebRTC) and Twilio webhooks."""
 
 import asyncio
+import csv
+import io
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -25,6 +28,7 @@ from pydantic import BaseModel, Field
 from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
 from app.calls import CallManager
+from app.catalog import ModelCatalog
 from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
 from app.preview import PreviewFailed, voice_sample
 from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
@@ -84,19 +88,61 @@ class PhoneCallRequest(BaseModel):
     to: str = Field(pattern=r"^\+[1-9]\d{7,14}$", description="E.164 number, e.g. +14155550123")
 
 
+# The most calls one export holds.
+CSV_MOST_CALLS = 10000
+CSV_COLUMNS = [
+    ("Started (UTC)", "started_at"),
+    ("Type", "kind"),
+    ("Status", "status"),
+    ("From", "from_number"),
+    ("To", "to_number"),
+    ("Length (seconds)", "duration_seconds"),
+    ("Cost (dollars)", "cost"),
+    ("Caller's name", "caller_name"),
+    ("Call back on", "callback_number"),
+    ("Summary", "summary"),
+    ("To do", "follow_up"),
+    ("To do done (UTC)", "follow_up_done_at"),
+    ("Problem", "error"),
+]
+
+
+def spreadsheet_safe(value: object) -> str:
+    """A cell as text a spreadsheet shows as written. Something a caller said that
+    begins like a formula ("=HYPERLINK(...)") is kept from running as one; a phone
+    number such as +61412345678 is left as it is."""
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r") and not re.fullmatch(r"[+-]?\d+(\.\d+)?", text):
+        return "'" + text
+    return text
+
+
+def calls_csv(found: list[dict]) -> str:
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow([heading for heading, _ in CSV_COLUMNS])
+    for call in found:
+        writer.writerow([spreadsheet_safe(call.get(field)) for _, field in CSV_COLUMNS])
+    # A byte order mark, so Excel reads it as UTF-8 (names in any script).
+    return "\ufeff" + out.getvalue()
+
+
 def create_app(
     cfg: Config | None = None,
     *,
     access: CloudflareAccess | None = None,
     credit: KeyCredit | None = None,
+    catalog: ModelCatalog | None = None,
 ) -> FastAPI:
     """The web server.
 
-    `access` and `credit` replace the Cloudflare Access checker the settings ask
-    for and the reader of what is left on the OpenRouter key (for tests).
+    `access`, `credit` and `catalog` replace the Cloudflare Access checker the
+    settings ask for, the reader of what is left on the OpenRouter key, and the
+    list of OpenRouter's models (for tests).
     """
     cfg = cfg or load_config()
     credit = credit or KeyCredit(api_key=cfg.openrouter_api_key, base_url=cfg.openrouter_base_url)
+    catalog = catalog or ModelCatalog(base_url=cfg.openrouter_base_url)
     if access is None and cfg.access_required:
         access = CloudflareAccess(cfg.access_team_domain, cfg.access_audience)
     store = Store(cfg.db_path)
@@ -133,6 +179,7 @@ def create_app(
         if access is not None:
             await access.aclose()
         await credit.aclose()
+        await catalog.aclose()
 
     app = FastAPI(title="Oscar", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.cfg = cfg
@@ -213,7 +260,18 @@ def create_app(
                 "last_30_days": round(store.calls_cost_since(now - timedelta(days=30)), 4),
             },
             "call_minimum": CALL_MINIMUM_DOLLARS,
+            # Each call of the last 15 days that cost something, as [started_at, dollars]:
+            # the dashboard adds them up by day in its own time zone.
+            "recent_calls": [
+                [started_at, round(cost, 4)]
+                for started_at, cost in store.call_costs_since(now - timedelta(days=15))
+            ],
         }
+
+    @app.get("/api/models")
+    async def chat_models() -> dict:
+        """OpenRouter's chat models, as suggestions for the Chat model field ([] when unknown)."""
+        return {"models": await catalog.get()}
 
     @app.get("/api/summary-webhook")
     async def get_summary_webhook() -> dict:
@@ -283,6 +341,36 @@ def create_app(
             raise HTTPException(status_code=409, detail="This call has nothing to do.")
         done_at = utc_now() if todo.done else ""
         return {"call": calls.update(call_id, follow_up_done_at=done_at)}
+
+    @app.get("/api/calls.csv")
+    async def export_calls(
+        q: str = Query(default="", max_length=200),
+        show: Literal["all", "todo", "incoming", "outgoing", "browser", "failed"] = "all",
+    ) -> Response:
+        """Call history as a spreadsheet: the calls the search and filter show, newest first."""
+        found, _ = store.find_calls(limit=CSV_MOST_CALLS, query=q, show=show)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return Response(
+            content=calls_csv(found),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="oscar-calls-{day}.csv"'},
+        )
+
+    @app.delete("/api/calls/{call_id}")
+    async def delete_call(call_id: str) -> dict:
+        """Delete a call for good: its transcript, searches and summary."""
+        call = store.get_call(call_id)
+        if call is None:
+            raise HTTPException(status_code=404, detail="Call not found.")
+        if call["status"] in OPEN_STATUSES:
+            raise HTTPException(status_code=409, detail="End the call before you delete it.")
+        if call["summary_status"] == "writing":
+            raise HTTPException(
+                status_code=409, detail="Its summary is still being written. Delete it once that is done."
+            )
+        store.delete_call(call_id)
+        bus.publish({"type": "call_deleted", "id": call_id})
+        return {"deleted": call_id}
 
     @app.get("/api/calls/{call_id}")
     async def get_call(call_id: str) -> dict:
