@@ -51,16 +51,37 @@ VoiceId = Literal[
 
 # The accent Oscar speaks with on calls. The voices have no accents of their
 # own to pick from (nearly all sound American), so the model is asked for one
-# (app/agent.py). "none" asks for nothing and leaves the voice as it is.
+# (app/agent.py). "none" asks for nothing and leaves the voice as it is. The
+# label is also how the accent is named to the model ("a ... accent"). Scottish
+# to German were added on 2026-11-22, after real replies were judged (see
+# ACCENT_NOTE in app/agent.py); accents that did not hold were left out.
 ACCENTS: dict[str, str] = {
     "indian": "Indian",
     "australian": "Australian",
     "british": "British",
+    "scottish": "Scottish",
     "american": "American",
+    "southern_american": "Southern American",
+    "singaporean": "Singaporean",
+    "nigerian": "Nigerian",
+    "french": "French",
+    "german": "German",
     "none": "The voice's own",
 }
 
-AccentId = Literal["indian", "australian", "british", "american", "none"]
+AccentId = Literal[
+    "indian",
+    "australian",
+    "british",
+    "scottish",
+    "american",
+    "southern_american",
+    "singaporean",
+    "nigerian",
+    "french",
+    "german",
+    "none",
+]
 
 CallKind = Literal["browser", "phone_inbound", "phone_outbound"]
 # Who a transcript line is from. A "note" is not speech: it records something

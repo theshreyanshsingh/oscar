@@ -697,14 +697,36 @@ Edit these on the dashboard. They apply from the next call.
 - **Name:** the agent is told its name.
 - **Voice:** one of the speech model's thirteen voices, eight men's and five
   women's. Cedar, a man's voice, is the default.
-- **Accent:** Indian by default. Australian, British, American, or the voice's
-  own (nearly all the voices sound American when left alone). The voices come
+- **Accent:** Indian by default. Also Australian, British, Scottish, American,
+  Southern American, Singaporean, Nigerian, French, German, or the voice's own
+  (nearly all the voices sound American when left alone). The voices come
   without accents, so the model is asked to put one on. How well that holds
-  depends on the voice:
+  depends on the voice, and the hint under Accent says how the voice in the
+  form did, with a click to switch to a voice that held it every time:
   - *Indian:* Cedar had it on every reply of 80. Verse, Marin, Coral and Sage
     had it on 4 replies of 4; Alloy, Ash and Nova on 3; Shimmer on 2; Ballad,
     Echo, Fable and Onyx on 1, sounding British or American on the rest.
   - *Australian:* twelve of the thirteen voices take it; Ballad stays British.
+  - *Added on 2026-11-22,* each tried on 7 replies (a greeting and an answer
+    from Cedar and Marin, an answer from Verse, Coral and Ash), judged by three
+    listening models that were not told the accent:
+    - *Southern American:* held on 6 of 7; Coral sounded plain American. Replies
+      can lean on Southern turns of phrase (one opened with "Howdy").
+    - *French:* 4 of 7; Cedar and Marin every time, the others not.
+    - *German:* 4 of 7; Marin and Verse every time, Cedar on 1 of 2.
+    - *Singaporean:* 4 of 7; Cedar and Ash every time, Marin on 1 of 2.
+    - *Nigerian:* 4 of 7; Cedar, Ash and Coral every time, Marin and Verse not.
+    - *Scottish:* 3 of 7; Marin and Coral every time, Cedar, Verse and Ash not.
+
+    Seven replies is a small trial, so hear a voice with **Hear this voice**
+    before you save it. Tried and left out: Irish, New Zealand and South African
+    (1 of 6 each), Filipino, Italian and Mexican (1 of 4; asked for a Mexican
+    accent, Cedar answered in Spanish), Spanish (0 of 4), Canadian (always
+    heard as American), and Kenyan and Jamaican (3 of 7, no voice more than
+    once).
+
+  The speech model has thirteen voices, and all of them are offered: OpenAI's
+  service lists no others (checked on 2026-11-22).
 - **Chat model:** the OpenRouter model that writes Oscar's WhatsApp replies
   (`anthropic/claude-haiku-5.5` by default). Calls do not use it: they always
   run on the speech model.

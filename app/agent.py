@@ -83,6 +83,17 @@ NO_TOOLS_NOTE = (
 # the greeting and looked-up answers included. Verse, Marin, Coral and Sage
 # had it on 4 replies of 4; Alloy, Ash and Nova on 3; Shimmer on 2; Ballad,
 # Echo, Fable and Onyx on 1, sounding British or American on the rest.
+# Sixteen more accents were tried with this wording on 2026-11-22: a greeting
+# and a first answer each from Cedar and Marin, then a first answer from
+# Verse, Coral and Ash, judged by three listening models told nothing (a reply
+# held when two of the three named the accent asked for). Kept, by replies
+# held of 7: Southern American 6; French, German, Singaporean and Nigerian 4;
+# Scottish 3 (Marin and Coral every time). Which voices held each is in
+# ACCENT_FIT in app/static/app.js. Left out: Irish, New Zealand and South
+# African (1 of 6 each, heard as American, Australian or British), Filipino,
+# Italian and Mexican (1 of 4; asked for Mexican, Cedar answered in Spanish),
+# Spanish (0 of 4), Canadian (always heard as American), and Kenyan and
+# Jamaican (3 of 7, no voice held either on more than one reply).
 ACCENT_NOTE = (
     "You speak English with a clear, natural {accent} accent, like someone who grew up "
     "there. Keep that accent in every sentence of the call, starting with your very first "

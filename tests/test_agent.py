@@ -71,8 +71,18 @@ def test_each_accent_is_named_in_the_instructions_and_the_reminder(accent):
     agent = with_accent(accent)
     assert f"natural {ACCENTS[accent]} accent" in system_instruction(agent)
     assert f"your {ACCENTS[accent]} accent" in accent_reminder(agent)
+    # No other accent is asked for ("Southern American" holds the word "American").
     others = [ACCENTS[a] for a in ACCENTS if a not in (accent, "none")]
-    assert not any(other in system_instruction(agent) + accent_reminder(agent) for other in others)
+    said = system_instruction(agent) + accent_reminder(agent)
+    assert not any(f"natural {other} accent" in said or f"your {other} accent" in said for other in others)
+
+
+def test_every_accent_is_offered_and_can_be_saved():
+    from typing import get_args
+
+    from app.store import AccentId
+
+    assert set(get_args(AccentId)) == set(ACCENTS)
 
 
 def test_leaving_the_voice_as_it_is_asks_for_no_accent():

@@ -451,16 +451,11 @@ async function loadStatus() {
     );
   }
 
-  for (const [select, choices] of [
-    [$("agent-voice"), status.voices],
-    [$("agent-accent"), status.accents],
-  ]) {
-    if (!select.options.length) {
-      for (const [id, label] of Object.entries(choices)) {
-        select.append(new Option(label, id));
-      }
-    }
+  const voices = $("agent-voice");
+  if (!voices.options.length) {
+    for (const [id, label] of Object.entries(status.voices)) voices.append(new Option(label, id));
   }
+  if (!$("agent-accent").options.length) fillAccents($("agent-accent"), status.accents);
   updateCallUi();
 }
 
@@ -482,18 +477,128 @@ const AGENT_FIELDS = [
   "agent-knowledge",
 ];
 
-// What was measured for each accent (README.md, Agent settings).
-const ACCENT_HINTS = {
-  indian:
-    "Cedar kept it on every reply measured. Verse, Marin, Coral and Sage held it well; Ballad, Echo, Fable and Onyx often lose it.",
-  australian: "Every voice takes it, except Ballad, which stays British.",
-  british: "How well it holds depends on the voice: try one with Hear this voice.",
-  american: "How well it holds depends on the voice: try one with Hear this voice.",
-  none: "Each voice as it comes. Nearly all of them sound American.",
+// What was measured for each accent (README.md, Agent settings; ACCENT_NOTE in
+// app/agent.py). `tried` is, for each voice tried, [replies that held it, replies tried].
+const ACCENT_FIT = {
+  indian: {
+    tried: {
+      cedar: [80, 80], verse: [4, 4], marin: [4, 4], coral: [4, 4], sage: [4, 4],
+      alloy: [3, 4], ash: [3, 4], nova: [3, 4], shimmer: [2, 4],
+      ballad: [1, 4], echo: [1, 4], fable: [1, 4], onyx: [1, 4],
+    },
+  },
+  australian: { note: "Every voice takes it, except Ballad, which stays British." },
+  british: { note: "How well it holds depends on the voice: try one with Hear this voice." },
+  scottish: {
+    note: "Across the voices tried, 3 of 7 replies held it.",
+    tried: { marin: [2, 2], coral: [1, 1], cedar: [0, 2], verse: [0, 1], ash: [0, 1] },
+  },
+  american: { note: "How well it holds depends on the voice: try one with Hear this voice." },
+  southern_american: {
+    note: "Across the voices tried, 6 of 7 replies held it. Replies can lean on Southern turns of phrase: one opened with “Howdy”.",
+    tried: { cedar: [2, 2], marin: [2, 2], ash: [1, 1], verse: [1, 1], coral: [0, 1] },
+  },
+  singaporean: {
+    note: "Across the voices tried, 4 of 7 replies held it.",
+    tried: { cedar: [2, 2], ash: [1, 1], marin: [1, 2], coral: [0, 1], verse: [0, 1] },
+  },
+  nigerian: {
+    note: "Across the voices tried, 4 of 7 replies held it.",
+    tried: { cedar: [2, 2], ash: [1, 1], coral: [1, 1], marin: [0, 2], verse: [0, 1] },
+  },
+  french: {
+    note: "Across the voices tried, 4 of 7 replies held it.",
+    tried: { cedar: [2, 2], marin: [2, 2], verse: [0, 1], coral: [0, 1], ash: [0, 1] },
+  },
+  german: {
+    note: "Across the voices tried, 4 of 7 replies held it.",
+    tried: { marin: [2, 2], verse: [1, 1], cedar: [1, 2], ash: [0, 1], coral: [0, 1] },
+  },
+  none: { note: "Each voice as it comes. Nearly all of them sound American." },
 };
 
+// How the accent list is laid out. An accent the server offers that is not
+// named here is listed after these, so none is ever hidden.
+const ACCENT_GROUPS = [
+  ["Accents of English", ["indian", "australian", "british", "scottish", "american", "southern_american", "singaporean", "nigerian"]],
+  ["English with another first language", ["french", "german"]],
+  ["No accent asked for", ["none"]],
+];
+
+function fillAccents(select, accents) {
+  const listed = new Set();
+  for (const [label, ids] of ACCENT_GROUPS) {
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const id of ids.filter((id) => id in accents)) {
+      group.append(new Option(accents[id], id));
+      listed.add(id);
+    }
+    if (group.children.length) select.append(group);
+  }
+  for (const [id, label] of Object.entries(accents)) {
+    if (!listed.has(id)) select.append(new Option(label, id));
+  }
+}
+
+function voiceName(voice) {
+  const option = [...$("agent-voice").options].find((item) => item.value === voice);
+  return option ? option.textContent.replace(/\s*\(.*\)$/, "") : voice;
+}
+
+function howItHeld(name, [held, tried]) {
+  const replies = tried === 1 ? "the one reply" : tried === 2 ? "both replies" : `all ${tried} replies`;
+  if (held === tried) return `${name} held it on ${replies} tried.`;
+  if (held === 0) return `${name} lost it on ${replies} tried.`;
+  return `${name} held it on ${held} of ${tried} replies tried.`;
+}
+
+// The hint under Accent: how the voice in the form did with it, the voices
+// that held it every time (one click picks one), and what else was found.
 function showAccentHint() {
-  $("agent-accent-hint").textContent = ACCENT_HINTS[$("agent-accent").value] || "";
+  const hint = $("agent-accent-hint");
+  const fit = ACCENT_FIT[$("agent-accent").value] || {};
+  const voice = $("agent-voice").value;
+  const mine = fit.tried && fit.tried[voice];
+  hint.replaceChildren();
+  if (fit.tried) {
+    hint.append(mine ? howItHeld(voiceName(voice), mine) : `${voiceName(voice)} has not been tried with this accent.`);
+  }
+  const best = !fit.tried || (mine && mine[0] === mine[1])
+    ? []
+    : Object.entries(fit.tried)
+        .filter(([id, [held, tried]]) => id !== voice && held === tried)
+        .sort((a, b) => b[1][1] - a[1][1])
+        .slice(0, 4);
+  if (best.length) {
+    const offer = document.createElement("span");
+    offer.className = "accent-best";
+    offer.append("Held every time by ");
+    best.forEach(([id], index) => {
+      if (index) offer.append(index === best.length - 1 ? " and " : ", ");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "link";
+      button.dataset.voice = id;
+      const label = $("agent-voice").querySelector(`option[value="${id}"]`)?.textContent || voiceName(id);
+      button.textContent = label;
+      button.setAttribute("aria-label", `Use ${label}`);
+      offer.append(button);
+    });
+    offer.append(".");
+    hint.append(" ", offer);
+  }
+  if (fit.note) hint.append(hint.childNodes.length ? " " : "", fit.note);
+}
+
+// "Held every time by Marin": picks that voice, as if chosen from the list.
+function useVoice(event) {
+  const button = event.target.closest("button[data-voice]");
+  if (!button) return;
+  const select = $("agent-voice");
+  select.value = button.dataset.voice;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  select.focus();
 }
 
 function formSnapshot(ids) {
@@ -1732,6 +1837,8 @@ async function init() {
   $("agent-form").addEventListener("input", updateAgentDirty);
   $("agent-form").addEventListener("change", updateAgentDirty);
   $("agent-accent").addEventListener("change", showAccentHint);
+  $("agent-voice").addEventListener("change", showAccentHint);
+  $("agent-accent-hint").addEventListener("click", useVoice);
   $("agent-discard").addEventListener("click", () => {
     if (state.agentSettings) fillAgentForm(state.agentSettings);
     showError("agent-error", "");
