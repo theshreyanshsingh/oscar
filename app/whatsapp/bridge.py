@@ -73,6 +73,8 @@ ONLINE_RETRY_SECONDS = 5
 ONLINE_ATTEMPTS = 12
 # How long Oscar trusts what it learned about who is in a group.
 GROUP_MEMBERS_SECONDS = 10 * 60
+# How many recent messages Oscar knows by id, to notice one WhatsApp delivers twice.
+SEEN_MESSAGES = 500
 # How long unlinking waits for WhatsApp to answer.
 UNLINK_PATIENCE_SECONDS = 30
 # When WhatsApp signs Oscar out, its library deletes the saved login, which can
@@ -206,6 +208,7 @@ class WhatsAppBridge:
         self.session_path = cfg.db_path.parent / "whatsapp-session.sqlite3"
         self.failed = False  # set when the connection ended with an error
         self._chat_locks: dict[str, asyncio.Lock] = {}
+        self._seen: dict[tuple[str, str], None] = {}  # (chat, message id), oldest first
         self._group_names: dict[str, str] = {}
         self._group_members: dict[str, tuple[float, dict]] = {}  # chat -> (when learned, id -> phone id)
         self._owner_name = ""  # the linked account's WhatsApp name
@@ -345,7 +348,10 @@ class WhatsAppBridge:
     def _protect_session_file(self) -> None:
         """The session file holds Oscar's WhatsApp login keys: owner-only access."""
         for path in self.session_path.parent.glob(self.session_path.name + "*"):
-            os.chmod(path, 0o600)
+            try:
+                os.chmod(path, 0o600)
+            except FileNotFoundError:
+                pass  # SQLite's journal, which lasts one write: gone again since it was listed
 
     async def on_pair_status(self, _client, event: PairStatusEv) -> None:
         if event.Error:
@@ -406,6 +412,8 @@ class WhatsAppBridge:
         message = parse_message(event)
         if message is None:
             return
+        if not self._first_delivery(message):
+            return  # delivered again: it was remembered, and answered if it asked, the first time
         agent = self.store.get_agent()
         settings = self.store.get_whatsapp_settings()
         # Oscar may share its owner's own number instead of having one to itself.
@@ -415,34 +423,6 @@ class WhatsAppBridge:
             # use) or the account's name is not known yet. Right after linking
             # that can take a moment.
             await self._load_my_ids()
-        members_called_oscar: frozenset[str] = frozenset()
-        if own_number:
-            members_called_oscar = await self._mentioned_members_called(agent.name, event, message)
-        addressed = is_addressed_to_oscar(
-            message,
-            my_ids=self.my_ids,
-            agent_name=agent.name,
-            reply_in_private_chats=settings.reply_in_private_chats,
-            own_number=own_number,
-            members_called_oscar=members_called_oscar,
-        )
-        # For --verbose: what arrived and what Oscar made of it, without its words.
-        logger.debug(
-            "Message in a %s: %s, from Oscar's own number: %s, mentions %d (the account among "
-            "them: %s, members called %s among them: %d), replies to the account: %s, Oscar knows "
-            "%d of its 2 ids, shares its owner's number: %s, addressed to Oscar: %s",
-            "group" if message.is_group else "private chat",
-            message.kind,
-            message.from_me,
-            len(message.mentioned_ids),
-            bool(message.mentioned_ids & self.my_ids),
-            agent.name,
-            len(members_called_oscar),
-            message.quoted_sender_id in self.my_ids,
-            len(self.my_ids),
-            own_number,
-            addressed,
-        )
         # Remember every message right away, in arrival order, so the context of
         # each answer includes whatever was said before it. A message typed on
         # Oscar's own phone counts as Oscar speaking, unless that phone is the
@@ -454,32 +434,64 @@ class WhatsAppBridge:
             self.memory.remember(message, speaker=owner, from_oscar=False)
         else:
             self.memory.remember(message, speaker=agent.name)
-        if not addressed or is_too_old_to_answer(message):
-            return
 
-        chat_label = await self._chat_label(event, message)
-        asker = message.sender_name or "Someone"
-        if own_number and message.from_me:
-            asker = owner
-        if not self.memory.allow_reply(message.chat_id):
-            self.store.add_whatsapp_activity(
-                chat_name=chat_label,
-                asker=asker,
-                request=message.summary,
-                reply="",
-                error="Not answered: too many requests in the last few minutes.",
-            )
-            return
-
-        # Collect everything from the event before replying: neonize's reply
-        # helper clears the original message's context info in place.
-        images = [] if message.view_once else await self._download_images(event)
-        quoted = MessageEv()
-        quoted.CopyFrom(event)
-        chat_jid = event.Info.MessageSource.Chat
-
+        # From here on, a chat's messages are handled one at a time, in the order
+        # they arrived: a question that waits for a photo or a name is never
+        # overtaken by a later one, and a quick second question sees the first answer.
         async with self._chat_locks.setdefault(message.chat_id, asyncio.Lock()):
-            # Built inside the lock, so a quick second question sees the first answer.
+            members_called_oscar: frozenset[str] = frozenset()
+            if own_number:
+                members_called_oscar = await self._mentioned_members_called(agent.name, event, message)
+            addressed = is_addressed_to_oscar(
+                message,
+                my_ids=self.my_ids,
+                agent_name=agent.name,
+                reply_in_private_chats=settings.reply_in_private_chats,
+                own_number=own_number,
+                members_called_oscar=members_called_oscar,
+            )
+            # For --verbose: what arrived and what Oscar made of it, without its words.
+            logger.debug(
+                "Message in a %s: %s, from Oscar's own number: %s, mentions %d (the account among "
+                "them: %s, members called %s among them: %d), replies to the account: %s, Oscar knows "
+                "%d of its 2 ids, shares its owner's number: %s, addressed to Oscar: %s",
+                "group" if message.is_group else "private chat",
+                message.kind,
+                message.from_me,
+                len(message.mentioned_ids),
+                bool(message.mentioned_ids & self.my_ids),
+                agent.name,
+                len(members_called_oscar),
+                message.quoted_sender_id in self.my_ids,
+                len(self.my_ids),
+                own_number,
+                addressed,
+            )
+            if not addressed or is_too_old_to_answer(message):
+                return
+
+            chat_label = await self._chat_label(event, message)
+            asker = message.sender_name or "Someone"
+            if own_number and message.from_me:
+                asker = owner
+            if not self.memory.allow_reply(message.chat_id):
+                self.store.add_whatsapp_activity(
+                    chat_name=chat_label,
+                    asker=asker,
+                    request=message.summary,
+                    reply="",
+                    error="Not answered: too many requests in the last few minutes.",
+                )
+                return
+
+            # Collect everything from the event before replying: neonize's reply
+            # helper clears the original message's context info in place.
+            images = [] if message.view_once else await self._download_images(event)
+            quoted = MessageEv()
+            quoted.CopyFrom(event)
+            chat_jid = event.Info.MessageSource.Chat
+
+            # What came before this message, and Oscar's answers since.
             request_text = build_request_text(
                 message,
                 memory=self.memory,
@@ -550,6 +562,18 @@ class WhatsAppBridge:
                 chat_name=chat_label, asker=asker, request=message.summary, reply=reply, error=error
             )
 
+    def _first_delivery(self, message: IncomingMessage) -> bool:
+        """False for a message WhatsApp has delivered already, so it is not remembered or answered twice."""
+        if not message.message_id:
+            return True
+        key = (message.chat_id, message.message_id)
+        if key in self._seen:
+            return False
+        self._seen[key] = None
+        if len(self._seen) > SEEN_MESSAGES:
+            del self._seen[next(iter(self._seen))]
+        return True
+
     async def _mentioned_members_called(
         self, name: str, event: MessageEv, message: IncomingMessage
     ) -> frozenset[str]:
@@ -594,6 +618,10 @@ class WhatsAppBridge:
 
     async def _chat_label(self, event: MessageEv, message: IncomingMessage) -> str:
         if not message.is_group:
+            if message.from_me:
+                # Typed on the account's own phone (Oscar shares its owner's number): the
+                # chat is with the other person, known by what they wrote in it.
+                return next(iter(self.memory.names_in(message.chat_id).values()), "someone")
             return message.sender_name or "someone"
         if message.chat_id not in self._group_names:
             try:

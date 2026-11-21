@@ -88,9 +88,14 @@ def job_state() -> tuple[bool, int | None]:
 WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
 
 
+def local_host(cfg: Config) -> str:
+    """The host this machine reaches Oscar at. Oscar listening at every address (HOST=0.0.0.0) is asked at 127.0.0.1."""
+    return "127.0.0.1" if cfg.host in WILDCARD_HOSTS else cfg.host
+
+
 def address(cfg: Config) -> str:
-    """Where this machine reaches Oscar. Oscar listening at every address (HOST=0.0.0.0) is asked at 127.0.0.1."""
-    host = "127.0.0.1" if cfg.host in WILDCARD_HOSTS else cfg.host
+    """Where this machine reaches Oscar."""
+    host = local_host(cfg)
     if ":" in host:
         host = f"[{host}]"  # an IPv6 address
     return f"http://{host}:{cfg.port}"
@@ -121,9 +126,12 @@ def calls_in_progress(cfg: Config) -> int:
 
 
 def port_in_use(cfg: Config) -> bool:
-    with socket.socket() as probe:
-        probe.settimeout(1)
-        return probe.connect_ex((cfg.host, cfg.port)) == 0
+    """Whether something answers on Oscar's port. Works for IPv6 hosts (HOST=::1) too, and never fails."""
+    try:
+        with socket.create_connection((local_host(cfg), cfg.port), timeout=1):
+            return True
+    except OSError:  # refused, timed out, or a host that does not resolve
+        return False
 
 
 def wait_until(check: Callable[[], bool], seconds: float) -> bool:

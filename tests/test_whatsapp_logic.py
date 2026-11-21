@@ -163,6 +163,19 @@ def test_request_text_skips_stale_history_and_the_message_itself():
     assert text.startswith("The message to answer:")
 
 
+def test_what_arrived_while_a_question_waited_is_left_out_but_oscars_answers_are_not():
+    memory = ChatMemory()
+    memory.remember(msg("@oscar best ramen nearby?", t=NOW - 20))
+    question = msg("@oscar and is it open late?", t=NOW - 10)
+    memory.remember(question)
+    memory.remember(msg("I'm in, see you there", sender="Roman", sender_id="15705550111", t=NOW - 5))
+    memory.remember_reply(GROUP, "Oscar", "Try Ippudo on 4th Ave.", NOW - 2)
+    text = build_request_text(question, memory=memory, my_ids=MY_IDS, agent_name="Oscar", now=NOW)
+    assert "Jay: @oscar best ramen nearby?" in text
+    assert "Oscar (you): Try Ippudo on 4th Ave." in text  # what Oscar has said already
+    assert "see you there" not in text  # said after the question
+
+
 def test_replying_to_a_photo_is_described():
     question = msg("@oscar thoughts on this?", quoted_sender_id="15705550111", quoted_kind="image",
                    quoted_text="new logo draft")

@@ -30,7 +30,8 @@ def test_an_https_address_is_kept(given, kept):
 
 @pytest.mark.parametrize(
     "refused",
-    ["http://hooks.example.test/x", "hooks.example.test/x", "ftp://example.test", "https://", "javascript:alert(1)", "https://x.test/" + "a" * 2000],
+    ["http://hooks.example.test/x", "hooks.example.test/x", "ftp://example.test", "https://", "javascript:alert(1)", "https://x.test/" + "a" * 2000,
+     "https://[oops", "https://example.test:abc/hook", "https://example.test:99999/hook"],
 )
 def test_an_address_oscar_will_not_post_to_is_refused(refused):
     with pytest.raises(WebhookRefused):

@@ -95,6 +95,21 @@ def test_status_callback_marks_unanswered_call_failed(client, cfg):
     assert client.get(f"/api/calls/{call['id']}").json()["call"]["status"] == "failed"
 
 
+def test_a_status_update_that_beats_the_call_sid_still_finds_its_call(client, cfg):
+    store = Store(cfg.db_path)
+    call = store.create_call("phone_outbound", status="connecting", to_number="+14155550100")
+    other = store.create_call("phone_inbound", status="live", from_number="+14155550199")
+    store.close()
+
+    busy = {"CallSid": "CA" + "4" * 32, "CallStatus": "busy"}
+    assert signed_post(client, f"/twilio/status?call_id={call['id']}", busy).status_code == 204
+    final = client.get(f"/api/calls/{call['id']}").json()["call"]
+    assert (final["status"], final["twilio_sid"]) == ("failed", "CA" + "4" * 32)
+    # Only an outgoing call still waiting for its SID can be named this way.
+    assert signed_post(client, f"/twilio/status?call_id={other['id']}", {**busy, "CallSid": "CA" + "5" * 32}).status_code == 204
+    assert client.get(f"/api/calls/{other['id']}").json()["call"]["status"] == "live"
+
+
 def test_status_callback_requires_signature(client):
     response = client.post("/twilio/status", data={"CallSid": "CA1", "CallStatus": "completed"})
     assert response.status_code == 403
@@ -157,7 +172,7 @@ def test_outbound_call_is_placed_with_stream_twiml(client, monkeypatch):
     (request,) = fake_calls.created
     assert request["to"] == "+14155550123"
     assert request["from_"] == "+15005550006"
-    assert request["status_callback"] == "https://oscar.example.test/twilio/status"
+    assert request["status_callback"] == f"https://oscar.example.test/twilio/status?call_id={call['id']}"
     url, params = stream_parameters(request["twiml"])
     assert url == "wss://oscar.example.test/twilio/media"
     assert params["call_id"] == call["id"]

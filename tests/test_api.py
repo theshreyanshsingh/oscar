@@ -543,6 +543,16 @@ def test_unknown_host_is_refused_when_local_only(client):
     assert client.post("/api/calls/browser", headers={"host": "attacker.example"}).status_code == 400
 
 
+def test_the_public_url_is_accepted_when_local_only(tmp_path):
+    # A tunnel (ngrok, cloudflared) passes its own name on as the Host: Twilio's
+    # webhooks and the dashboard through the tunnel come in under it.
+    cfg = make_config(tmp_path, public_url="https://abc.ngrok-free.app")
+    with local_client(cfg) as client:
+        assert client.get("/api/status", headers={"host": "abc.ngrok-free.app"}).status_code == 200
+        assert client.post("/twilio/voice", data={}, headers={"host": "abc.ngrok-free.app"}).status_code == 403
+        assert client.get("/api/status", headers={"host": "attacker.example"}).status_code == 400
+
+
 def test_any_host_is_accepted_on_a_server(tmp_path):
     cfg = make_config(tmp_path, host="0.0.0.0")
     with local_client(cfg) as client:

@@ -463,17 +463,35 @@ class Store:
         return [self._call_dict(row) for row in rows]
 
     def find_calls(
-        self, *, limit: int = 50, before: str = "", query: str = "", show: str = "all"
+        self,
+        *,
+        limit: int = 50,
+        before: str = "",
+        before_id: str = "",
+        query: str = "",
+        show: str = "all",
     ) -> tuple[list[dict], bool]:
         """Calls for Call history, newest first: (the calls, whether there are older ones).
 
-        `before` is a started_at: only calls started before it (the next page).
+        The next page is the calls after the call `before_id` in that order. Calls
+        are timed to the second, so several can share a started_at: the call's own
+        place among them is kept too. `before` (a started_at alone) is what older
+        dashboards send, and skips the rest of that second.
         `query` is looked for in the summary, the to-do, the caller's name, the
         numbers, the error and what was said; a number is found whatever spaces
         or dashes it was typed with. `show` is one of SHOW_FILTERS.
         """
         conditions, values = [], []
-        if before:
+        with self._lock:
+            after = (
+                self._db.execute("SELECT started_at, rowid FROM calls WHERE id = ?", (before_id,)).fetchone()
+                if before_id
+                else None
+            )
+        if after is not None:
+            conditions.append("(started_at < ? OR (started_at = ? AND rowid < ?))")
+            values.extend([after["started_at"], after["started_at"], after["rowid"]])
+        elif before:
             conditions.append("started_at < ?")
             values.append(before)
         if SHOW_FILTERS.get(show):

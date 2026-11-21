@@ -92,6 +92,11 @@ _SAID_NUMBER = re.compile(rf"{_SAID_DIGIT}(?:[\s-]*{_SAID_DIGIT})*", flags=re.IG
 SAID_NUMBER_DIGITS = 3
 # A number this long in the note is checked against what was said on the call.
 _LONG_NUMBER = re.compile(r"\d(?:[\s().-]*\d){5,}")
+# Except a date or hours written with dots or dashes ("22.11.2026", "9.00-17.00"),
+# which were said in words.
+_DATE_OR_TIMES = re.compile(r"\d{1,4}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}[.:]\d{2}\s*-\s*\d{1,2}[.:]\d{2}")
+# The fewest digits a number to call back can have.
+CALLBACK_DIGITS = 6
 
 
 class SummaryFailed(Exception):
@@ -208,7 +213,7 @@ def only_what_was_said(summary: CallSummary, messages: list[dict]) -> CallSummar
 
     for sentence in (summary.summary, summary.follow_up):
         for number in _LONG_NUMBER.findall(sentence):
-            if not was_said(number):
+            if not _DATE_OR_TIMES.fullmatch(number) and not was_said(number):
                 raise SummaryFailed("The summary named a number that was not said on the call.")
 
     name_words = words_in(summary.caller_name)
@@ -220,9 +225,49 @@ def only_what_was_said(summary: CallSummary, messages: list[dict]) -> CallSummar
     return CallSummary(
         summary=summary.summary,
         caller_name=summary.caller_name if name_was_said else "",
-        callback_number=plus + digits_in(number) if was_said(number) else "",
+        callback_number=plus + digits_in(number) if _given_whole(number, messages) else "",
         follow_up=summary.follow_up,
     )
+
+
+def numbers_given(messages: list[dict]) -> set[str]:
+    """The digits of every number someone said on the call, whole.
+
+    A number is one run of digits (in digits or in words), or runs said one after
+    another by the same speaker: with nothing but pauses and punctuation between
+    them in a turn ("0412, 345, 678"), or over their turns ("zero four nine one" ...
+    "five seven zero"). Words between runs in a turn ("or my office on") end it.
+    """
+    given: set[str] = set()
+    for role in {m["role"] for m in messages if m["role"] != "note"}:
+        runs: list[tuple[str, bool]] = []  # (digits, follows the run before it with no words between)
+        for message in messages:
+            if message["role"] != role:
+                continue
+            end = None
+            for match in _SAID_NUMBER.finditer(message["text"]):
+                between = message["text"][end : match.start()] if end is not None else ""
+                runs.append((digits_in(match.group(), spelt_out=True), not re.search(r"[^\W\d_]", between)))
+                end = match.end()
+        for start in range(len(runs)):
+            digits = runs[start][0]
+            given.add(digits)
+            for joined, follows in runs[start + 1 :]:
+                if not follows:
+                    break
+                digits += joined
+                given.add(digits)
+    return given
+
+
+def _given_whole(number: str, messages: list[dict]) -> bool:
+    """Whether `number` is a number someone gave on the call, digit for digit.
+
+    Not a part of one ("345 678", a digit short) or two run together: a wrong
+    number is worse than none.
+    """
+    digits = digits_in(number)
+    return len(digits) >= CALLBACK_DIGITS and digits in numbers_given(messages)
 
 
 async def write_summary(

@@ -5,6 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi import Query
@@ -140,8 +141,15 @@ def create_app(
 
     if cfg.local_only:
         # Only this computer can open it: refusing other Host names stops web
-        # pages from reaching this server through DNS rebinding.
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
+        # pages from reaching this server through DNS rebinding. The address in
+        # PUBLIC_URL (a tunnel such as ngrok) is Oscar's own, chosen by the owner:
+        # tunnels pass its name on as the Host, and Twilio's webhooks and media
+        # stream come in through it.
+        allowed = ["localhost", "127.0.0.1"]
+        public_host = urlsplit(cfg.public_url).hostname if cfg.public_url else None
+        if public_host:
+            allowed.append(public_host)
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)
     # Otherwise (HOST=0.0.0.0 on a server) it answers at any address. There is no
     # password: Cloudflare Access decides who gets in when it is set up, and
     # otherwise the firewall does.
@@ -257,11 +265,12 @@ def create_app(
     async def list_calls(
         limit: int = Query(default=100, ge=1, le=200),
         before: str = Query(default="", max_length=40),
+        before_id: str = Query(default="", max_length=64),
         q: str = Query(default="", max_length=200),
         show: Literal["all", "todo", "incoming", "outgoing", "browser", "failed"] = "all",
     ) -> dict:
-        """Calls for Call history, newest first. `before` (a call's started_at) gives the next page."""
-        found, more = store.find_calls(limit=limit, before=before, query=q, show=show)
+        """Calls for Call history, newest first. `before_id` (the last call shown) gives the next page."""
+        found, more = store.find_calls(limit=limit, before=before, before_id=before_id, query=q, show=show)
         return {"calls": found, "more": more, "open_todos": store.count_open_todos()}
 
     @app.put("/api/calls/{call_id}/todo")

@@ -32,6 +32,7 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 import time
 import wave
 from collections import deque
@@ -188,12 +189,19 @@ def say_request(text: str) -> str:
 
 
 def same_words(said: str, asked: str) -> bool:
-    """Whether two lines have the same words, whatever their punctuation and capitals."""
+    """Whether two lines have the same words, whatever their punctuation and capitals.
+
+    Words in any script count ("नमस्ते"), and a line with no words matches nothing,
+    so a greeting is never kept when what was said cannot be checked.
+    """
 
     def words(text: str) -> list[str]:
-        return re.sub(r"[^a-z0-9 ]", "", text.lower().replace("-", " ")).split()
+        text = text.casefold().replace("'", "").replace("’", "").replace("-", " ")
+        # A vowel sign is part of its word: "नमस्ते" is one word, not several.
+        kept = (c if c.isalnum() or unicodedata.category(c).startswith("M") else " " for c in text)
+        return "".join(kept).split()
 
-    return words(said) == words(asked)
+    return bool(words(asked)) and words(said) == words(asked)
 
 
 def wav_file(pcm: bytes, sample_rate: int) -> bytes:
@@ -865,9 +873,20 @@ class OpenRouterVoiceService(AIService):
             await self.push_frame(LLMFullResponseStartFrame())
         self._starting_part = True
         piece = VOICE_SAMPLE_RATE // 2  # a quarter of a second, as the model sends it
+        # The words go out in step with the audio, as a live reply's do (_play):
+        # cut off part-way, the words heard so far are kept, and the rest are
+        # dropped with the audio that was never played.
+        unsaid = deque(re.findall(r"\s*\S+", words))
+        written, sent_seconds = 0, 0.0
         for start in range(0, len(speech), piece):
-            await self._say(speech[start : start + piece])
-        await self._write(words)
+            chunk = speech[start : start + piece]
+            await self._say(chunk)
+            sent_seconds += len(chunk) / 2 / VOICE_SAMPLE_RATE
+            while unsaid and written + len(unsaid[0]) <= sent_seconds * SPOKEN_CHARS_PER_SECOND:
+                written += len(unsaid[0])
+                await self._write(unsaid.popleft())
+        for text in unsaid:
+            await self._write(text)
         await self._finish_speaking()
 
     async def _record_hold_line(self) -> None:

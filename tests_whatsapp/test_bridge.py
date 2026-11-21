@@ -838,9 +838,9 @@ async def test_an_id_oscar_learns_after_connecting_still_counts(setup):
 async def test_verbose_logging_says_what_arrived_but_never_its_words(setup, caplog):
     await connect(setup)
     with caplog.at_level(logging.DEBUG, logger="oscar.whatsapp"):
-        await setup.bridge.handle_message(group_event("the gate code is 4471"))
+        await setup.bridge.handle_message(group_event("the gate code is 4471", message_id="G1"))
         await setup.bridge.handle_message(
-            group_event(f"@{OSCAR_LID} what is the gate code?", mentions=[f"{OSCAR_LID}@lid"])
+            group_event(f"@{OSCAR_LID} what is the gate code?", mentions=[f"{OSCAR_LID}@lid"], message_id="G2")
         )
     arrived = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Message in")]
     assert len(arrived) == 2
@@ -1318,3 +1318,74 @@ async def test_a_failed_web_search_is_shown_on_the_dashboard_though_oscar_replie
     (activity,) = setup.store.list_whatsapp_activity()
     assert activity["reply"] == "I couldn't search just now."
     assert activity["error"] == "Web search failed: The Firecrawl account is out of credits."
+
+
+# Fixes from the second review
+
+
+async def test_a_question_waiting_for_its_photo_is_not_overtaken_by_a_later_one(setup, monkeypatch):
+    await connect(setup)
+
+    async def slow_download(message):
+        await asyncio.sleep(0.05)
+        return b"\x89PNG fake image"
+
+    async def answer(**kwargs):
+        setup.asked.append(kwargs)
+        return f"Answer {len(setup.asked)}"
+
+    setup.client.download_any = slow_download
+    monkeypatch.setattr(bridge_module.brain, "generate_reply", answer)
+    # neonize hands each message over as a task of its own, in the order they arrived.
+    await asyncio.gather(
+        setup.bridge.handle_message(group_event("@oscar is this ripe?", image=True, message_id="Q1")),
+        setup.bridge.handle_message(group_event("@oscar how long to boil an egg?", name="Roman", message_id="Q2")),
+    )
+    assert [quoted.Info.ID for _, quoted in setup.client.replies] == ["Q1", "Q2"]
+    first, second = (call["request_text"] for call in setup.asked)
+    assert "boil an egg" not in first.split("The message to answer:")[0]  # it came later
+    assert "Jay: [photo] @oscar is this ripe?" in second and "Oscar (you): Answer 1" in second
+
+
+async def test_a_message_whatsapp_delivers_twice_is_answered_once(setup):
+    await connect(setup)
+    event = group_event("@oscar hi", message_id="TWICE")
+    await setup.bridge.handle_message(event)
+    await setup.bridge.handle_message(event)
+    assert len(setup.client.replies) == 1 and len(setup.asked) == 1
+    await setup.bridge.handle_message(group_event("@oscar and again?", message_id="NEXT"))
+    assert setup.asked[1]["request_text"].count("@oscar hi") == 1
+
+
+async def test_a_journal_file_gone_by_the_time_it_is_protected_changes_nothing(setup, monkeypatch):
+    # The library's database keeps a journal beside it for each write, so one
+    # listed a moment ago may be gone already.
+    setup.bridge.session_path.write_bytes(b"")
+    journal = setup.bridge.session_path.with_name(setup.bridge.session_path.name + "-journal")
+    journal.write_bytes(b"")
+    chmod = bridge_module.os.chmod
+
+    def journal_gone(path, mode):
+        if str(path) == str(journal):
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        chmod(path, mode)
+
+    monkeypatch.setattr(bridge_module.os, "chmod", journal_gone)
+    code_lifetimes(monkeypatch, first=60, later=20)
+    await setup.client.event.qr_handler(setup.client, b"2@code")  # as neonize calls it
+    assert setup.bridge._qr_expiry is not None  # the next code will still be asked for
+    await setup.client.event.handlers[ConnectedEv](setup.client, ConnectedEv())
+    assert setup.client.presence_sent == ["AVAILABLE"]
+    assert setup.bridge.session_path.stat().st_mode & 0o777 == 0o600
+
+
+async def test_a_private_chat_the_owner_asks_in_is_named_after_the_other_person(own):
+    own.store.save_whatsapp_settings(WhatsAppSettings(own_number=True, reply_in_private_chats=True))
+    await connect(own)
+    dm = dict(chat=JAY_PHONE, chat_server="s.whatsapp.net", is_group=False)
+    await own.bridge.handle_message(group_event("are you free tonight?", message_id="J1", **dm))
+    owners = from_the_owner(group_event("@oscar what is on tonight?", message_id="O1", **dm))
+    owners.Info.Pushname = "Shrey"  # the account's own name, which is not who the chat is with
+    await own.bridge.handle_message(owners)
+    assert "a private WhatsApp chat with Jay" in own.asked[0]["system_prompt"]
+    assert own.store.list_whatsapp_activity()[0]["chat_name"] == "Jay"

@@ -164,10 +164,10 @@ class KeyCredit:
         if not credit or credit["left"] is None or credit["left"] >= CALL_MINIMUM_DOLLARS:
             return ""
         resets = f" It starts again when the limit resets ({credit['resets']})." if credit["resets"] else ""
+        of_limit = f" of its ${credit['limit']:.2f} limit" if credit["limit"] is not None else ""
         return (
-            f"Calls are off: the OpenRouter key has ${max(credit['left'], 0):.2f} left of its "
-            f"${credit['limit']:.2f} limit.{resets} You can raise the limit on openrouter.ai, "
-            "under Keys."
+            f"Calls are off: the OpenRouter key has ${max(credit['left'], 0):.2f} left{of_limit}."
+            f"{resets} You can raise the limit on openrouter.ai, under Keys."
         )
 
 

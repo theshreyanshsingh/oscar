@@ -548,6 +548,12 @@ async def test_the_greeting_is_recorded_once_and_played_from_then_on(tmp_path):
     assert samples_in(again.audio) == samples_in(first.audio) == int(0.06 * len(GREETING) * 24000)
     assert len(again.of(LLMFullResponseStartFrame)) == len(again.of(LLMFullResponseEndFrame)) == 1
     assert len(again.of(TTSStartedFrame)) == len(again.of(TTSStoppedFrame)) == 1
+    # Its words go out in step with its audio, as a live greeting's do, so the
+    # words heard before an interruption are kept (one frame at the end would
+    # be cleared away with the unplayed audio).
+    order = [type(frame) for frame in again.down if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame))]
+    assert order.count(TTSTextFrame) > 1
+    assert order.index(TTSTextFrame) < len(order) - 1 - order[::-1].index(TTSAudioRawFrame)
 
 
 async def test_a_greeting_said_otherwise_is_not_kept(tmp_path):
@@ -1201,6 +1207,25 @@ async def test_talking_over_an_answer_from_the_fact_sheet_stops_it():
 )
 def test_checking_that_a_line_was_said_as_asked(said, same):
     assert same_words(said, HOLD_LINE) is same
+
+
+@pytest.mark.parametrize(
+    ("said", "same"),
+    [
+        ("नमस्ते, मैं ऑस्कर बोल रहा हूँ।", True),
+        ("नमस्ते मैं ऑस्कर बोल रहा हूँ", True),
+        ("आपका दिन शुभ हो", False),  # other words in the same script
+        ("", False),
+    ],
+)
+def test_a_line_in_another_script_is_checked_word_for_word(said, same):
+    assert same_words(said, "नमस्ते, मैं ऑस्कर बोल रहा हूँ।") is same
+
+
+def test_curly_and_straight_apostrophes_are_the_same_word_and_no_words_match_nothing():
+    assert same_words("Hi, I’m Oscar.", "Hi, I'm Oscar.")
+    assert not same_words("", "")
+    assert not same_words("...", "!")
 
 
 def test_say_request_quotes_the_line():

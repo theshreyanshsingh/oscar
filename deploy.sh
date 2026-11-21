@@ -6,8 +6,10 @@
 #   1. Stops if Oscar is on a call: nothing is changed (--force goes ahead and cuts the call off).
 #   2. Gets the latest code (git pull), and sets up Oscar's Python environments or installs their packages again when
 #      their requirements changed: .venv, and .venv-whatsapp once WhatsApp is wanted (--whatsapp, the first time).
-#   3. Checks that the new code starts. If it does not, goes back to the version before and leaves Oscar running it.
-#   4. Starts Oscar with pm2 (ecosystem.config.cjs), or restarts it on the new code, and waits until it answers.
+#   3. Checks that the new code starts. If it does not, or its packages could not be installed, goes back to the
+#      version before and leaves Oscar running it.
+#   4. Starts Oscar with pm2 (ecosystem.config.cjs), or restarts it on the new code, and waits until it answers. If a
+#      call started while the deploy ran, Oscar is left running: the next deploy starts the new code.
 
 # uv and Node (for pm2) are often only on a login shell's PATH, and an SSH command's shell is not one.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
@@ -87,17 +89,34 @@ git pull --ff-only || fail "git pull did not work, so nothing was changed. Run g
 after="$(git rev-parse HEAD)"
 git log -1 --format='%h %s' | cut -c1-110
 
+# The new code cannot be used: says why ($1, then $2 if the code changed, or $3 if it did not) and goes back to the
+# code before, which Oscar is still running. The environments whose packages were installed for the new code forget
+# that they were, so the next deploy installs them again for whatever code it brings.
+installed=""
+go_back() {
+  local env
+  printf '%s\n' "$1" | tail -n 25
+  if [ "$before" != "$after" ]; then
+    for env in $installed; do rm -f "$env/.oscar-requirements"; done
+    git reset --quiet --keep "$before" || fail "$2 (the error is above), and the code before could not be put back: run git status here. Oscar was not restarted."
+    fail "$2 (the error is above), so Oscar was left running the version before."
+  fi
+  fail "$3 (the error is above)."
+}
+
 # An environment is set up once; its packages are installed again only when its requirements file changed.
 prepare() {
-  local env="$1" requirements="$2" want
+  local env="$1" requirements="$2" want out
   want="$(cksum < "$requirements")"
   if [ ! -x "$env/bin/python" ]; then
     step "Setting up $env (Python 3.13)"
-    new_env "$env"
+    out="$(new_env "$env" 2>&1)" || go_back "$out" "$env could not be set up for the new code" "$env could not be set up"
   fi
   if [ "$(cat "$env/.oscar-requirements" 2>/dev/null)" != "$want" ]; then
     step "Installing the packages in $requirements"
-    install "$env" "$requirements"
+    installed="$installed $env"
+    out="$(install "$env" "$requirements" 2>&1)" ||
+      go_back "$out" "the new code's packages could not be installed" "the packages in $requirements could not be installed"
     printf '%s\n' "$want" > "$env/.oscar-requirements"
   fi
 }
@@ -118,14 +137,14 @@ elif [ -x .venv-whatsapp/bin/python ] && ! out="$(.venv-whatsapp/bin/python -c '
 WhatsApp needs the libmagic library: sudo apt install -y libmagic1" ;; esac
 fi
 if [ -n "$problem" ]; then
-  printf '%s\n' "$problem" | tail -n 25
-  if [ "$before" != "$after" ]; then
-    git reset --quiet --keep "$before" || fail "the new code does not start (the error is above), and the code before could not be put back: run git status here. Oscar was not restarted."
-    fail "the new code does not start (the error is above), so Oscar was left running the version before."
-  fi
-  fail "Oscar does not start (the error is above)."
+  go_back "$problem" "the new code does not start" "Oscar does not start"
 fi
 echo "It does."
+
+# A call may have started while the packages were installed and the code was checked, which can take minutes.
+if [ -z "$FORCE" ] && [ "$(ask_oscar calls)" != 0 ]; then
+  fail "Oscar went on a call during the deploy, so it was not restarted. The new code is in place: deploy again once the call ends, or add --force to cut it off."
+fi
 
 step "Starting Oscar with pm2"
 APPS=(oscar)
@@ -204,7 +223,8 @@ if [ ! -d "${PM2_HOME:-$HOME/.pm2}/modules/pm2-logrotate" ]; then
 fi
 
 step "Done: commit $(git log -1 --format='%h') is live"
-[ -f .env ] || echo "Oscar has no keys yet: run .venv/bin/python -m scripts.set_keys, then pm2 restart oscar."
+# Both processes read the keys from .env when they start (the WhatsApp connection answers with the same key).
+[ -f .env ] || echo "Oscar has no keys yet: run .venv/bin/python -m scripts.set_keys, then pm2 restart ecosystem.config.cjs."
 # Reachable from other machines (HOST=0.0.0.0): browser calls also need their UDP ports let in, and without
 # Cloudflare Access anyone who reaches the port can use Oscar.
 .venv/bin/python -c '

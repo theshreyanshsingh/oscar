@@ -315,6 +315,11 @@ async def test_a_key_all_but_used_up_holds_calls_back_and_says_why():
     assert "when the limit resets (monthly)" in reason
 
 
+async def test_credit_left_without_a_limit_named_still_says_why():
+    credit = credit_with(key_answer(limit=None, limit_remaining=0.01))
+    assert "has $0.01 left. " in await credit.too_little_for_a_call()
+
+
 async def test_when_openrouter_cannot_say_calls_go_ahead():
     credit = credit_with(lambda request: httpx.Response(500))
     assert await credit.get() is None

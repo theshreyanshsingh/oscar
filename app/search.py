@@ -298,7 +298,10 @@ FACTS_READER_INSTRUCTIONS = (
 # pass through a model on the way: asked to write one out in words, the reader
 # dropped a digit in 3 of 40 answers. So each is swapped for a tag in the sheet
 # the reader sees, and the tag in its answer for the digits, spelt out here.
-_LONG_NUMBER = re.compile(r"(?<![\w$€£₹.,])\+?\(?\d(?:[ ()-]{0,2}\d)+")
+# Brackets only around the first group ("(02) 9555 0147"), so "0142 (9am to 5pm)"
+# ends at 0142; groups are joined by a space, a dash or a dot ("415.555.0123").
+_LONG_NUMBER = re.compile(r"(?<![\w$€£₹.,])\+?(?:\(\d+\)|\d+)(?:(?: ?- ?| |\.)\d+)*")
+_LAST_GROUP = re.compile(r"(?: ?- ?| |\.)\d+$")
 _NUMBER_TAG = re.compile(r"\[\s*number\s+(\d+)\s*\]", flags=re.IGNORECASE)
 _DIGIT_WORDS = "zero one two three four five six seven eight nine".split()
 
@@ -340,15 +343,25 @@ class FactsRequest:
     question: str  # what the caller asked, in full
 
 
-def long_numbers(text: str) -> list[re.Match]:
-    """The phone numbers and other long runs of digits in a fact sheet.
+def long_numbers(text: str) -> list[tuple[int, int]]:
+    """Where the phone numbers and other long runs of digits are in a fact sheet.
 
     At least seven digits, with four of them together or a plus in front, so
     prices, times, dates and street numbers are left as they are.
     """
     found = []
     for match in _LONG_NUMBER.finditer(text):
+        start, end = match.span()
         number = match.group()
+        if text[end : end + 1].isalpha():
+            # "0142 9am": the last digits go with the word after them.
+            last = _LAST_GROUP.search(number)
+            if not last:
+                continue
+            number = number[: last.start()]
+            end = start + len(number)
+        if number.count(".") == 1 and not re.search(r"[ ()-]", number):
+            continue  # a decimal, such as 12345.67
         groups = re.findall(r"\d+", number)
         if sum(map(len, groups)) < 7:
             continue
@@ -356,7 +369,7 @@ def long_numbers(text: str) -> list[re.Match]:
             continue
         if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4}|\d{4}-\d{4}", number):
             continue  # a date, or a range of years or of times
-        found.append(match)
+        found.append((start, end))
     return found
 
 
@@ -370,10 +383,10 @@ def tag_long_numbers(text: str) -> tuple[str, list[str]]:
     """The fact sheet with each long number swapped for [number N], and how to say each."""
     said: list[str] = []
     pieces, end = [], 0
-    for match in long_numbers(text):
-        said.append(spoken_number(match.group()))
-        pieces += [text[end : match.start()], f"[number {len(said)}]"]
-        end = match.end()
+    for start, stop in long_numbers(text):
+        said.append(spoken_number(text[start:stop]))
+        pieces += [text[end:start], f"[number {len(said)}]"]
+        end = stop
     return "".join([*pieces, text[end:]]), said
 
 
@@ -505,17 +518,24 @@ def spoken(text: object) -> str:
     return text
 
 
+# The reader's first line: its verdict, perhaps marked up ("**FOUND**") or with the
+# answer after it on the same line ("FOUND: It opened in 2020.").
+_VERDICT = re.compile(r"\**\s*(NOT FOUND|FOUND)\s*\**\s*(?:[.:,\-–—]+\s*|$)(.*)", flags=re.IGNORECASE)
+
+
 def parse_reading(text: object) -> tuple[str, str | None]:
     """The reader's reply as (what to say, what to search for next if the results fell short)."""
     text = text if isinstance(text, str) else ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    verdict = lines[0].upper().rstrip(".:") if lines else ""
-    if verdict == "FOUND":
-        return " ".join(lines[1:]), None
-    if verdict != "NOT FOUND":
+    verdict = _VERDICT.fullmatch(lines[0]) if lines else None
+    if verdict is None:
         return text, None  # not in the form asked for: all of it is the answer
+    rest = [verdict.group(2).strip(), *lines[1:]]
+    if verdict.group(1).upper() == "FOUND":
+        # A search line has no place here, and is never read out.
+        return " ".join(line for line in rest if line and not line.upper().startswith("SEARCH:")), None
     search, say = None, []
-    for line in lines[1:]:
+    for line in filter(None, rest):
         if line.upper().startswith("SEARCH:"):
             words = line.partition(":")[2].strip().strip('"<>')[:500]
             search = words if words and words.upper().rstrip(".") != "NONE" else None
@@ -741,17 +761,23 @@ class WebLookup:
             # A further search: the caller is told to hold on while it runs.
             telling = asyncio.ensure_future(again(query)) if again and found else None
             try:
-                sources = await self.search(query)
-            except LookupFailed:
-                if not found:
-                    raise
-                sources = []  # the further search failed: answer from the first one
-            else:
-                if searched:
-                    await searched(query, sources)
-            finally:
+                try:
+                    sources = await self.search(query)
+                except LookupFailed:
+                    if not found:
+                        raise
+                    sources = []  # the further search failed: answer from the first one
+                else:
+                    if searched:
+                        await searched(query, sources)
+            except BaseException:
+                # Cut short (the caller spoke, or hung up): the "still looking" line
+                # is not wanted, and waiting for it would hold up what comes next.
                 if telling:
-                    await telling
+                    telling.cancel()
+                raise
+            if telling:
+                await telling
             results = results_text(sources)
             if results:
                 found.append((query, results))

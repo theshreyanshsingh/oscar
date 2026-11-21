@@ -224,7 +224,9 @@ function searchList(searches) {
   for (const search of searches) {
     const pages = search.sources.map((page) => [page, pageLink(page, page.title)]);
     const entry = document.createElement("details");
+    entry.dataset.searchId = String(search.id);
     const heading = document.createElement("summary");
+    heading.dataset.key = `search-${search.id}`;
     const count = pages.length === 1 ? "1 page" : `${pages.length} pages`;
     heading.textContent = `${search.query} · ${pages.length ? count : "nothing found"}`;
     const found = document.createElement("ul");
@@ -284,7 +286,11 @@ function renderSummary(container, call, searches = []) {
     value.append(content);
     list.append(term, value);
   }
-  container.replaceChildren(list);
+  // A search opened to its pages stays open when the call is drawn again (its
+  // cost changes every turn of a live call).
+  const opened = new Set([...container.querySelectorAll("details[open]")].map((entry) => entry.dataset.searchId));
+  for (const entry of list.querySelectorAll("details")) entry.open = opened.has(entry.dataset.searchId);
+  keepFocus(container, () => container.replaceChildren(list));
   container.hidden = !rows.length;
 }
 
@@ -759,6 +765,9 @@ async function importKnowledge(event) {
   }
   box.value = joined;
   countKnowledge();
+  // Setting the value fires no input event, and the form's own change check ran
+  // before the file was read: show the unsaved-changes bar here.
+  updateAgentDirty();
   $("agent-saved").textContent = `Added ${file.name}. Save changes to keep it.`;
 }
 
@@ -792,7 +801,10 @@ async function loadCalls({ older = false } = {}) {
   const params = new URLSearchParams({ limit: String(HISTORY_PAGE), show: history.show });
   if (history.query) params.set("q", history.query);
   const last = older ? state.calls.get(history.ids[history.ids.length - 1]) : null;
-  if (last) params.set("before", last.started_at);
+  if (last) {
+    params.set("before_id", last.id);
+    params.set("before", last.started_at);
+  }
   const page = await api(`/api/calls?${params}`);
   if (`${history.query}\n${history.show}` !== asked) return; // searched again meanwhile
   // Calls are kept (a live call stays known even when a filter hides it).
@@ -841,9 +853,9 @@ function renderCalls() {
       ? "No calls match. Try other words, or show all calls."
       : "No calls yet. Your first one will show up here.";
     row.append(cell);
-    body.replaceChildren(row);
+    keepFocus(body, () => body.replaceChildren(row));
   } else {
-    body.replaceChildren(...calls.map(renderCallRow));
+    keepFocus(body, () => body.replaceChildren(...calls.map(renderCallRow)));
   }
   $("history-older").hidden = !history.more;
   $("history-count").textContent = calls.length
@@ -893,8 +905,12 @@ async function tickTodo(callId, done) {
     });
     onCallChanged(call);
   } catch (error) {
-    showError("call-error", error.message);
-    renderCalls();
+    // Every box for this to-do (table, side panel, live call) goes back to what
+    // the server last said, and the reason shows in the side panel when it is open.
+    const known = state.calls.get(callId);
+    if (known) onCallChanged(known);
+    else renderCalls();
+    showError(state.detailCallId ? "detail-error" : "call-error", error.message);
   }
 }
 
@@ -904,6 +920,7 @@ function todoControl(call) {
   label.className = `todo-check${call.follow_up_done_at ? " done" : ""}`;
   const box = document.createElement("input");
   box.type = "checkbox";
+  box.dataset.key = `todo-${call.id}`;
   box.checked = Boolean(call.follow_up_done_at);
   box.setAttribute("aria-label", `Done: ${call.follow_up}`);
   box.addEventListener("change", () => tickTodo(call.id, box.checked));
@@ -954,6 +971,7 @@ function renderCallRow(call) {
   view.textContent = "Transcript";
   view.setAttribute("aria-label", `Transcript: ${callLabel(call)}`);
   view.dataset.callId = call.id;
+  view.dataset.key = `transcript-${call.id}`;
   view.addEventListener("click", () => openDetail(call.id));
   actions.append(view);
   if (OPEN_STATUSES.has(call.status)) {
@@ -963,6 +981,7 @@ function renderCallRow(call) {
     end.style.marginLeft = "12px";
     end.textContent = "End";
     end.setAttribute("aria-label", `End: ${callLabel(call)}`);
+    end.dataset.key = `end-${call.id}`;
     end.addEventListener("click", () => endCall(call.id));
     actions.append(end);
   }
@@ -1018,12 +1037,25 @@ async function writeSummary() {
   const callId = state.detailCallId;
   if (!callId) return;
   showError("detail-error", "");
+  // Off until the server answers: a second press would be refused as "already being written".
+  const button = $("detail-summarise");
+  button.disabled = true;
   try {
     const { call } = await api(`/api/calls/${callId}/summary`, { method: "POST" });
     onCallChanged(call);
   } catch (error) {
     showError("detail-error", error.message);
+  } finally {
+    button.disabled = false;
   }
+}
+
+// Whether Tab can reach it: shown, enabled, and not inside a closed <details>
+// (of which only the summary line can be reached).
+function canTabTo(element) {
+  if (element.disabled || element.closest("[hidden]")) return false;
+  const closed = element.closest("details:not([open])");
+  return !closed || (element.tagName === "SUMMARY" && element.parentElement === closed);
 }
 
 // Keeps Tab inside the open side panel, and Escape closes it.
@@ -1034,19 +1066,36 @@ function onDrawerKey(event) {
     return;
   }
   if (event.key !== "Tab") return;
-  const focusable = [...$("call-detail").querySelectorAll("button, a[href], input, [tabindex='0']")].filter(
-    (el) => !el.hidden && !el.closest("[hidden]") && !el.disabled,
-  );
+  const focusable = [
+    ...$("call-detail").querySelectorAll("button, a[href], input, summary, [tabindex='0']"),
+  ].filter(canTabTo);
   if (!focusable.length) return;
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
+  // -1 too when focus is on the panel's title (where it opens) or nowhere: wrap from there as well.
+  const at = focusable.indexOf(document.activeElement);
+  if (event.shiftKey && at <= 0) {
     event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
+    focusable[focusable.length - 1].focus();
+  } else if (!event.shiftKey && (at === -1 || at === focusable.length - 1)) {
     event.preventDefault();
-    first.focus();
+    focusable[0].focus();
   }
+}
+
+// The page behind the open side panel: inert, so neither Tab nor a screen
+// reader can wander out of the panel into it.
+function setPageInert(inert) {
+  for (const element of document.body.children) {
+    if (element.id !== "call-detail" && element.id !== "detail-backdrop") element.inert = inert;
+  }
+}
+
+// Draws a container again without dropping keyboard focus: the new copy of the
+// control that had it (same data-key) gets it back. Calls change every turn.
+function keepFocus(container, draw) {
+  const key = container.contains(document.activeElement) ? document.activeElement.dataset.key : "";
+  draw();
+  const again = key && container.querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (again) again.focus({ preventScroll: true });
 }
 
 // The number to call back: the one the caller left, or the line the call was on.
@@ -1097,6 +1146,7 @@ async function openDetail(callId) {
   state.detailSearches = [];
   $("call-detail").hidden = false;
   $("detail-backdrop").hidden = false;
+  setPageInert(true);
   document.documentElement.classList.add("drawer-open");
   document.addEventListener("keydown", onDrawerKey);
   $("detail-title").textContent = "Transcript";
@@ -1132,6 +1182,7 @@ function closeDetail({ restoreFocus = true } = {}) {
   state.detailCallId = null;
   $("call-detail").hidden = true;
   $("detail-backdrop").hidden = true;
+  setPageInert(false); // before focus goes back to the page
   document.documentElement.classList.remove("drawer-open");
   document.removeEventListener("keydown", onDrawerKey);
   renderCalls();
@@ -1202,10 +1253,18 @@ function focusedCallText(call) {
   }
 }
 
+// When the call began, by the server's record, so a call already going when this
+// page picks it up (after a reload, say) is not timed from zero. Now if unreadable.
+function callStartedMs(call) {
+  const started = Date.parse(call.started_at);
+  return Number.isNaN(started) ? Date.now() : started;
+}
+
 function tickTimer() {
   const call = state.calls.get(state.focusCallId);
   if (call && call.status === "live" && state.liveSince) {
-    const seconds = Math.floor((Date.now() - state.liveSince) / 1000);
+    // Never below zero when this computer's clock is behind the server's.
+    const seconds = Math.max(0, Math.floor((Date.now() - state.liveSince) / 1000));
     $("call-timer").textContent = formatDuration(seconds);
   } else if (!call || !OPEN_STATUSES.has(call.status)) {
     $("call-timer").textContent = "";
@@ -1254,7 +1313,7 @@ function onCallChanged(call) {
   }
 
   if (call.id === state.focusCallId) {
-    if (call.status === "live" && !state.liveSince) state.liveSince = Date.now();
+    if (call.status === "live" && !state.liveSince) state.liveSince = callStartedMs(call);
     $("call-status").textContent = focusedCallText(call);
     renderSummary($("live-summary"), call);
     // Shown while the call is still live too, so a problem with listening or
@@ -1271,6 +1330,8 @@ function onCallChanged(call) {
       `${KIND_LABELS[call.kind]} call · ${formatTime(call.started_at)} · ` +
       `${STATUS_LABELS[call.status]}`;
     renderDetailSummary(call);
+    // The summary can bring a callback number the call did not have.
+    renderDetailActions(call);
     if (call.error) showError("detail-error", call.error);
   }
   updateCallUi();
@@ -1362,7 +1423,7 @@ function updateCallUi() {
   // The choice is made when a call starts, so it cannot change during one.
   $("call-interrupt").disabled = state.callUi !== "idle";
   const phoneButton = $("phone-button");
-  if (phoneButton) phoneButton.disabled = !ready;
+  if (phoneButton) phoneButton.disabled = !ready || phoneCallPending;
   updateOrb();
 }
 
@@ -1587,16 +1648,22 @@ function onCallButton() {
 
 // ---------- phone call ----------
 
+// True while "Call now" waits for the server. The call shows up over the event
+// stream before Twilio has even answered the server, and that redraws the
+// buttons: without this, a second press would dial the number again.
+let phoneCallPending = false;
+
 async function startPhoneCall(event) {
   event.preventDefault();
+  if (phoneCallPending) return;
   showError("phone-error", "");
   const to = $("phone-to").value.replace(/[\s()-]/g, "");
   if (!PHONE_PATTERN.test(to)) {
     showError("phone-error", "Start with + and the country code, like +1 415 555 0123.");
     return;
   }
-  const button = $("phone-button");
-  button.disabled = true;
+  phoneCallPending = true;
+  updateCallUi();
   try {
     const { call } = await api("/api/calls/phone", {
       method: "POST",
@@ -1609,6 +1676,7 @@ async function startPhoneCall(event) {
   } catch (error) {
     showError("phone-error", error.message);
   } finally {
+    phoneCallPending = false;
     updateCallUi();
   }
 }
@@ -1842,6 +1910,7 @@ async function init() {
   $("agent-discard").addEventListener("click", () => {
     if (state.agentSettings) fillAgentForm(state.agentSettings);
     showError("agent-error", "");
+    $("agent-saved").textContent = ""; // "Added a file… Save changes to keep it." no longer holds
   });
   $("agent-preview").addEventListener("click", previewVoice);
   $("detail-backdrop").addEventListener("click", () => closeDetail());
@@ -1867,7 +1936,10 @@ async function init() {
   $("whatsapp-form").addEventListener("submit", saveWhatsApp);
   $("notify-form").addEventListener("submit", saveNotify);
   $("notify-test").addEventListener("click", testNotify);
-  window.addEventListener("beforeunload", () => {
+  // Ends this tab's browser call when the page really goes away. Not on
+  // beforeunload: that also fires when the "Leave site?" warning is then
+  // answered with Stay, and the call would end anyway.
+  window.addEventListener("pagehide", () => {
     if (state.browserCallId) {
       navigator.sendBeacon(`/api/calls/${state.browserCallId}/end`);
     }

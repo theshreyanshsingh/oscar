@@ -1,6 +1,9 @@
 """Saving keys and settings into .env (scripts/set_keys.py)."""
 
+import io
+
 import pytest
+from dotenv import dotenv_values
 
 from scripts import set_keys
 from scripts.set_keys import PHONE, Setting, account_sid, phone_number, with_value
@@ -24,6 +27,20 @@ def test_a_value_with_odd_characters_is_saved_as_typed():
     assert with_value("TWILIO_AUTH_TOKEN=x\n", "TWILIO_AUTH_TOKEN", r"a\1$&b") == (
         "TWILIO_AUTH_TOKEN=a\\1$&b\n"
     )
+
+
+def test_a_second_line_for_the_same_setting_is_dropped_so_the_new_value_is_the_one_read():
+    # The empty line from .env.example, and one added at the end by hand later.
+    text = "OPENROUTER_API_KEY=\nPORT=7860\nOPENROUTER_API_KEY=sk-or-old\n"
+    saved = with_value(text, "OPENROUTER_API_KEY", "sk-or-new")
+    assert saved == "OPENROUTER_API_KEY=sk-or-new\nPORT=7860\n"
+    assert dotenv_values(stream=io.StringIO(saved))["OPENROUTER_API_KEY"] == "sk-or-new"
+
+
+@pytest.mark.parametrize("written", ["export OPENROUTER_API_KEY=sk-or-old", "OPENROUTER_API_KEY = sk-or-old"])
+def test_a_line_written_by_hand_another_way_is_replaced_too(written):
+    saved = with_value(f"# Keys\n{written}\r\nPORT=7860\r\n", "OPENROUTER_API_KEY", "sk-or-new")
+    assert saved == "# Keys\nOPENROUTER_API_KEY=sk-or-new\r\nPORT=7860\r\n"
 
 
 def test_a_longer_name_is_not_mistaken_for_a_shorter_one():

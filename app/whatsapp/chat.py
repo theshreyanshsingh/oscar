@@ -157,6 +157,7 @@ class _Entry:
     text: str
     from_oscar: bool
     message_id: str = ""
+    answer: bool = False  # one of Oscar's answers (not something typed on its phone)
 
 
 @dataclass
@@ -192,7 +193,7 @@ class ChatMemory:
 
     def remember_reply(self, chat_id: str, agent_name: str, text: str, timestamp: float) -> None:
         log = self.entries.setdefault(chat_id, deque(maxlen=HISTORY_MESSAGES))
-        log.append(_Entry(timestamp, agent_name, text, True))
+        log.append(_Entry(timestamp, agent_name, text, True, answer=True))
 
     def forget(self, chat_id: str, message_id: str) -> None:
         """Drop a message its sender deleted for everyone."""
@@ -201,16 +202,22 @@ class ChatMemory:
             kept = [entry for entry in log if entry.message_id != message_id]
             self.entries[chat_id] = deque(kept, maxlen=HISTORY_MESSAGES)
 
-    def recent(self, chat_id: str, *, exclude_id: str = "", now: float | None = None) -> list[_Entry]:
+    def recent(self, chat_id: str, *, before_id: str = "", now: float | None = None) -> list[_Entry]:
         """Messages in arrival order. WhatsApp timestamps are whole seconds, so order
-        (not time) decides what came first; only the age limit uses timestamps."""
+        (not time) decides what came first; only the age limit uses timestamps.
+
+        With `before_id`, only what came before that message: what arrived while
+        it waited for its answer is not part of it. Oscar's own answers sent
+        since are kept, so it knows what it has already said.
+        """
         now = time.time() if now is None else now
-        return [
-            entry
-            for entry in self.entries.get(chat_id, ())
-            if not (exclude_id and entry.message_id == exclude_id)
-            and now - entry.timestamp <= HISTORY_MAX_AGE_SECONDS
-        ]
+        kept, after_it = [], False
+        for entry in self.entries.get(chat_id, ()):
+            if before_id and entry.message_id == before_id:
+                after_it = True
+            elif (entry.answer or not after_it) and now - entry.timestamp <= HISTORY_MAX_AGE_SECONDS:
+                kept.append(entry)
+        return kept
 
     def allow_reply(self, chat_id: str, now: float | None = None) -> bool:
         """Count a reply against the chat's and the overall rate limit; False when either is reached."""
@@ -337,7 +344,7 @@ def build_request_text(
         return readable_mentions(text, my_ids=ids_meaning_oscar, agent_name=agent_name, names=names)
 
     lines = []
-    earlier = memory.recent(message.chat_id, exclude_id=message.message_id, now=now)
+    earlier = memory.recent(message.chat_id, before_id=message.message_id, now=now)
     if earlier:
         lines.append("Recent messages, oldest first:")
         for entry in earlier:

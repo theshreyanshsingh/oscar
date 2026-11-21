@@ -440,8 +440,14 @@ def test_the_reader_is_told_to_say_first_whether_the_results_hold_the_answer():
         ("NOT FOUND\nSEARCH: NONE\nI could not find that.", "I could not find that.", None),
         ("NOT FOUND\nSEARCH:\nI could not find that.", "I could not find that.", None),
         ("NOT FOUND\nI could not find that.", "I could not find that.", None),
+        # The verdict marked up, or with the answer after it on its line, is still never said.
+        ("FOUND: Crown Sydney opened in 2020.", "Crown Sydney opened in 2020.", None),
+        ("**FOUND**\nCrown Sydney opened in 2020.", "Crown Sydney opened in 2020.", None),
+        ("FOUND\nSEARCH: NONE\nIt opened in 2020.", "It opened in 2020.", None),
+        ("NOT FOUND: I could not find it.\nSEARCH: Crown owner", "I could not find it.", "Crown owner"),
         # Not in the form asked for: all of it is the answer.
         ("It is sunny in Kanpur.", "It is sunny in Kanpur.", None),
+        ("Found it! It opened in 2020.", "Found it! It opened in 2020.", None),
         ("SEARCH: something", "SEARCH: something", None),
         ("", "", None),
         (None, "", None),
@@ -628,6 +634,36 @@ async def test_results_that_name_the_subject_but_not_the_answer_lead_to_one_more
     assert [query for query, _ in lookup._findings] == done
 
 
+async def test_a_turn_cut_short_during_a_further_search_does_not_wait_for_the_hold_on_line():
+    lookup, _ = lookup_with()
+    searched_for: list[str] = []
+    said: list[str] = []
+
+    async def search_for(query):
+        searched_for.append(query)
+        if len(searched_for) > 1:
+            await asyncio.sleep(10)  # the further search is slow
+        return sources_in(TALLEST)
+
+    async def read(**_):
+        return "NOT FOUND\nSEARCH: Crown Sydney owner\nI could not find who owns it."
+
+    async def again(query):
+        await asyncio.sleep(2)  # saying "still looking" takes a while
+        said.append(query)
+
+    lookup.search, lookup.read = search_for, read
+    turn = asyncio.create_task(lookup.answer(question="Who owns it?", query="tallest building", again=again))
+    await asyncio.sleep(0.1)
+    turn.cancel()  # the caller spoke over it
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert asyncio.get_running_loop().time() - started < 0.5
+    await asyncio.sleep(0)
+    assert said == [] and searched_for == ["tallest building", "Crown Sydney owner"]
+
+
 async def test_a_turn_never_takes_more_than_two_searches():
     lookup, requests = lookup_with(
         firecrawl=searching(TALLEST, OWNER),
@@ -783,6 +819,8 @@ def test_a_facts_verdict_gives_the_question_to_answer():
 @pytest.mark.parametrize(
     ("written", "said"),
     [
+        ("415.555.0123", "four one five, five five five, zero one two three"),
+        ("+1 415.555.0123", "plus one, four one five, five five five, zero one two three"),
         ("02 5550 0142", "zero two, five five five zero, zero one four two"),
         ("+91 73185 01865", "plus nine one, seven three one eight five, zero one eight six five"),
         ("(415) 555-0123", "four one five, five five five, zero one two three"),
@@ -811,10 +849,25 @@ def test_a_phone_number_is_spelt_out_one_digit_at_a_time(written, said):
         "Prices: 45 20 60 30.",
         "The budget is 1 250 000 rupees.",
         "ABN 51 824 753 556.",
+        "The block is 12345.67 square metres.",
     ],
 )
 def test_prices_times_dates_and_addresses_are_left_as_written(text):
     assert tag_long_numbers(text) == (text, [])
+
+
+@pytest.mark.parametrize(
+    ("text", "tagged", "said"),
+    [
+        ("Phone 02 5550 0142 (9am to 5pm, Mon-Fri).", "Phone [number 1] (9am to 5pm, Mon-Fri).",
+         "zero two, five five five zero, zero one four two"),
+        ("Ring 1800 123 456 (24 hours).", "Ring [number 1] (24 hours).", "one eight zero zero, one two three, four five six"),
+        ("Level 2 (02) 9555 0147.", "Level 2 [number 1].", "zero two, nine five five five, zero one four seven"),
+        ("Phone 02 5550 0142 9am to 5pm.", "Phone [number 1] 9am to 5pm.", "zero two, five five five zero, zero one four two"),
+    ],
+)
+def test_a_number_ends_where_the_next_thing_begins(text, tagged, said):
+    assert tag_long_numbers(text) == (tagged, [said])
 
 
 def test_each_long_number_gets_its_own_tag():

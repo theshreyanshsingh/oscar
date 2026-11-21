@@ -229,10 +229,11 @@ Then get Oscar and start it:
 git clone https://github.com/theshreyanshsingh/oscar.git ~/oscar && cd ~/oscar && ./deploy.sh
 ```
 
-Add your keys, then restart Oscar so it reads them:
+Add your keys, then restart Oscar so it reads them (and its WhatsApp
+connection, if it runs here: it uses the same key):
 
 ```bash
-.venv/bin/python -m scripts.set_keys && pm2 restart oscar
+.venv/bin/python -m scripts.set_keys && pm2 restart ecosystem.config.cjs
 ```
 
 For WhatsApp too, run `./deploy.sh --whatsapp` once. Then link Oscar's phone
@@ -249,9 +250,12 @@ off). Otherwise it:
 
 1. Gets the latest code.
 2. Installs Python packages only when a requirements file changed.
-3. Checks that the new code starts. If it doesn't, it goes back to the version
-   before, and Oscar keeps running that.
-4. Restarts Oscar under pm2 and waits until it answers.
+3. Checks that the new code starts. If it doesn't, or its packages could not
+   be installed, it goes back to the version before, and Oscar keeps running
+   that.
+4. Restarts Oscar under pm2 and waits until it answers. If a call started
+   while it was busy, it leaves Oscar running instead: the new code is in place,
+   and the next `./deploy.sh` starts it.
 
 The first time, it also makes pm2 start Oscar when the server starts, and has
 pm2 rotate its logs so they never fill the disk. When checked on 17 November
@@ -263,7 +267,8 @@ throughout.
 |---|---|
 | `pm2 ls` | Shows whether `oscar` (and `oscar-whatsapp`) are running |
 | `pm2 logs oscar` | Oscar's log as it is written (`--lines 100` for more) |
-| `pm2 restart oscar` | Restarts Oscar, after a change to `.env`. Unlike `deploy.sh`, it cuts off a call in progress |
+| `pm2 restart ecosystem.config.cjs` | Restarts Oscar and its WhatsApp connection, after a change to the keys in `.env` (both read them). Unlike `deploy.sh`, it cuts off a call in progress |
+| `pm2 restart oscar` | Restarts only Oscar, after a change to its other settings in `.env` (such as `HOST`). It cuts off a call in progress too |
 
 - **The dashboard only listens on the server itself,** unless `.env` says
   otherwise. Reach it from your Mac through SSH, then open
@@ -292,7 +297,8 @@ throughout.
   the server, such as a domain behind Caddy or nginx. See below.
 - **Run WhatsApp in one place only.** If Oscar is linked on your Mac and on the
   server, it answers twice in groups. Once the server runs it, stop the Mac's
-  copy with `.venv/bin/python -m scripts.autostart --remove`.
+  copy with Ctrl+C in its terminal: `scripts.autostart` runs only the
+  dashboard, not WhatsApp.
 - **Each machine keeps its own `data/`** (call history, settings, the WhatsApp
   login). It is not in git, so a new server starts empty.
 - On a Mac, `deploy.sh` refuses to run where Oscar already starts at login. Use

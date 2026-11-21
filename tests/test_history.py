@@ -55,6 +55,16 @@ def test_calls_come_newest_first_a_page_at_a_time(store):
     assert [c["id"] for c in last] == [made[0]["id"]] and not more
 
 
+def test_calls_that_started_in_the_same_second_are_all_paged_through(store):
+    made = [add(store, minutes=minute) for minute in (0, 1, 1, 1, 2)]  # three in one second
+    seen, before_id, more = [], "", True
+    while more:
+        page, more = store.find_calls(limit=2, before_id=before_id)
+        seen += [call["id"] for call in page]
+        before_id = page[-1]["id"]
+    assert sorted(seen) == sorted(call["id"] for call in made) and len(seen) == len(set(seen))
+
+
 def test_each_filter_shows_its_own_calls(store):
     todo = add(store, "phone_inbound", follow_up="Call Sam back.", minutes=1)
     done = add(store, "phone_inbound", follow_up="Sent the quote.", follow_up_done_at="2026-11-01T10:00:00+00:00", minutes=2)

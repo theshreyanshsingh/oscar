@@ -437,6 +437,27 @@ def test_a_port_is_in_use_when_something_listens_on_it(tmp_path):
     assert autostart.port_in_use(make_config(tmp_path, port=port)) is False
 
 
+def test_a_port_is_checked_at_an_ipv6_address_too_without_failing(tmp_path):
+    try:
+        listener = socket.socket(socket.AF_INET6)
+        listener.bind(("::1", 0))
+    except OSError:
+        pytest.skip("this machine has no IPv6 loopback")
+    with listener:
+        listener.listen()
+        port = listener.getsockname()[1]
+        assert autostart.port_in_use(make_config(tmp_path, host="::1", port=port)) is True
+    assert autostart.port_in_use(make_config(tmp_path, host="::1", port=port)) is False
+
+
+def test_oscar_listening_at_every_ipv6_address_is_looked_for_on_this_machine(tmp_path):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        assert autostart.port_in_use(make_config(tmp_path, host="::", port=port)) is True
+
+
 # The command itself
 
 

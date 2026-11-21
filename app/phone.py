@@ -72,7 +72,10 @@ async def place_outbound_call(cfg: Config, calls: CallManager, to_number: str) -
             to=to_number,
             from_=cfg.twilio_phone_number,
             twiml=stream_twiml(cfg, call["id"], token),
-            status_callback=f"{cfg.public_url}/twilio/status",
+            # The call's id rides along (Twilio signs it with the rest), so an
+            # update that arrives before Twilio has answered with the call's SID
+            # still finds the call.
+            status_callback=f"{cfg.public_url}/twilio/status?call_id={call['id']}",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             status_callback_method="POST",
         )
@@ -182,7 +185,14 @@ def create_phone_router(
         if form is None:
             return Response(status_code=403)
 
-        call = store.find_call_by_twilio_sid(form.get("CallSid", ""))
+        sid = form.get("CallSid", "")
+        call = store.find_call_by_twilio_sid(sid)
+        if call is None and sid:
+            # An outgoing call whose SID is not saved yet: Twilio can send an update
+            # (a quick "failed" or "busy") before its answer to placing the call.
+            named = store.get_call(request.query_params.get("call_id", ""))
+            if named and named["kind"] == "phone_outbound" and not named["twilio_sid"]:
+                call = calls.update(named["id"], twilio_sid=sid)
         status = form.get("CallStatus", "")
         if call:
             if status == "ringing" and call["status"] == "connecting":

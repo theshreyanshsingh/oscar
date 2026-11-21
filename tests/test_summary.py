@@ -290,6 +290,9 @@ async def test_an_aside_before_a_number_is_not_one_of_its_digits():
         "0422779935",  # what the real model once made of "double seven one"
         "0412345679",  # one digit out
         "412345678 9",  # one digit more than was said
+        "0412 345 67",  # one digit short
+        "412 345 678",  # the first digit left off
+        "345 678",  # a part of it
         "the number they gave",
         "+",
     ],
@@ -297,6 +300,25 @@ async def test_an_aside_before_a_number_is_not_one_of_its_digits():
 async def test_a_number_that_was_not_said_is_left_out(number):
     note = await written(SAMS_CALL, {**SAMS_NOTE, "callback_number": number})
     assert note == CallSummary(**{**SAMS_NOTE, "callback_number": ""})
+
+
+async def test_two_numbers_are_not_run_together():
+    call = talk(("user", "Call me on 0412 345 678, or my office on 02 5550 0142."))
+    for number, kept in [("0412 345 678", "0412345678"), ("02 5550 0142", "0255500142"), ("0412345678 0255500142", "")]:
+        note = await written(call, {"summary": "They left two numbers.", "callback_number": number})
+        assert note.callback_number == kept, number
+
+
+async def test_a_number_given_in_pieces_in_one_turn_is_kept():
+    call = talk(("user", "It's zero four one two, three four five, six seven eight."))
+    note = await written(call, {"summary": "They left a number.", "callback_number": "0412 345 678"})
+    assert note.callback_number == "0412345678"
+
+
+async def test_a_date_or_hours_written_with_dots_do_not_spoil_the_summary():
+    call = talk(("user", "A table for two on the twenty-second of November, between nine and five please."))
+    note = await written(call, {"summary": "Wants a table on 22.11.2026, open 9.00-17.00."})
+    assert note.summary == "Wants a table on 22.11.2026, open 9.00-17.00."
 
 
 async def test_a_name_is_kept_only_if_it_is_in_the_transcript():

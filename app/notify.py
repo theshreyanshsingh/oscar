@@ -55,7 +55,12 @@ def webhook_url(value: str) -> str:
         return ""
     if len(url) > URL_CHARS:
         raise WebhookRefused(f"That address is too long (at most {URL_CHARS} characters).")
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 - reading it checks it ("https://host:abc" raises)
+        httpx.URL(url)  # what send_summary posts to must be one httpx can use
+    except (ValueError, httpx.InvalidURL):
+        raise WebhookRefused("That is not a web address. Paste the whole address your app gives you.") from None
     if parts.scheme != "https" or not parts.hostname:
         raise WebhookRefused("The address must start with https://, like the one your app gives you.")
     return url
@@ -110,6 +115,8 @@ async def send_summary(url: str, payload: dict, client: httpx.AsyncClient | None
         for attempt in (1, 2):
             try:
                 response = await client.post(url, json=payload)
+            except httpx.InvalidURL:
+                return "The webhook address is not one that can be posted to. Save it again."
             except httpx.HTTPError as exc:
                 problem = f"The webhook could not be reached ({type(exc).__name__})."
             else:

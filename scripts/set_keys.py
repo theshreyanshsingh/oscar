@@ -61,11 +61,23 @@ PHONE = [
 
 
 def with_value(text: str, name: str, value: str) -> str:
-    """The .env text with `name` set to `value`, replacing its line or adding one."""
+    """The .env text with `name` set to `value`, replacing its line or adding one.
+
+    Any later line for `name` is dropped: Oscar reads the last one, so a value
+    left there would be used instead. A line written by hand as
+    `export NAME=...` or `NAME = ...` counts as one of its lines.
+    """
     line = f"{name}={value}"
-    pattern = re.compile(rf"^{re.escape(name)}=.*$", flags=re.MULTILINE)
-    if pattern.search(text):
-        return pattern.sub(lambda _: line, text, count=1)
+    is_its_line = re.compile(rf"[ \t]*(export[ \t]+)?{re.escape(name)}[ \t]*=").match
+    lines, replaced = [], False
+    for each in text.splitlines(keepends=True):
+        if not is_its_line(each):
+            lines.append(each)
+        elif not replaced:
+            lines.append(line + each[len(each.rstrip("\r\n")) :])  # keeps the line's own ending
+            replaced = True
+    if replaced:
+        return "".join(lines)
     return text.rstrip("\n") + f"\n{line}\n"
 
 
