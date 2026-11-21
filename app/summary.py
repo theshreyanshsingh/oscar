@@ -370,6 +370,8 @@ async def _summary_fields(
         "caller_name": note.caller_name,
         "callback_number": note.callback_number,
         "follow_up": note.follow_up,
+        # A summary written again may have a different to-do: it starts out not done.
+        "follow_up_done_at": "",
         "summary_error": "",
     }
 

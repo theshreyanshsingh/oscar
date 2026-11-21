@@ -578,6 +578,26 @@ Two things to know:
   before the caller has finished their next turn. When it is not, that turn
   waits up to 1.5 seconds for it.
 
+## Call history
+
+**Call history** on the dashboard lists calls newest first, 50 at a time:
+**Show older calls** brings the next 50.
+
+- **Search** finds calls by the caller's name, a number (typed any way:
+  `0412 345 678` finds `+61412345678`), the summary, the to-do or anything said
+  on the call.
+- **Filters:** All, To do (with how many are still open), Incoming, Outgoing,
+  Browser and Failed. They go together with a search.
+- **To-dos** can be ticked off in the list or in the call itself. Writing a
+  call's summary again starts its to-do afresh.
+- **Opening a call** shows it in a panel beside the list: its summary, research
+  notes, cost and transcript. Escape closes it. **Copy number** copies the
+  number to call back on. With phone calls set up, **Call back** puts it in
+  **Call a number**, so you can check it (and add the country code) before
+  Oscar dials.
+
+On a phone each call is a card, and the section links are under **Menu**.
+
 ## Call summaries
 
 When a call ends, Oscar reads the transcript and writes a note for you. It
@@ -695,6 +715,13 @@ Edit these on the dashboard. They apply from the next call.
 - **Script:** the steps Oscar works through on a call. See the section above.
 - **What Oscar knows:** facts about whoever Oscar answers for. See the
   section above.
+
+**Hear this voice** (under Voice) plays about six seconds of Oscar saying hello
+with the voice, accent and name in the form, before you save them. Each sample
+is kept in `data/recordings/`, so hearing it again costs nothing; a new one
+costs about a third of a cent. While there are unsaved changes, a bar with
+**Save changes** and **Discard** stays in view, and the browser asks before you
+leave the page.
 
 ## Checks
 

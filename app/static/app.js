@@ -45,7 +45,14 @@ const state = {
   // The browser call running in this tab.
   browserCallId: null,
   callUi: "idle",
+  // Call history as shown: the ids of the calls found, newest first, and how they were asked for.
+  history: { ids: [], more: false, query: "", show: "all", openTodos: 0 },
+  // The agent settings as last saved, to tell when the form has changed.
+  agentSaved: null,
+  whatsappSaved: null,
 };
+
+const HISTORY_PAGE = 50;
 
 let peer = null;
 let micStream = null;
@@ -250,7 +257,7 @@ function summaryRows(call) {
     rows.push(["Summary", call.summary]);
     if (call.caller_name) rows.push(["Name", call.caller_name]);
     if (call.callback_number) rows.push(["Call back on", call.callback_number]);
-    if (call.follow_up) rows.push(["To do", call.follow_up]);
+    if (call.follow_up) rows.push(["To do", todoControl(call)]);
   }
   if (call.research && call.research.length) {
     rows.push(["Research", researchList(call.research)]);
@@ -326,10 +333,18 @@ function refreshSpendingSoon() {
   spendingTimer = setTimeout(() => loadSpending().catch(() => {}), 2000);
 }
 
-function pollSpending() {
+function refreshDashboard() {
+  loadStatus().catch(() => {});
+  loadSpending().catch(() => {});
+}
+
+function pollDashboard() {
   setInterval(() => {
-    if (document.visibilityState === "visible") loadSpending().catch(() => {});
+    if (document.visibilityState === "visible") refreshDashboard();
   }, SPENDING_POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshDashboard();
+  });
 }
 
 // ---------- summaries sent to the owner ----------
@@ -456,7 +471,140 @@ async function loadAgent() {
   fillAgentForm(agent);
 }
 
+const AGENT_FIELDS = [
+  "agent-name",
+  "agent-voice",
+  "agent-accent",
+  "agent-model",
+  "agent-greeting",
+  "agent-prompt",
+  "agent-script",
+  "agent-knowledge",
+];
+
+// What was measured for each accent (README.md, Agent settings).
+const ACCENT_HINTS = {
+  indian:
+    "Cedar kept it on every reply measured. Verse, Marin, Coral and Sage held it well; Ballad, Echo, Fable and Onyx often lose it.",
+  australian: "Every voice takes it, except Ballad, which stays British.",
+  british: "How well it holds depends on the voice: try one with Hear this voice.",
+  american: "How well it holds depends on the voice: try one with Hear this voice.",
+  none: "Each voice as it comes. Nearly all of them sound American.",
+};
+
+function showAccentHint() {
+  $("agent-accent-hint").textContent = ACCENT_HINTS[$("agent-accent").value] || "";
+}
+
+function formSnapshot(ids) {
+  return JSON.stringify(ids.map((id) => {
+    const field = $(id);
+    return field.type === "checkbox" ? field.checked : field.value;
+  }));
+}
+
+function agentDirty() {
+  return state.agentSaved !== null && formSnapshot(AGENT_FIELDS) !== state.agentSaved;
+}
+
+function updateAgentDirty() {
+  const dirty = agentDirty();
+  $("agent-form").classList.toggle("dirty", dirty);
+  $("agent-dirty").hidden = !dirty;
+  $("agent-discard").hidden = !dirty;
+  if (dirty) $("agent-saved").textContent = "";
+}
+
+// "1,234 / 8,000" under a long field, red when nearly full.
+const COUNTED_FIELDS = [
+  ["agent-greeting", 500],
+  ["agent-prompt", 8000],
+  ["agent-script", 4000],
+  ["whatsapp-instructions", 4000],
+];
+
+function setUpCounters() {
+  for (const [id, most] of COUNTED_FIELDS) {
+    const field = $(id);
+    const counter = document.createElement("p");
+    counter.className = "counter";
+    counter.id = `${id}-count`;
+    field.after(counter);
+    field.setAttribute("aria-describedby", counter.id);
+    field.addEventListener("input", () => updateCounter(id, most));
+  }
+}
+
+function updateCounter(id, most) {
+  const used = $(id).value.length;
+  const counter = $(`${id}-count`);
+  counter.textContent = `${used.toLocaleString()} / ${most.toLocaleString()}`;
+  counter.classList.toggle("near", used > most * 0.9);
+}
+
+function updateCounters() {
+  for (const [id, most] of COUNTED_FIELDS) updateCounter(id, most);
+}
+
+function agentFormBody() {
+  return {
+    name: $("agent-name").value,
+    voice: $("agent-voice").value,
+    accent: $("agent-accent").value,
+    model: $("agent-model").value,
+    greeting: $("agent-greeting").value,
+    system_prompt: $("agent-prompt").value,
+    script: $("agent-script").value,
+    knowledge: $("agent-knowledge").value,
+  };
+}
+
+let previewAudio = null;
+
+// Plays a short sample with the voice and accent in the form, before they are saved.
+async function previewVoice() {
+  const button = $("agent-preview");
+  if (previewAudio && !previewAudio.paused) {
+    previewAudio.pause();
+    button.textContent = "Hear this voice";
+    return;
+  }
+  showError("agent-error", "");
+  button.disabled = true;
+  button.textContent = "Getting a sample…";
+  try {
+    const response = await fetch("/api/agent/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(agentFormBody()),
+    });
+    if (!response.ok) {
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        body = null;
+      }
+      throw new Error(describeError(body, response.status));
+    }
+    const url = URL.createObjectURL(await response.blob());
+    previewAudio = new Audio(url);
+    previewAudio.addEventListener("ended", () => {
+      button.textContent = "Hear this voice";
+      URL.revokeObjectURL(url);
+    });
+    await previewAudio.play();
+    button.textContent = "Stop";
+  } catch (error) {
+    button.textContent = "Hear this voice";
+    showError("agent-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function fillAgentForm(agent) {
+  state.agentSettings = agent;
   state.agentName = agent.name;
   $("agent-name").value = agent.name;
   $("agent-voice").value = agent.voice;
@@ -467,6 +615,10 @@ function fillAgentForm(agent) {
   $("agent-script").value = agent.script || "";
   $("agent-knowledge").value = agent.knowledge || "";
   countKnowledge();
+  showAccentHint();
+  updateCounters();
+  state.agentSaved = formSnapshot(AGENT_FIELDS);
+  updateAgentDirty();
 }
 
 const KNOWLEDGE_MAX_CHARACTERS = 12000;
@@ -514,16 +666,7 @@ async function saveAgent(event) {
   try {
     const agent = await api("/api/agent", {
       method: "PUT",
-      body: JSON.stringify({
-        name: $("agent-name").value,
-        voice: $("agent-voice").value,
-        accent: $("agent-accent").value,
-        model: $("agent-model").value,
-        greeting: $("agent-greeting").value,
-        system_prompt: $("agent-prompt").value,
-        script: $("agent-script").value,
-        knowledge: $("agent-knowledge").value,
-      }),
+      body: JSON.stringify(agentFormBody()),
     });
     fillAgentForm(agent);
     $("agent-saved").textContent = "Saved. The next call uses these settings.";
@@ -536,32 +679,145 @@ async function saveAgent(event) {
 
 // ---------- call history ----------
 
-async function loadCalls() {
-  const { calls } = await api("/api/calls");
-  state.calls = new Map(calls.map((call) => [call.id, call]));
+// Loads the newest page of Call history for the search and filter in force, or with
+// `older`, the page after the calls already shown.
+async function loadCalls({ older = false } = {}) {
+  const history = state.history;
+  const asked = `${history.query}\n${history.show}`;
+  const params = new URLSearchParams({ limit: String(HISTORY_PAGE), show: history.show });
+  if (history.query) params.set("q", history.query);
+  const last = older ? state.calls.get(history.ids[history.ids.length - 1]) : null;
+  if (last) params.set("before", last.started_at);
+  const page = await api(`/api/calls?${params}`);
+  if (`${history.query}\n${history.show}` !== asked) return; // searched again meanwhile
+  // Calls are kept (a live call stays known even when a filter hides it).
+  for (const call of page.calls) state.calls.set(call.id, call);
+  const ids = page.calls.map((call) => call.id);
+  history.ids = older ? [...history.ids, ...ids.filter((id) => !history.ids.includes(id))] : ids;
+  history.more = page.more;
+  history.openTodos = page.open_todos;
   renderCalls();
+}
+
+function hasOpenTodo(call) {
+  return Boolean(call && call.follow_up && !call.follow_up_done_at);
+}
+
+// Whether a call that has just started or changed belongs in the list as searched and filtered.
+function matchesHistory(call) {
+  const { show, query } = state.history;
+  const kinds = { incoming: "phone_inbound", outgoing: "phone_outbound", browser: "browser" };
+  if (show === "todo" && !hasOpenTodo(call)) return false;
+  if (kinds[show] && call.kind !== kinds[show]) return false;
+  if (show === "failed" && call.status !== "failed") return false;
+  if (!query) return true;
+  const fields = [call.summary, call.follow_up, call.caller_name, call.error];
+  const digits = query.replace(/[\s()\-.+]/g, "");
+  const numbers = [call.from_number, call.to_number, call.callback_number].join(" ");
+  return (
+    fields.join(" ").toLowerCase().includes(query.toLowerCase()) ||
+    (/^\d{3,}$/.test(digits) && numbers.includes(digits))
+  );
 }
 
 function renderCalls() {
   const body = $("calls-body");
-  const calls = [...state.calls.values()].sort((a, b) =>
-    a.started_at < b.started_at ? 1 : a.started_at > b.started_at ? -1 : 0,
-  );
+  const history = state.history;
+  const calls = history.ids.map((id) => state.calls.get(id)).filter(Boolean);
+  const filtered = Boolean(history.query) || history.show !== "all";
   if (!calls.length) {
     const row = document.createElement("tr");
+    row.setAttribute("role", "row");
     const cell = document.createElement("td");
+    cell.setAttribute("role", "cell");
     cell.colSpan = 8;
     cell.className = "muted";
-    cell.textContent = "No calls yet. Your first one will show up here.";
+    cell.textContent = filtered
+      ? "No calls match. Try other words, or show all calls."
+      : "No calls yet. Your first one will show up here.";
     row.append(cell);
     body.replaceChildren(row);
-    return;
+  } else {
+    body.replaceChildren(...calls.map(renderCallRow));
   }
-  body.replaceChildren(...calls.map(renderCallRow));
+  $("history-older").hidden = !history.more;
+  $("history-count").textContent = calls.length
+    ? `${calls.length} call${calls.length === 1 ? "" : "s"} shown${history.more ? ", older ones below" : ""}.`
+    : "";
+  const count = $("todo-count");
+  count.textContent = String(history.openTodos);
+  count.hidden = !history.openTodos;
+}
+
+let historySearchTimer = null;
+
+function setUpHistory() {
+  $("history-search").addEventListener("input", (event) => {
+    clearTimeout(historySearchTimer);
+    historySearchTimer = setTimeout(() => {
+      state.history.query = event.target.value.trim();
+      loadCalls().catch((error) => showError("call-error", error.message));
+    }, 250);
+  });
+  for (const chip of document.querySelectorAll(".chip")) {
+    chip.addEventListener("click", () => {
+      for (const other of document.querySelectorAll(".chip")) {
+        other.setAttribute("aria-pressed", String(other === chip));
+      }
+      state.history.show = chip.dataset.show;
+      loadCalls().catch(() => {});
+    });
+  }
+  $("history-older").addEventListener("click", async () => {
+    const button = $("history-older");
+    button.disabled = true;
+    try {
+      await loadCalls({ older: true });
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+// Ticks a call's to-do off, or back on.
+async function tickTodo(callId, done) {
+  try {
+    const { call } = await api(`/api/calls/${callId}/todo`, {
+      method: "PUT",
+      body: JSON.stringify({ done }),
+    });
+    onCallChanged(call);
+  } catch (error) {
+    showError("call-error", error.message);
+    renderCalls();
+  }
+}
+
+// The to-do, with a box to tick it off.
+function todoControl(call) {
+  const label = document.createElement("label");
+  label.className = `todo-check${call.follow_up_done_at ? " done" : ""}`;
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = Boolean(call.follow_up_done_at);
+  box.setAttribute("aria-label", `Done: ${call.follow_up}`);
+  box.addEventListener("change", () => tickTodo(call.id, box.checked));
+  label.append(box, document.createTextNode(call.follow_up));
+  return label;
+}
+
+const CALL_COLUMNS = ["Started", "Type", "Number", "Length", "Cost", "Status"];
+
+// Which call a button is about, for screen readers: "Incoming call, Nov 21, 5:38 PM, +61412345678".
+function callLabel(call) {
+  const number = callNumber(call);
+  const kind = KIND_LABELS[call.kind] || "A";
+  return `${kind} call, ${formatTime(call.started_at)}${number && number !== "—" ? `, ${number}` : ""}`;
 }
 
 function renderCallRow(call) {
   const row = document.createElement("tr");
+  row.setAttribute("role", "row");
   if (call.id === state.detailCallId) row.className = "selected";
 
   const status = STATUS_LABELS[call.status] || call.status;
@@ -573,20 +829,26 @@ function renderCallRow(call) {
     formatCost(call.cost),
     call.error ? `${status}: ${call.error}` : status,
   ];
-  for (const text of cells) {
+  cells.forEach((text, index) => {
     const cell = document.createElement("td");
+    cell.setAttribute("role", "cell");
+    cell.dataset.label = CALL_COLUMNS[index];
     cell.textContent = text;
     row.append(cell);
-  }
+  });
   row.cells[4].className = "cost";
   row.cells[5].className = "wrap";
   row.insertBefore(summaryCell(call), row.cells[5]);
 
   const actions = document.createElement("td");
+  actions.setAttribute("role", "cell");
+  actions.dataset.label = "";
   const view = document.createElement("button");
   view.type = "button";
   view.className = "link";
   view.textContent = "Transcript";
+  view.setAttribute("aria-label", `Transcript: ${callLabel(call)}`);
+  view.dataset.callId = call.id;
   view.addEventListener("click", () => openDetail(call.id));
   actions.append(view);
   if (OPEN_STATUSES.has(call.status)) {
@@ -595,6 +857,7 @@ function renderCallRow(call) {
     end.className = "link";
     end.style.marginLeft = "12px";
     end.textContent = "End";
+    end.setAttribute("aria-label", `End: ${callLabel(call)}`);
     end.addEventListener("click", () => endCall(call.id));
     actions.append(end);
   }
@@ -604,6 +867,8 @@ function renderCallRow(call) {
 
 function summaryCell(call) {
   const cell = document.createElement("td");
+  cell.setAttribute("role", "cell");
+  cell.dataset.label = "Summary";
   cell.className = "wrap summary";
   if (call.summary_status === "writing") {
     cell.textContent = "Writing…";
@@ -612,9 +877,8 @@ function summaryCell(call) {
   } else if (call.summary) {
     cell.textContent = call.summary;
     if (call.follow_up) {
-      const todo = document.createElement("span");
-      todo.className = "todo";
-      todo.textContent = `To do: ${call.follow_up}`;
+      const todo = todoControl(call);
+      todo.firstChild.after(document.createTextNode("To do: "));
       cell.append(todo);
     }
     if (call.research && call.research.length) {
@@ -657,11 +921,82 @@ async function writeSummary() {
   }
 }
 
+// Keeps Tab inside the open side panel, and Escape closes it.
+function onDrawerKey(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDetail();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = [...$("call-detail").querySelectorAll("button, a[href], input, [tabindex='0']")].filter(
+    (el) => !el.hidden && !el.closest("[hidden]") && !el.disabled,
+  );
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+// The number to call back: the one the caller left, or the line the call was on.
+function callBackNumber(call) {
+  if (!call) return "";
+  if (call.callback_number) return call.callback_number;
+  if (call.kind === "phone_inbound") return call.from_number;
+  if (call.kind === "phone_outbound") return call.to_number;
+  return "";
+}
+
+function renderDetailActions(call) {
+  const number = callBackNumber(call);
+  const phoneReady = Boolean(state.status && state.status.phone.enabled);
+  const callback = $("detail-callback");
+  callback.hidden = !number || !phoneReady;
+  callback.textContent = `Call back ${number}`;
+  $("detail-copy").hidden = !number || !navigator.clipboard;
+  $("detail-actions").hidden = callback.hidden && $("detail-copy").hidden;
+}
+
+// Puts the number in "Call a number", for a look before Oscar dials it.
+function callBack() {
+  const number = callBackNumber(state.calls.get(state.detailCallId));
+  closeDetail({ restoreFocus: false });
+  $("phone-to").value = number;
+  $("phone").scrollIntoView({ behavior: "smooth", block: "start" });
+  $("phone-to").focus({ preventScroll: true });
+  if (!PHONE_PATTERN.test(number.replace(/[\s()-]/g, ""))) {
+    showError("phone-error", "Add the country code (it starts with +), then press Call now.");
+  }
+}
+
+async function copyNumber() {
+  const number = callBackNumber(state.calls.get(state.detailCallId));
+  try {
+    await navigator.clipboard.writeText(number);
+    $("detail-copy").textContent = "Copied";
+    setTimeout(() => ($("detail-copy").textContent = "Copy number"), 1500);
+  } catch {
+    $("detail-copy").textContent = "Couldn't copy";
+  }
+}
+
 async function openDetail(callId) {
   state.detailCallId = callId;
   state.detailMessageIds = new Set();
   state.detailSearches = [];
   $("call-detail").hidden = false;
+  $("detail-backdrop").hidden = false;
+  document.documentElement.classList.add("drawer-open");
+  document.addEventListener("keydown", onDrawerKey);
+  $("detail-title").textContent = "Transcript";
+  $("detail-title").focus();
+  renderDetailActions(state.calls.get(callId));
   showError("detail-error", "");
   renderDetailSummary(null);
   const container = $("detail-transcript");
@@ -680,16 +1015,26 @@ async function openDetail(callId) {
       renderLine(container, call, message);
     }
     renderDetailSummary(call);
+    renderDetailActions(call);
     if (call.error) showError("detail-error", call.error);
   } catch (error) {
     showError("detail-error", error.message);
   }
 }
 
-function closeDetail() {
+function closeDetail({ restoreFocus = true } = {}) {
+  const callId = state.detailCallId;
   state.detailCallId = null;
   $("call-detail").hidden = true;
+  $("detail-backdrop").hidden = true;
+  document.documentElement.classList.remove("drawer-open");
+  document.removeEventListener("keydown", onDrawerKey);
   renderCalls();
+  // Back to the button that opened it (the table was drawn again meanwhile).
+  if (restoreFocus && callId) {
+    const opener = document.querySelector(`#calls-body button[data-call-id="${callId}"]`);
+    if (opener) opener.focus();
+  }
 }
 
 async function endCall(callId) {
@@ -760,6 +1105,18 @@ function tickTimer() {
   } else if (!call || !OPEN_STATUSES.has(call.status)) {
     $("call-timer").textContent = "";
   }
+  updateTitle(call);
+}
+
+// "● Live 1:24 · Oscar" while a call is on, so it shows from another tab.
+function updateTitle(call) {
+  let title = "Oscar";
+  if (call && call.status === "live") {
+    title = `● Live ${$("call-timer").textContent} · Oscar`.replace("  ", " ");
+  } else if (call && OPEN_STATUSES.has(call.status)) {
+    title = "Connecting… · Oscar";
+  }
+  if (document.title !== title) document.title = title;
 }
 
 // ---------- events from the server ----------
@@ -768,6 +1125,13 @@ function onCallChanged(call) {
   const before = state.calls.get(call.id);
   if (before && before.cost !== call.cost) refreshSpendingSoon();
   state.calls.set(call.id, call);
+  const history = state.history;
+  history.openTodos += Number(hasOpenTodo(call)) - Number(hasOpenTodo(before));
+  if (history.openTodos < 0) history.openTodos = 0;
+  if (!history.ids.includes(call.id) && matchesHistory(call)) {
+    const newest = state.calls.get(history.ids[0]);
+    if (!newest || call.started_at >= newest.started_at) history.ids.unshift(call.id);
+  }
   renderCalls();
 
   // Show an incoming phone call when nothing else is in progress here.
@@ -825,12 +1189,41 @@ function onSearch(search) {
   renderDetailSummary(state.calls.get(search.call_id));
 }
 
+let connectionTimer = null;
+
+function showConnectionNotice(text, { reload = false } = {}) {
+  $("connection-text").textContent = text;
+  $("connection-reload").hidden = !reload;
+  $("connection-notice").hidden = false;
+}
+
+function hideConnectionNotice() {
+  clearTimeout(connectionTimer);
+  $("connection-notice").hidden = true;
+}
+
 function connectEvents() {
   const source = new EventSource("/api/events");
   source.onopen = () => {
+    hideConnectionNotice();
     // Catch up on anything missed while disconnected.
     loadCalls().catch(() => {});
+    refreshDashboard();
     if (state.focusCallId) focusCall(state.focusCallId);
+  };
+  source.onerror = () => {
+    if (source.readyState === EventSource.CLOSED) {
+      // The browser gave up (for example, a sign-in in front of Oscar expired).
+      showConnectionNotice("Lost the connection to Oscar.", { reload: true });
+      return;
+    }
+    // It tries again by itself: only say so if that takes more than a moment.
+    clearTimeout(connectionTimer);
+    connectionTimer = setTimeout(() => {
+      if (source.readyState !== EventSource.OPEN) {
+        showConnectionNotice("Lost the connection to Oscar. Trying again…");
+      }
+    }, 4000);
   };
   source.onmessage = (event) => {
     let data;
@@ -1117,7 +1510,15 @@ async function startPhoneCall(event) {
 
 // ---------- WhatsApp ----------
 
-const WHATSAPP_POLL_MS = 3000;
+// How often WhatsApp is asked about: often while a code is being scanned, rarely when it isn't set up.
+function whatsappPollMs(data) {
+  if (!data) return 10000;
+  const { state, installed } = data;
+  if (state.running && ["starting", "waiting_for_scan"].includes(state.status)) return 3000;
+  if (state.running) return 15000;
+  return installed ? 10000 : 60000;
+}
+let whatsappLatest = null;
 const WHATSAPP_LABELS = {
   stopped: "Offline",
   starting: "Connecting",
@@ -1131,6 +1532,7 @@ let whatsappQrVersion = "";
 
 async function loadWhatsApp() {
   const data = await api("/api/whatsapp");
+  whatsappLatest = data;
   renderWhatsApp(data);
   if (!whatsappFormFilled) {
     fillWhatsAppForm(data.settings);
@@ -1138,11 +1540,20 @@ async function loadWhatsApp() {
   }
 }
 
+const WHATSAPP_FIELDS = ["whatsapp-instructions", "whatsapp-web-search", "whatsapp-private", "whatsapp-own-number"];
+
 function fillWhatsAppForm(settings) {
   $("whatsapp-instructions").value = settings.instructions;
   $("whatsapp-web-search").checked = settings.web_search;
   $("whatsapp-private").checked = settings.reply_in_private_chats;
   $("whatsapp-own-number").checked = settings.own_number;
+  updateCounters();
+  state.whatsappSaved = formSnapshot(WHATSAPP_FIELDS);
+}
+
+function unsavedChanges() {
+  const whatsapp = state.whatsappSaved !== null && formSnapshot(WHATSAPP_FIELDS) !== state.whatsappSaved;
+  return agentDirty() || whatsapp;
 }
 
 function renderWhatsApp(data) {
@@ -1202,7 +1613,9 @@ function renderWhatsAppActivity(activity) {
   const body = $("whatsapp-activity");
   if (!activity.length) {
     const row = document.createElement("tr");
+    row.setAttribute("role", "row");
     const cell = document.createElement("td");
+    cell.setAttribute("role", "cell");
     cell.colSpan = 5;
     cell.className = "muted";
     cell.textContent = "No questions yet. Mention @Oscar in a group to try it.";
@@ -1213,17 +1626,20 @@ function renderWhatsAppActivity(activity) {
   body.replaceChildren(
     ...activity.map((item) => {
       const row = document.createElement("tr");
+      row.setAttribute("role", "row");
       const reply = item.error
         ? `${item.reply || "No reply sent."} Problem: ${item.error}`
         : item.reply;
-      for (const [text, wrap] of [
-        [formatTime(item.created_at), false],
-        [item.chat_name, false],
-        [item.asker, false],
-        [item.request, true],
-        [reply, true],
+      for (const [label, text, wrap] of [
+        ["When", formatTime(item.created_at), false],
+        ["Chat", item.chat_name, false],
+        ["From", item.asker, false],
+        ["Question", item.request, true],
+        ["Oscar's reply", reply, true],
       ]) {
         const cell = document.createElement("td");
+        cell.setAttribute("role", "cell");
+        cell.dataset.label = label;
         cell.textContent = text;
         if (wrap) cell.className = "wrap";
         row.append(cell);
@@ -1259,9 +1675,31 @@ async function saveWhatsApp(event) {
 }
 
 function pollWhatsApp() {
-  setInterval(() => {
-    if (document.visibilityState === "visible") loadWhatsApp().catch(() => {});
-  }, WHATSAPP_POLL_MS);
+  setTimeout(async () => {
+    if (document.visibilityState === "visible") await loadWhatsApp().catch(() => {});
+    pollWhatsApp();
+  }, whatsappPollMs(whatsappLatest));
+}
+
+// ---------- menu (small screens) ----------
+
+function setUpMenu() {
+  const nav = document.querySelector(".nav");
+  const toggle = $("nav-toggle");
+  const close = () => {
+    nav.classList.remove("open");
+    toggle.setAttribute("aria-expanded", "false");
+  };
+  toggle.addEventListener("click", () => {
+    toggle.setAttribute("aria-expanded", String(nav.classList.toggle("open")));
+  });
+  for (const link of nav.querySelectorAll("a")) link.addEventListener("click", close);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && nav.classList.contains("open")) {
+      close();
+      toggle.focus();
+    }
+  });
 }
 
 // ---------- scroll reveal ----------
@@ -1288,6 +1726,28 @@ function revealOnScroll() {
 
 async function init() {
   revealOnScroll();
+  setUpMenu();
+  setUpCounters();
+  setUpHistory();
+  $("agent-form").addEventListener("input", updateAgentDirty);
+  $("agent-form").addEventListener("change", updateAgentDirty);
+  $("agent-accent").addEventListener("change", showAccentHint);
+  $("agent-discard").addEventListener("click", () => {
+    if (state.agentSettings) fillAgentForm(state.agentSettings);
+    showError("agent-error", "");
+  });
+  $("agent-preview").addEventListener("click", previewVoice);
+  $("detail-backdrop").addEventListener("click", () => closeDetail());
+  $("detail-callback").addEventListener("click", callBack);
+  $("detail-copy").addEventListener("click", copyNumber);
+  // Unsaved settings are not lost to a closed tab or a reload without a warning.
+  window.addEventListener("beforeunload", (event) => {
+    if (unsavedChanges()) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
+  $("connection-reload").addEventListener("click", () => location.reload());
   $("call-button").addEventListener("click", onCallButton);
   restoreInterruptChoice();
   $("agent-form").addEventListener("submit", saveAgent);
@@ -1319,7 +1779,7 @@ async function init() {
   }
   connectEvents();
   pollWhatsApp();
-  pollSpending();
+  pollDashboard();
 }
 
 init();

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi import Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -24,6 +25,7 @@ from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
 from app.calls import CallManager
 from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
+from app.preview import PreviewFailed, voice_sample
 from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
 from app.config import (
     ROOT_DIR,
@@ -46,8 +48,10 @@ from app.store import (
     AgentSettings,
     Store,
     WhatsAppSettings,
+    utc_now,
     without_excerpts,
 )
+from app.speech import Recordings
 from app.summary import start_summary
 
 STATIC_DIR = ROOT_DIR / "app" / "static"
@@ -65,6 +69,10 @@ class EndCallRequest(BaseModel):
     # Why the browser hung up, when it was not the caller's choice: "audio_failed"
     # when the call's audio never connected (the browser gave up on it).
     reason: Literal["audio_failed"] | None = None
+
+
+class TodoDone(BaseModel):
+    done: bool
 
 
 class SummaryWebhook(BaseModel):
@@ -221,6 +229,22 @@ def create_app(
         store.record_summary_webhook_result(problem or "sent")
         return {"sent": not problem, "problem": problem, **store.get_summary_webhook()}
 
+    @app.post("/api/agent/preview")
+    async def preview_voice(agent: AgentSettings) -> Response:
+        """A short sample of the voice and accent in the form, before they are saved (app/preview.py)."""
+        require_agent_keys()
+        await require_credit()
+        try:
+            audio = await voice_sample(
+                agent,
+                api_key=cfg.openrouter_api_key,
+                base_url=cfg.openrouter_base_url,
+                recordings=Recordings(cfg.db_path.parent / "recordings"),
+            )
+        except PreviewFailed as exc:
+            raise HTTPException(status_code=502, detail=f"No sample could be had: {exc}") from None
+        return Response(audio, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
     @app.get("/api/agent")
     async def get_agent() -> AgentSettings:
         return store.get_agent()
@@ -230,8 +254,26 @@ def create_app(
         return store.save_agent(agent)
 
     @app.get("/api/calls")
-    async def list_calls() -> dict:
-        return {"calls": store.list_calls(limit=100)}
+    async def list_calls(
+        limit: int = Query(default=100, ge=1, le=200),
+        before: str = Query(default="", max_length=40),
+        q: str = Query(default="", max_length=200),
+        show: Literal["all", "todo", "incoming", "outgoing", "browser", "failed"] = "all",
+    ) -> dict:
+        """Calls for Call history, newest first. `before` (a call's started_at) gives the next page."""
+        found, more = store.find_calls(limit=limit, before=before, query=q, show=show)
+        return {"calls": found, "more": more, "open_todos": store.count_open_todos()}
+
+    @app.put("/api/calls/{call_id}/todo")
+    async def tick_todo(call_id: str, todo: TodoDone) -> dict:
+        """Tick the call's to-do off (or back on)."""
+        call = store.get_call(call_id)
+        if call is None:
+            raise HTTPException(status_code=404, detail="Call not found.")
+        if not call["follow_up"]:
+            raise HTTPException(status_code=409, detail="This call has nothing to do.")
+        done_at = utc_now() if todo.done else ""
+        return {"call": calls.update(call_id, follow_up_done_at=done_at)}
 
     @app.get("/api/calls/{call_id}")
     async def get_call(call_id: str) -> dict:

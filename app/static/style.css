@@ -3,7 +3,7 @@
   --navy-hover: #0b2147;
   --text: #00122e;
   --text-soft: rgba(0, 18, 46, 0.62);
-  --blue: #3e6aef;
+  --blue: #365fe0;
   --blue-soft: #eef2fe;
   --lavender: #f5f5fa;
   --lavender-deep: #ebebf5;
@@ -122,6 +122,9 @@ strong {
 }
 
 .nav-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   font-size: 13px;
   font-weight: 500;
   letter-spacing: -0.03em;
@@ -352,9 +355,9 @@ strong {
   position: relative;
   display: grid;
   place-items: center;
-  width: min(300px, 68vw);
+  width: min(300px, 68vw, 34vh);
   aspect-ratio: 1;
-  margin: 40px auto 24px;
+  margin: clamp(16px, 4vh, 40px) auto clamp(12px, 2.5vh, 24px);
   animation: breathe 6s ease-in-out infinite;
 }
 
@@ -493,12 +496,12 @@ strong {
 
 .section {
   padding: 120px 0 0;
-  scroll-margin-top: 40px;
+  scroll-margin-top: -30px;
 }
 
 .section-center {
   text-align: center;
-  margin-bottom: 64px;
+  margin-bottom: clamp(28px, 6vh, 64px);
 }
 
 .section-center .display {
@@ -689,6 +692,9 @@ button:disabled {
 }
 
 button.link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   padding: 0;
   border: none;
   background: none;
@@ -797,7 +803,7 @@ textarea:focus-visible {
   outline: none;
 }
 
-.agent-form {
+.agent-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 28px 28px;
@@ -848,8 +854,8 @@ label.check input {
   appearance: none;
   position: relative;
   flex: none;
-  width: 36px;
-  height: 20px;
+  width: 40px;
+  height: 24px;
   margin: 0;
   border: none;
   border-radius: 999px;
@@ -863,8 +869,8 @@ label.check input::after {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   background: var(--white);
   box-shadow: 0 1px 3px rgba(0, 18, 46, 0.25);
@@ -1025,6 +1031,9 @@ label.check input:focus-visible {
 /* ---------- tables ---------- */
 
 .table-wrap {
+  /* Positioned, so the hidden "Actions" heading stays inside the scrolling box
+     instead of widening the page whenever the table is wider than the screen. */
+  position: relative;
   overflow-x: auto;
   margin-top: 6px;
 }
@@ -1338,12 +1347,67 @@ td.summary .has-research {
 /* ---------- small screens ---------- */
 
 @media (max-width: 960px) {
+  .nav {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .status-row {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .nav-toggle {
+    display: inline-flex;
+    order: 3;
+  }
+
   .nav-links {
+    order: 4;
+    flex-basis: 100%;
+    flex-direction: column;
+    gap: 0;
+    padding: 2px 0 4px;
+  }
+
+  .nav:not(.open) .nav-links {
     display: none;
   }
 
-  .nav {
-    justify-content: space-between;
+  .nav-links a {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 4px;
+    border-top: 1px solid var(--line-soft);
+    font-size: 16px;
+  }
+
+  .nav.open {
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 12px 32px rgba(0, 18, 46, 0.12);
+  }
+}
+
+/* On phones the status pills move into the menu too: the bar stays one row. */
+@media (max-width: 860px) {
+  .nav-toggle {
+    margin-left: auto;
+  }
+
+  .status-row {
+    order: 5;
+    flex-basis: 100%;
+    margin-left: 0;
+    padding: 4px 0 6px;
+  }
+
+  .nav:not(.open) .status-row {
+    display: none;
+  }
+
+  .section {
+    scroll-margin-top: 0;
   }
 }
 
@@ -1358,7 +1422,7 @@ td.summary .has-research {
 
   .title-grid,
   .demo-grid,
-  .agent-form {
+  .agent-fields {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1402,11 +1466,6 @@ td.summary .has-research {
 }
 
 @media (max-width: 520px) {
-  .nav {
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-
   .pill {
     height: 30px;
     padding: 0 10px;
@@ -1505,5 +1564,430 @@ td.cost {
   .notify {
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
+  }
+}
+
+/* The menu button, shown when the section links don't fit */
+
+.nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--lavender);
+  color: var(--navy);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  cursor: pointer;
+}
+
+.nav-toggle-icon {
+  position: relative;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  box-shadow: 0 -4px 0 currentColor, 0 4px 0 currentColor;
+  transition: transform 0.3s var(--ease), box-shadow 0.2s;
+}
+
+.nav-toggle-icon::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0;
+  transition: transform 0.3s var(--ease), opacity 0.2s;
+}
+
+.nav-toggle[aria-expanded="true"] .nav-toggle-icon {
+  box-shadow: none;
+  transform: rotate(45deg);
+}
+
+.nav-toggle[aria-expanded="true"] .nav-toggle-icon::after {
+  opacity: 1;
+  transform: rotate(90deg);
+}
+
+@media (min-width: 961px) {
+  .nav-toggle {
+    display: none;
+  }
+}
+
+/* Shown while the dashboard has lost its connection to Oscar */
+
+.toast {
+  position: fixed;
+  right: 0;
+  bottom: 20px;
+  left: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  margin: 0 auto;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--navy);
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: 0 12px 32px rgba(0, 18, 46, 0.25);
+}
+
+.toast button.link {
+  color: #a9bdff;
+  font-size: 14px;
+}
+
+/* On phones each row of a table becomes a card, every value under its own label */
+
+@media (max-width: 720px) {
+  .table-wrap {
+    overflow: visible;
+  }
+
+  .table-wrap table,
+  .table-wrap tbody,
+  .table-wrap tr,
+  .table-wrap td {
+    display: block;
+  }
+
+  .table-wrap thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .table-wrap tbody tr {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .table-wrap tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .table-wrap td[data-label] {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr);
+    gap: 12px;
+    min-width: 0;
+    max-width: none;
+    padding: 4px 0;
+    border: none;
+    white-space: normal;
+  }
+
+  .table-wrap td[data-label] > * {
+    grid-column: 2;
+    margin-top: 0;
+  }
+
+  .table-wrap td[data-label]::before {
+    content: attr(data-label);
+    padding-top: 2px;
+    color: var(--text-soft);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .table-wrap td[data-label=""] {
+    display: flex;
+    gap: 20px;
+    padding-top: 8px;
+  }
+
+  .table-wrap td[data-label=""]::before {
+    content: none;
+  }
+
+  .table-wrap td:not([data-label]) {
+    padding: 4px 0;
+    border: none;
+    white-space: normal;
+  }
+
+  tbody tr:hover td,
+  tr.selected td,
+  tr.selected:hover td {
+    background: none;
+  }
+
+  tr.selected {
+    box-shadow: inset 3px 0 0 var(--blue);
+    padding-left: 12px;
+  }
+}
+
+/* Keyboard users can skip straight to the call */
+
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 50;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--navy);
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  transform: translateY(-160%);
+}
+
+.skip-link:focus {
+  transform: none;
+}
+
+/* A quieter button, beside a primary one */
+
+button.secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--white);
+  color: var(--navy);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+button.secondary:hover:not(:disabled) {
+  border-color: var(--navy);
+}
+
+/* Agent settings: the save bar stays in view while there are unsaved changes */
+
+.agent-form .actions {
+  position: sticky;
+  bottom: 12px;
+  z-index: 5;
+  transition: box-shadow 0.3s, background-color 0.3s;
+}
+
+.agent-form.dirty .actions {
+  margin: 22px -16px 0;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 30px rgba(0, 18, 46, 0.14);
+}
+
+.dirty-note {
+  color: var(--navy);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.counter {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.counter.near {
+  color: var(--red);
+}
+
+/* Call history: search, filters and older calls */
+
+.history-tools {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--navy);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.chip:hover {
+  border-color: var(--navy);
+}
+
+.chip[aria-pressed="true"] {
+  border-color: var(--navy);
+  background: var(--navy);
+  color: var(--white);
+}
+
+.chip-count {
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--red);
+  color: var(--white);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+.history-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.history-foot .hint {
+  margin: 0;
+}
+
+/* A to-do you can tick off */
+
+.todo-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.todo-check input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 3px 0 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.todo-check.done {
+  color: var(--text-soft);
+  font-weight: 500;
+  text-decoration: line-through;
+}
+
+/* The call opened from the history: a side panel over the page */
+
+html.drawer-open {
+  overflow: hidden;
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 18, 46, 0.32);
+  animation: fade-in 0.2s ease both;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  width: min(640px, 100%);
+  overflow-y: auto;
+  padding: 0 28px 40px;
+  background: var(--white);
+  box-shadow: -24px 0 48px rgba(0, 18, 46, 0.16);
+  animation: drawer-in 0.32s var(--ease) both;
+}
+
+.drawer .detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  align-items: center;
+  margin: 0 -28px;
+  padding: 20px 28px 14px;
+  background: var(--white);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.drawer #detail-title:focus {
+  outline: none;
+}
+
+.drawer .transcript {
+  max-height: none;
+  background: var(--lavender);
+}
+
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(32px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .drawer {
+    padding: 0 18px 32px;
+  }
+
+  .drawer .detail-head {
+    margin: 0 -18px;
+    padding: 16px 18px 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .drawer-backdrop {
+    animation: none;
   }
 }

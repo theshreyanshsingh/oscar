@@ -152,6 +152,16 @@ WHATSAPP_ACTIVITY_KEPT = 200
 _LONG_AGO = "1970-01-01T00:00:00+00:00"
 
 
+# What Call history can show (Store.find_calls): a condition on the calls table for each.
+SHOW_FILTERS = {
+    "all": "",
+    "todo": "follow_up != '' AND follow_up_done_at = ''",
+    "incoming": "kind = 'phone_inbound'",
+    "outgoing": "kind = 'phone_outbound'",
+    "browser": "kind = 'browser'",
+    "failed": "status = 'failed'",
+}
+
 _SUMMARY_COLUMNS = (
     "summary_status",
     "summary",
@@ -294,6 +304,8 @@ class Store:
             ("whatsapp_settings", "own_number", "INTEGER NOT NULL DEFAULT 0"),
             # What the call cost on OpenRouter, in dollars (app/costs.py).
             ("calls", "cost", "REAL NOT NULL DEFAULT 0"),
+            # When the owner ticked the call's to-do off ("" while it is still to do).
+            ("calls", "follow_up_done_at", "TEXT NOT NULL DEFAULT ''"),
             *(("calls", column, "TEXT NOT NULL DEFAULT ''") for column in _SUMMARY_COLUMNS),
         ):
             columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
@@ -380,7 +392,7 @@ class Store:
             )
         return self.get_call(call_id)
 
-    _UPDATABLE = {"status", "twilio_sid", "error", "ended_at", *_SUMMARY_COLUMNS}
+    _UPDATABLE = {"status", "twilio_sid", "error", "ended_at", "follow_up_done_at", *_SUMMARY_COLUMNS}
 
     def update_call(self, call_id: str, **fields) -> dict | None:
         unknown = set(fields) - self._UPDATABLE
@@ -428,6 +440,54 @@ class Store:
                 "SELECT * FROM calls ORDER BY started_at DESC, rowid DESC LIMIT ?", (limit,)
             ).fetchall()
         return [self._call_dict(row) for row in rows]
+
+    def find_calls(
+        self, *, limit: int = 50, before: str = "", query: str = "", show: str = "all"
+    ) -> tuple[list[dict], bool]:
+        """Calls for Call history, newest first: (the calls, whether there are older ones).
+
+        `before` is a started_at: only calls started before it (the next page).
+        `query` is looked for in the summary, the to-do, the caller's name, the
+        numbers, the error and what was said; a number is found whatever spaces
+        or dashes it was typed with. `show` is one of SHOW_FILTERS.
+        """
+        conditions, values = [], []
+        if before:
+            conditions.append("started_at < ?")
+            values.append(before)
+        if SHOW_FILTERS.get(show):
+            conditions.append(SHOW_FILTERS[show])
+        query = query.strip()
+        if query:
+            like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            searched = [
+                f"{column} LIKE ? ESCAPE '\\'"
+                for column in ("summary", "follow_up", "caller_name", "error", "from_number", "to_number", "callback_number")
+            ]
+            searched.append(
+                "EXISTS (SELECT 1 FROM messages WHERE messages.call_id = calls.id AND text LIKE ? ESCAPE '\\')"
+            )
+            values.extend([like] * len(searched))
+            digits = re.sub(r"[\s()\-.]", "", query)
+            if len(digits) >= 3 and re.fullmatch(r"\+?\d+", digits):
+                for column in ("from_number", "to_number", "callback_number"):
+                    searched.append(f"{column} LIKE ?")
+                    values.append(f"%{digits.lstrip('+')}%")
+            conditions.append("(" + " OR ".join(searched) + ")")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM calls {where} ORDER BY started_at DESC, rowid DESC LIMIT ?",
+                (*values, limit + 1),
+            ).fetchall()
+        return [self._call_dict(row) for row in rows[:limit]], len(rows) > limit
+
+    def count_open_todos(self) -> int:
+        with self._lock:
+            row = self._db.execute(
+                f"SELECT COUNT(*) AS open FROM calls WHERE {SHOW_FILTERS['todo']}"
+            ).fetchone()
+        return int(row["open"])
 
     def fail_open_calls(self, reason: str) -> int:
         """Close calls left open by a previous run of the server."""

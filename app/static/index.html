@@ -4,22 +4,34 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Oscar</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23f28b6c'/%3E%3Cstop offset='0.5' stop-color='%23b83a8f'/%3E%3Cstop offset='1' stop-color='%236d35e8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='15' fill='url(%23g)'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=9" />
+    <link rel="stylesheet" href="/static/style.css?v=12" />
   </head>
   <body>
+    <a class="skip-link" href="#call">Skip to the call</a>
     <header class="nav-shell">
       <nav class="nav" aria-label="Sections">
         <a class="brand" href="#top">
           <span class="brand-mark" aria-hidden="true"></span>
           <span class="brand-name">Oscar</span>
         </a>
-        <div class="nav-links">
+        <button
+          type="button"
+          class="nav-toggle"
+          id="nav-toggle"
+          aria-expanded="false"
+          aria-controls="nav-links"
+        >
+          <span class="nav-toggle-icon" aria-hidden="true"></span>
+          Menu
+        </button>
+        <div class="nav-links" id="nav-links">
           <a href="#call">Talk</a>
           <a href="#phone">Phone</a>
           <a href="#agent">Agent</a>
@@ -36,6 +48,10 @@
     </header>
 
     <div class="notice" id="setup-notice" hidden></div>
+    <div class="toast" id="connection-notice" role="status" hidden>
+      <span id="connection-text">Lost the connection to Oscar. Trying again…</span>
+      <button type="button" class="link" id="connection-reload" hidden>Reload</button>
+    </div>
 
     <section class="hero" id="top" aria-labelledby="hero-heading">
       <div class="hero-bg" aria-hidden="true">
@@ -190,6 +206,8 @@
 
         <div class="panel panel-soft reveal">
           <form id="agent-form" class="agent-form" novalidate>
+            <!-- The fields are laid out in a grid of their own, so the save bar after it can stay in view. -->
+            <div class="agent-fields">
             <div class="field">
               <label class="field-label" for="agent-name">Name</label>
               <input id="agent-name" name="name" maxlength="60" required />
@@ -197,12 +215,15 @@
             <div class="field">
               <label class="field-label" for="agent-voice">Voice</label>
               <select id="agent-voice" name="voice" required></select>
-              <p class="hint">How Oscar sounds on calls.</p>
+              <p class="hint">
+                How Oscar sounds on calls.
+                <button type="button" class="link" id="agent-preview">Hear this voice</button>
+              </p>
             </div>
             <div class="field">
               <label class="field-label" for="agent-accent">Accent</label>
               <select id="agent-accent" name="accent" required></select>
-              <p class="hint">Spoken with whichever voice you pick. Only Ballad stays British.</p>
+              <p class="hint" id="agent-accent-hint"></p>
             </div>
             <div class="field span-all">
               <label class="field-label" for="agent-model">Chat model</label>
@@ -279,13 +300,16 @@
                 <input type="file" id="agent-knowledge-file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" hidden />
               </p>
             </div>
-            <div class="actions span-all">
+            </div>
+            <div class="actions">
               <button type="submit" class="primary" id="agent-save">
                 <span class="btn-label">Save changes</span>
               </button>
+              <span class="dirty-note" id="agent-dirty" hidden>Unsaved changes</span>
+              <button type="button" class="link" id="agent-discard" hidden>Discard</button>
               <span class="saved" id="agent-saved" aria-live="polite"></span>
             </div>
-            <p class="error span-all" id="agent-error" role="alert" hidden></p>
+            <p class="error" id="agent-error" role="alert" hidden></p>
           </form>
         </div>
       </section>
@@ -426,18 +450,18 @@
         <div class="panel panel-outline table-panel reveal">
           <h3 class="panel-title">Recent questions</h3>
           <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">When</th>
-                  <th scope="col">Chat</th>
-                  <th scope="col">From</th>
-                  <th scope="col">Question</th>
-                  <th scope="col">Oscar's reply</th>
+            <table role="table">
+              <thead role="rowgroup">
+                <tr role="row">
+                  <th scope="col" role="columnheader">When</th>
+                  <th scope="col" role="columnheader">Chat</th>
+                  <th scope="col" role="columnheader">From</th>
+                  <th scope="col" role="columnheader">Question</th>
+                  <th scope="col" role="columnheader">Oscar's reply</th>
                 </tr>
               </thead>
-              <tbody id="whatsapp-activity">
-                <tr><td colspan="5" class="muted">No questions yet. Mention @Oscar in a group to try it.</td></tr>
+              <tbody id="whatsapp-activity" role="rowgroup">
+                <tr role="row"><td role="cell" colspan="5" class="muted">No questions yet. Mention @Oscar in a group to try it.</td></tr>
               </tbody>
             </table>
           </div>
@@ -476,34 +500,48 @@
         </div>
 
         <div class="panel panel-outline table-panel reveal">
+          <div class="history-tools">
+            <label class="visually-hidden" for="history-search">Search calls</label>
+            <input
+              type="search"
+              id="history-search"
+              placeholder="Search by name, number or words"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <div class="chips" role="group" aria-label="Show">
+              <button type="button" class="chip" data-show="all" aria-pressed="true">All</button>
+              <button type="button" class="chip" data-show="todo" aria-pressed="false">
+                To do <span class="chip-count" id="todo-count" hidden></span>
+              </button>
+              <button type="button" class="chip" data-show="incoming" aria-pressed="false">Incoming</button>
+              <button type="button" class="chip" data-show="outgoing" aria-pressed="false">Outgoing</button>
+              <button type="button" class="chip" data-show="browser" aria-pressed="false">Browser</button>
+              <button type="button" class="chip" data-show="failed" aria-pressed="false">Failed</button>
+            </div>
+          </div>
           <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Started</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Number</th>
-                  <th scope="col">Length</th>
-                  <th scope="col">Cost</th>
-                  <th scope="col">Summary</th>
-                  <th scope="col">Status</th>
-                  <th scope="col"><span class="visually-hidden">Actions</span></th>
+            <table role="table">
+              <thead role="rowgroup">
+                <tr role="row">
+                  <th scope="col" role="columnheader">Started</th>
+                  <th scope="col" role="columnheader">Type</th>
+                  <th scope="col" role="columnheader">Number</th>
+                  <th scope="col" role="columnheader">Length</th>
+                  <th scope="col" role="columnheader">Cost</th>
+                  <th scope="col" role="columnheader">Summary</th>
+                  <th scope="col" role="columnheader">Status</th>
+                  <th scope="col" role="columnheader"><span class="visually-hidden">Actions</span></th>
                 </tr>
               </thead>
-              <tbody id="calls-body">
-                <tr><td colspan="8" class="muted">No calls yet. Your first one will show up here.</td></tr>
+              <tbody id="calls-body" role="rowgroup">
+                <tr role="row"><td role="cell" colspan="8" class="muted">No calls yet. Your first one will show up here.</td></tr>
               </tbody>
             </table>
           </div>
-          <div class="detail" id="call-detail" hidden>
-            <div class="detail-head">
-              <h3 class="panel-title" id="detail-title">Transcript</h3>
-              <button type="button" class="link" id="detail-close">Close</button>
-            </div>
-            <p class="error" id="detail-error" hidden></p>
-            <div class="call-summary" id="detail-summary" hidden></div>
-            <button type="button" class="link" id="detail-summarise" hidden>Write a summary</button>
-            <div class="transcript" id="detail-transcript"></div>
+          <div class="history-foot">
+            <p class="hint" id="history-count" aria-live="polite"></p>
+            <button type="button" class="secondary" id="history-older" hidden>Show older calls</button>
           </div>
         </div>
 
@@ -539,6 +577,29 @@
       </section>
     </main>
 
+    <div class="drawer-backdrop" id="detail-backdrop" hidden></div>
+    <aside
+      class="drawer"
+      id="call-detail"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="detail-title"
+      hidden
+    >
+      <div class="detail-head">
+        <h3 class="panel-title" id="detail-title" tabindex="-1">Transcript</h3>
+        <button type="button" class="link" id="detail-close">Close</button>
+      </div>
+      <div class="detail-actions" id="detail-actions" hidden>
+        <button type="button" class="secondary" id="detail-callback" hidden>Call back</button>
+        <button type="button" class="link" id="detail-copy" hidden>Copy number</button>
+      </div>
+      <p class="error" id="detail-error" hidden></p>
+      <div class="call-summary" id="detail-summary" hidden></div>
+      <button type="button" class="link" id="detail-summarise" hidden>Write a summary</button>
+      <div class="transcript" id="detail-transcript"></div>
+    </aside>
+
     <footer class="footer">
       <div class="footer-inner">
         <span class="brand-name">Oscar</span>
@@ -546,6 +607,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=20"></script>
+    <script src="/static/app.js?v=23"></script>
   </body>
 </html>
