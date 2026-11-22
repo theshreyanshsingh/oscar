@@ -137,6 +137,30 @@ async def send_summary(url: str, payload: dict, client: httpx.AsyncClient | None
             await client.aclose()
 
 
+# Alerts, sent to the same address when "alerts" is on: a call that came in and
+# was not answered, and an OpenRouter key running low.
+LOW_CREDIT_DOLLARS = 1.00
+
+
+def missed_call_payload(call: dict, *, agent_name: str) -> dict:
+    """An incoming call no one talked to: turned away (the lines busy, no credit) or failed."""
+    who = call.get("from_number") or "an unknown number"
+    reason = (call.get("error") or "it ended before anything was said").rstrip(".")
+    text = f"{agent_name} missed a call from {who}: {reason}."
+    return {"text": text, "content": text, "event": "missed_call", "call": {field: call.get(field) for field in CALL_FIELDS}}
+
+
+def low_credit_payload(credit: dict, *, agent_name: str) -> dict:
+    """The OpenRouter key has less than LOW_CREDIT_DOLLARS left of its limit."""
+    resets = f" It resets {credit['resets']}." if credit.get("resets") else ""
+    text = (
+        f"{agent_name}'s OpenRouter key has ${max(credit['left'], 0):.2f} left of its "
+        f"${credit['limit']:.2f} limit.{resets} Calls stop when less than 5 cents is left: "
+        "raise the limit on openrouter.ai, under Keys."
+    )
+    return {"text": text, "content": text, "event": "low_credit", "credit": credit}
+
+
 # What "Send a test" posts: a call as one would be, so the message can be checked.
 SAMPLE_CALL = {
     "id": "test",

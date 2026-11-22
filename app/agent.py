@@ -38,16 +38,25 @@ from app.config import Config
 from app.costs import CostMeter
 from app.script import ScriptKeeper, script_steps
 from app.search import WebLookup
-from app.speech import EchoGate, GreetingFrame, OpenRouterVoiceService, Recordings
+from app.speech import EchoGate, FarewellFrame, GreetingFrame, OpenRouterVoiceService, Recordings
 from app.store import ACCENTS, AgentSettings, Store
-from app.summary import start_summary
+from app.summary import alert_if_missed, start_summary
 
 # Input and output sample rates (Hz). Phone audio is 8 kHz.
 BROWSER_SAMPLE_RATES = (16000, 24000)
 PHONE_SAMPLE_RATES = (8000, 8000)
 
-# Hard cap on a single call, so a forgotten call cannot run up provider bills.
-MAX_CALL_SECONDS = 30 * 60
+# The longest a call runs (AgentSettings.max_call_minutes), so a forgotten or
+# endless call cannot run up the bill: every reply sends the whole conversation
+# so far, so each costs a little more than the one before. At the limit Oscar
+# says this, and the call is hung up once it has been heard (or after
+# FAREWELL_WAIT_SECONDS, if it cannot be).
+FAREWELL_LINE = (
+    "I'm sorry, we've reached the time limit for this call. "
+    "Please call back if there's anything else. Goodbye."
+)
+FAREWELL_WAIT_SECONDS = 15
+SECONDS_IN_A_MINUTE = 60  # what a minute of max_call_minutes is (tests make it shorter)
 
 # The caller's turn ends as soon as what they said sounds finished. When it
 # sounds unfinished ("Hey", "Are you..."), it ends after this much more silence
@@ -478,9 +487,20 @@ async def run_call(
             logger.warning(f"Call {call_id}: {frame.error}")
             calls.note_error(call_id, str(frame.error))
 
+        farewell_said = asyncio.Event()
+
+        @voice.event_handler("on_farewell_said")
+        async def on_farewell_said(service):
+            farewell_said.set()
+
         async def end_after_max_length():
-            await asyncio.sleep(MAX_CALL_SECONDS)
-            calls.note_error(call_id, "The call reached the 30 minute limit.")
+            await asyncio.sleep(agent.max_call_minutes * SECONDS_IN_A_MINUTE)
+            calls.add_message(call_id, "note", f"The call reached its {agent.max_call_minutes} minute limit.")
+            await worker.queue_frames([FarewellFrame(FAREWELL_LINE)])
+            try:
+                await asyncio.wait_for(farewell_said.wait(), FAREWELL_WAIT_SECONDS)
+            except TimeoutError:
+                logger.warning(f"Call {call_id}: the goodbye at the time limit was not heard; hanging up")
             await worker.cancel(reason="Maximum call length reached")
 
         calls.register_worker(call_id, worker)
@@ -503,4 +523,5 @@ async def run_call(
         # never delays a reply or the hang-up.
         call = calls.store.get_call(call_id)
         if call:
+            alert_if_missed(calls, call, agent.name)
             start_summary(cfg, calls, call, agent, notify=True)

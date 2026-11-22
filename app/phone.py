@@ -12,6 +12,7 @@ else can start or hijack a call.
 
 import asyncio
 import json
+import re
 
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -27,6 +28,40 @@ from app.calls import AUDIO_NEVER_CONNECTED, CallManager, lines_busy
 from app.config import Config
 from app.costs import KeyCredit
 from app.store import OPEN_STATUSES, Store
+from app.summary import alert_if_missed
+
+# A blocked number matches a caller however the owner wrote it: "+61 412 345 678",
+# "0412 345 678" (without the country code, with the 0 before the area code) or
+# "61412345678". It needs this many digits (leading zeros aside), so a short
+# entry cannot block every number that happens to end the same way.
+BLOCKED_DIGITS_LEAST = 8
+BLOCKED_NUMBERS_MOST = 500
+
+
+def number_digits(number: str) -> str:
+    return re.sub(r"\D", "", number)
+
+
+def blocked_entry(number: str) -> str:
+    """A number for the blocked list, tidied. Raises ValueError when it is not one."""
+    number = re.sub(r"\s+", " ", number).strip()
+    digits = number_digits(number).lstrip("0")
+    if not BLOCKED_DIGITS_LEAST <= len(digits) <= 15 or re.search(r"[^\d\s()+.\-]", number):
+        raise ValueError(f"{number!r} is not a phone number (8 to 15 digits).")
+    return number
+
+
+def is_blocked(caller: str, blocked: list[str]) -> bool:
+    """Whether a call from `caller` (as Twilio gives it, +61412345678) is refused."""
+    digits = number_digits(caller)
+    if not digits:
+        return False
+    for entry in blocked:
+        wanted = number_digits(entry).lstrip("0")
+        if len(wanted) >= BLOCKED_DIGITS_LEAST and digits.endswith(wanted):
+            return True
+    return False
+
 
 # What someone phoning in hears while Oscar is on as many calls as MAX_CALLS lets it.
 LINES_BUSY_LINE = "Sorry, all our lines are busy right now. Please call back in a few minutes. Goodbye."
@@ -151,6 +186,14 @@ def create_phone_router(
         if form is None:
             return Response(status_code=403)
 
+        if is_blocked(form.get("From", ""), store.get_blocked_numbers()):
+            # Refused before it is answered, so Twilio does not charge for it, and
+            # kept out of the call history (blocked numbers are mostly spam).
+            logger.info("Refused a call from a blocked number")
+            response = VoiceResponse()
+            response.reject(reason="rejected")
+            return _twiml_response(str(response))
+
         if cfg.missing_agent_keys():
             response = VoiceResponse()
             response.say("Sorry, this agent is not set up yet. Goodbye.")
@@ -166,6 +209,7 @@ def create_phone_router(
                 to_number=form.get("To", ""),
             )
             calls.finish(missed["id"], reason)
+            alert_if_missed(calls, calls.store.get_call(missed["id"]) or missed, store.get_agent().name)
             response = VoiceResponse()
             response.say(said)
             response.hangup()
@@ -212,6 +256,8 @@ def create_phone_router(
                 # The call is over and no agent is running it: either it already
                 # finished, or it was answered but its audio stream never started.
                 calls.finish(call["id"], "" if call["status"] == "live" else AUDIO_NEVER_CONNECTED)
+                if call["status"] != "live":
+                    alert_if_missed(calls, calls.store.get_call(call["id"]) or call, store.get_agent().name)
         return Response(status_code=204)
 
     @router.websocket("/media")

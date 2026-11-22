@@ -24,6 +24,7 @@ const FIELD_LABELS = {
   to: "Number to call",
   instructions: "Chat instructions",
   summary_fields: "Note from each call",
+  max_call_minutes: "Longest call",
 };
 const SERVICE_NAMES = { OPENROUTER_API_KEY: "OpenRouter" };
 const IDLE_CALL_TEXT = "Press Start call and allow the microphone.";
@@ -362,7 +363,10 @@ function pollDashboard() {
 // ---------- summaries sent to the owner ----------
 
 function renderNotify(webhook, { fill = false } = {}) {
-  if (fill) $("notify-url").value = webhook.url;
+  if (fill) {
+    $("notify-url").value = webhook.url;
+    $("notify-alerts").checked = webhook.alerts !== false;
+  }
   $("notify-test").hidden = !webhook.url;
   const status = $("notify-status");
   if (!webhook.url) {
@@ -374,6 +378,72 @@ function renderNotify(webhook, { fill = false } = {}) {
   } else {
     status.textContent = `Last tried ${formatTime(webhook.last_at)}: ${webhook.last_result}`;
   }
+}
+
+// ---------- blocked numbers ----------
+
+async function loadBlocked() {
+  const { numbers } = await api("/api/blocked-numbers");
+  state.blocked = numbers;
+  $("blocked-numbers").value = numbers.join("\n");
+}
+
+function blockedCount(numbers) {
+  return numbers.length === 1 ? "1 number is blocked." : `${numbers.length} numbers are blocked.`;
+}
+
+async function saveBlocked(event) {
+  event.preventDefault();
+  showError("blocked-error", "");
+  const button = $("blocked-save");
+  button.disabled = true;
+  try {
+    const { numbers } = await api("/api/blocked-numbers", {
+      method: "PUT",
+      body: JSON.stringify({ numbers: $("blocked-numbers").value.split("\n") }),
+    });
+    state.blocked = numbers;
+    $("blocked-numbers").value = numbers.join("\n");
+    $("blocked-status").textContent = `Saved. ${blockedCount(numbers)}`;
+    renderDetailActions(state.calls.get(state.detailCallId));
+  } catch (error) {
+    showError("blocked-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function digitsOf(number) {
+  return String(number || "").replace(/\D/g, "").replace(/^0+/, "");
+}
+
+// Whether a caller's number is on the list (the server matches the same way: app/phone.py).
+function isBlocked(number) {
+  const digits = digitsOf(number);
+  return Boolean(digits) && (state.blocked || []).some((entry) => {
+    const wanted = digitsOf(entry);
+    return wanted.length >= 8 && digits.endsWith(wanted);
+  });
+}
+
+// "Block number" in an incoming call's panel: adds it to the list.
+async function blockCaller() {
+  const call = state.calls.get(state.detailCallId);
+  if (!call || !call.from_number) return;
+  const button = $("detail-block");
+  button.disabled = true;
+  try {
+    const { numbers } = await api("/api/blocked-numbers", {
+      method: "PUT",
+      body: JSON.stringify({ numbers: [...(state.blocked || []), call.from_number] }),
+    });
+    state.blocked = numbers;
+    $("blocked-numbers").value = numbers.join("\n");
+    $("blocked-status").textContent = blockedCount(numbers);
+  } catch (error) {
+    showError("detail-error", error.message);
+  }
+  renderDetailActions(call); // "Number blocked", and off; or back on after a failure
 }
 
 async function loadNotify() {
@@ -388,7 +458,7 @@ async function saveNotify(event) {
   try {
     const webhook = await api("/api/summary-webhook", {
       method: "PUT",
-      body: JSON.stringify({ url: $("notify-url").value }),
+      body: JSON.stringify({ url: $("notify-url").value, alerts: $("notify-alerts").checked }),
     });
     renderNotify(webhook, { fill: true });
   } catch (error) {
@@ -446,6 +516,7 @@ async function loadStatus() {
   }
 
   $("phone-ready").hidden = !status.phone.enabled;
+  $("blocked-panel").hidden = !status.phone.enabled;
   $("phone-setup").hidden = status.phone.enabled;
   if (status.phone.enabled) {
     $("phone-number").textContent = status.phone.number;
@@ -488,6 +559,7 @@ const AGENT_FIELDS = [
   "agent-script",
   "agent-knowledge",
   "agent-summary-fields",
+  "agent-max-minutes",
 ];
 
 // What was measured for each accent (README.md, Agent settings; ACCENT_NOTE in
@@ -630,7 +702,21 @@ function updateAgentDirty() {
   $("agent-form").classList.toggle("dirty", dirty);
   $("agent-dirty").hidden = !dirty;
   $("agent-discard").hidden = !dirty;
+  $("agent-try").hidden = !dirty;
   if (dirty) $("agent-saved").textContent = "";
+}
+
+// "Try in a call": a browser call with the settings in the form, saved or not.
+function tryUnsavedSettings() {
+  const form = $("agent-form");
+  if (!form.reportValidity()) return;
+  if (state.callUi !== "idle") {
+    showError("agent-error", "Finish the call you are on first.");
+    return;
+  }
+  showError("agent-error", "");
+  $("call").scrollIntoView({ behavior: "smooth", block: "start" });
+  startBrowserCall({ agent: agentFormBody() });
 }
 
 // "1,234 / 8,000" under a long field, red when nearly full.
@@ -676,6 +762,7 @@ function agentFormBody() {
     knowledge: $("agent-knowledge").value,
     // One a line; the server tidies blanks and repeats away.
     summary_fields: $("agent-summary-fields").value.split("\n"),
+    max_call_minutes: Number($("agent-max-minutes").value),
   };
 }
 
@@ -735,6 +822,7 @@ function fillAgentForm(agent) {
   $("agent-script").value = agent.script || "";
   $("agent-knowledge").value = agent.knowledge || "";
   $("agent-summary-fields").value = (agent.summary_fields || []).join("\n");
+  $("agent-max-minutes").value = String(agent.max_call_minutes || 30);
   countKnowledge();
   showAccentHint();
   updateCounters();
@@ -1130,6 +1218,13 @@ function renderDetailActions(call) {
   callback.textContent = `Call back ${number}`;
   $("detail-copy").hidden = !number || !navigator.clipboard;
   $("detail-link").hidden = !navigator.clipboard;
+  // An incoming call's number, when phone calls are set up: block it, or say it is.
+  const block = $("detail-block");
+  const caller = call && call.kind === "phone_inbound" ? call.from_number : "";
+  block.hidden = !caller || !phoneReady;
+  const blocked = Boolean(caller) && isBlocked(caller);
+  block.textContent = blocked ? "Number blocked" : "Block number";
+  block.disabled = blocked;
   // Not while the call is on, or while its summary is being written.
   const deletable = Boolean(call) && !OPEN_STATUSES.has(call.status) && call.summary_status !== "writing";
   $("detail-delete").hidden = !deletable;
@@ -1449,6 +1544,7 @@ function updateCallUi() {
   // The choice is made when a call starts, so it cannot change during one.
   $("call-interrupt").disabled = state.callUi !== "idle";
   $("call-mute").hidden = state.callUi !== "active";
+  $("agent-try").disabled = state.callUi !== "idle" || !ready;
   const phoneButton = $("phone-button");
   if (phoneButton) phoneButton.disabled = !ready || phoneCallPending;
   updateOrb();
@@ -1553,7 +1649,8 @@ function microphoneErrorMessage(error) {
   return (error && error.message) || "The call couldn't start. Please try again.";
 }
 
-async function startBrowserCall() {
+// `agent`: settings to try on this call only ("Try in a call"), instead of the saved ones.
+async function startBrowserCall({ agent = null } = {}) {
   showError("call-error", "");
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.RTCPeerConnection) {
     showError(
@@ -1563,6 +1660,7 @@ async function startBrowserCall() {
     return;
   }
   state.callUi = "starting";
+  $("call-trying").hidden = !agent;
   updateCallUi();
   $("call-status").textContent = "Waiting for microphone permission…";
   try {
@@ -1608,6 +1706,7 @@ async function startBrowserCall() {
         sdp: peer.localDescription.sdp,
         type: "offer",
         interruptible: $("call-interrupt").checked,
+        ...(agent ? { agent } : {}),
       }),
     });
     state.browserCallId = answer.call_id;
@@ -1634,6 +1733,7 @@ function audioNeverConnected() {
 }
 
 function cleanupBrowserCall() {
+  $("call-trying").hidden = true;
   clearTimeout(audioConnectTimer);
   audioConnectTimer = null;
   if (peer) {
@@ -2373,10 +2473,13 @@ async function init() {
     $("agent-saved").textContent = ""; // "Added a file… Save changes to keep it." no longer holds
   });
   $("agent-preview").addEventListener("click", previewVoice);
+  $("agent-try").addEventListener("click", tryUnsavedSettings);
   $("detail-backdrop").addEventListener("click", () => closeDetail());
   $("detail-callback").addEventListener("click", callBack);
   $("detail-copy").addEventListener("click", copyNumber);
   $("detail-link").addEventListener("click", copyCallLink);
+  $("detail-block").addEventListener("click", blockCaller);
+  $("blocked-form").addEventListener("submit", saveBlocked);
   $("detail-delete").addEventListener("click", askToDelete);
   $("detail-delete-yes").addEventListener("click", deleteCall);
   $("detail-delete-no").addEventListener("click", keepCall);
@@ -2422,7 +2525,7 @@ async function init() {
   try {
     // Status first: it fills the voice and accent lists, which the agent form then selects from.
     await loadStatus();
-    await Promise.all([loadAgent(), loadCalls(), loadWhatsApp(), loadSpending(), loadNotify()]);
+    await Promise.all([loadAgent(), loadCalls(), loadWhatsApp(), loadSpending(), loadNotify(), loadBlocked()]);
     // A link to one call (?call=…) opens it.
     const linked = new URL(location.href).searchParams.get("call");
     if (linked) openDetail(linked);

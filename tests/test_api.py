@@ -61,6 +61,7 @@ def test_agent_settings_default_then_save(client):
         "knowledge": "  We open at 9 am.\nA haircut is $45.  ",
         "script": "\n1. Ask who is calling.\n2. Say goodbye.\n",
         "summary_fields": [" Budget ", "", "Preferred  time", "budget"],
+        "max_call_minutes": 12,
     }
     saved = client.put("/api/agent", json=new)
     assert saved.status_code == 200
@@ -74,6 +75,13 @@ def test_agent_settings_default_then_save(client):
         "summary_fields": ["Budget", "Preferred time"],
     }
     assert client.get("/api/agent").json() == kept
+
+
+@pytest.mark.parametrize("minutes", [0, 121, "soon"])
+def test_a_call_runs_between_one_minute_and_two_hours(client, minutes):
+    body = {**DEFAULT_AGENT.model_dump(), "max_call_minutes": minutes}
+    assert client.put("/api/agent", json=body).status_code == 422
+    assert DEFAULT_AGENT.max_call_minutes == 30
 
 
 def test_too_many_or_too_long_things_to_note_are_refused(client):

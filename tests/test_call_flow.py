@@ -1076,3 +1076,61 @@ async def test_an_answer_the_fact_sheet_cannot_give_is_explained_on_the_call(fac
         "The answer from the fact sheet named a number that is not in it."
     )
     assert detail["call"]["status"] == "live"  # the call itself carried on
+
+
+async def test_at_its_time_limit_a_call_says_goodbye_and_hangs_up(server, monkeypatch):
+    from app import agent as voice_agent
+
+    monkeypatch.setattr(voice_agent, "SECONDS_IN_A_MINUTE", 4)  # "1 minute" is 4 seconds here
+    peer, _, ear = make_caller(lead_silence=60)  # a caller who says nothing
+    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        settings = {**DEFAULT_AGENT.model_dump(), "max_call_minutes": 1}
+        assert (await http.put("/api/agent", json=settings)).status_code == 200
+        started = time.monotonic()
+        call_id = await start_browser_call(http, peer)
+
+        async def ended():
+            detail = (await http.get(f"/api/calls/{call_id}")).json()
+            return detail if detail["call"]["status"] in ("ended", "failed") else None
+
+        detail = await wait_until(ended, 30, "the call to end at its time limit")
+        took = time.monotonic() - started
+        said = [(m["role"], m["text"]) for m in detail["messages"]]
+        assert ("note", "The call reached its 1 minute limit.") in said
+        assert ("agent", voice_agent.FAREWELL_LINE) in said
+        assert said.index(("agent", voice_agent.FAREWELL_LINE)) > said.index(("note", "The call reached its 1 minute limit."))
+        # Ended cleanly, once the goodbye had been heard: not as a failure, and not after the 15 s wait.
+        assert (detail["call"]["status"], detail["call"]["error"]) == ("ended", "")
+        assert took < 4 + voice_agent.FAREWELL_WAIT_SECONDS
+        assert any(t > started + 4 for t in ear.loud_times), "the goodbye was heard"
+    await peer.close()
+
+
+async def test_settings_can_be_tried_on_a_call_before_they_are_saved(server):
+    from app.main import TRYING_SETTINGS_NOTE
+
+    peer, _, ear = make_caller(lead_silence=60)
+    trying = {**DEFAULT_AGENT.model_dump(), "name": "Ava", "greeting": "Hello, Ava here."}
+    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        await peer.setLocalDescription(await peer.createOffer())
+        response = await http.post(
+            "/api/calls/browser", json={"sdp": peer.localDescription.sdp, "type": "offer", "agent": trying}
+        )
+        assert response.status_code == 200, response.text
+        answer = response.json()
+        await peer.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
+        call_id = answer["call_id"]
+
+        async def greeted():
+            detail = (await http.get(f"/api/calls/{call_id}")).json()
+            said = [(m["role"], m["text"]) for m in detail["messages"]]
+            return said if ("agent", "Hello, Ava here.") in said else None
+
+        said = await wait_until(greeted, 20, "the tried settings' greeting")
+        assert said[0] == ("note", TRYING_SETTINGS_NOTE)
+        # Said by the settings being tried, which are not saved.
+        (asked, *_) = sent(server, "chat")
+        assert asked["messages"][0]["content"].startswith("Your name is Ava.")
+        assert (await http.get("/api/agent")).json()["name"] == DEFAULT_AGENT.name
+        await http.post(f"/api/calls/{call_id}/end")
+    await peer.close()

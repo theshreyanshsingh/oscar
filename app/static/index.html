@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=13" />
+    <link rel="stylesheet" href="/static/style.css?v=15" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -122,6 +122,9 @@
               Leave this off on speakers. Oscar then finishes speaking before it listens, so it
               never mistakes its own voice for yours.
             </p>
+            <p class="hint call-trying" id="call-trying" hidden>
+              This call uses the Agent settings you have not saved yet.
+            </p>
             <p class="error" id="call-error" role="alert" hidden></p>
             <audio id="agent-audio" autoplay></audio>
           </div>
@@ -194,6 +197,29 @@
               </p>
             </div>
           </div>
+        </div>
+
+        <div class="panel panel-outline notify reveal" id="blocked-panel" hidden>
+          <div class="notify-copy">
+            <h3 class="panel-title">Blocked numbers</h3>
+            <p class="hint">
+              Calls from these numbers are refused before Oscar answers, so Twilio does not
+              charge for them, and they stay out of Call history. One number on each line,
+              with or without the country code. An incoming call's panel in Call history can
+              block its number too.
+            </p>
+          </div>
+          <form id="blocked-form" class="notify-form" novalidate>
+            <label class="field-label" for="blocked-numbers">Numbers</label>
+            <textarea id="blocked-numbers" name="numbers" rows="4" spellcheck="false" placeholder="+61 412 345 678"></textarea>
+            <div class="actions">
+              <button type="submit" class="primary" id="blocked-save">
+                <span class="btn-label">Save</span>
+              </button>
+            </div>
+            <p class="hint" id="blocked-status" aria-live="polite"></p>
+            <p class="error" id="blocked-error" role="alert" hidden></p>
+          </form>
         </div>
 
         <div id="phone-setup" class="panel panel-outline reveal" hidden>
@@ -326,12 +352,21 @@
                 said about each one, in Call history, the CSV download and the summary sent to you.
               </p>
             </div>
+            <div class="field">
+              <label class="field-label" for="agent-max-minutes">Longest call (minutes)</label>
+              <input id="agent-max-minutes" name="max_call_minutes" type="number" min="1" max="120" step="1" inputmode="numeric" required />
+              <p class="hint">
+                At this point Oscar says the time is up, says goodbye and hangs up. Every
+                reply resends the conversation so far, so long calls cost more a minute.
+              </p>
+            </div>
             </div>
             <div class="actions">
               <button type="submit" class="primary" id="agent-save">
                 <span class="btn-label">Save changes</span>
               </button>
               <span class="dirty-note" id="agent-dirty" hidden>Unsaved changes</span>
+              <button type="button" class="secondary" id="agent-try" hidden>Try in a call</button>
               <button type="button" class="link" id="agent-discard" hidden>Discard</button>
               <span class="saved" id="agent-saved" aria-live="polite"></span>
             </div>
@@ -614,6 +649,10 @@
               spellcheck="false"
               placeholder="https://hooks.slack.com/services/…"
             />
+            <label class="check notify-alerts">
+              <input type="checkbox" id="notify-alerts" checked />
+              Also tell me about missed calls, and when the OpenRouter key runs low
+            </label>
             <div class="actions">
               <button type="submit" class="primary" id="notify-save">
                 <span class="btn-label">Save</span>
@@ -644,6 +683,7 @@
         <button type="button" class="secondary" id="detail-callback" hidden>Call back</button>
         <button type="button" class="link" id="detail-copy" hidden>Copy number</button>
         <button type="button" class="link" id="detail-link">Copy link</button>
+        <button type="button" class="link" id="detail-block" hidden>Block number</button>
         <button type="button" class="link danger" id="detail-delete" hidden>Delete</button>
       </div>
       <div class="detail-confirm" id="detail-confirm" role="alertdialog" aria-labelledby="detail-confirm-text" hidden>
@@ -668,6 +708,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=27"></script>
+    <script src="/static/app.js?v=32"></script>
   </body>
 </html>

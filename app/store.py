@@ -102,6 +102,8 @@ SCRIPT_MAX_CHARACTERS = 4000
 # many things, and how long each one's name can be.
 SUMMARY_FIELDS_MAX = 8
 SUMMARY_FIELD_CHARS = 40
+# The most minutes a call can be let run.
+MAX_CALL_MINUTES = 120
 
 
 class AgentSettings(BaseModel):
@@ -121,6 +123,8 @@ class AgentSettings(BaseModel):
     accent: AccentId = "indian"
     # What else to note from each call, filled in with its summary (app/summary.py).
     summary_fields: list[str] = Field(default_factory=list)
+    # The longest a call runs: Oscar then says goodbye and hangs up (app/agent.py).
+    max_call_minutes: int = Field(default=30, ge=1, le=MAX_CALL_MINUTES)
 
     @field_validator("summary_fields")
     @classmethod
@@ -339,6 +343,10 @@ class Store:
                     last_result TEXT NOT NULL DEFAULT '',
                     last_at TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS blocked_numbers (
+                    number TEXT PRIMARY KEY,
+                    added_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS whatsapp_activity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_name TEXT NOT NULL,
@@ -370,6 +378,10 @@ class Store:
             ("agent", "knowledge", "TEXT NOT NULL DEFAULT ''"),
             ("agent", "script", "TEXT NOT NULL DEFAULT ''"),
             ("agent", "summary_fields", "TEXT NOT NULL DEFAULT '[]'"),
+            ("agent", "max_call_minutes", "INTEGER NOT NULL DEFAULT 30"),
+            # Missed calls and a key running low are sent to the webhook too (app/notify.py).
+            ("summary_webhook", "alerts", "INTEGER NOT NULL DEFAULT 1"),
+            ("summary_webhook", "low_credit_alerted_at", "TEXT NOT NULL DEFAULT ''"),
             ("whatsapp_settings", "own_number", "INTEGER NOT NULL DEFAULT 0"),
             # What the call cost on OpenRouter, in dollars (app/costs.py).
             ("calls", "cost", "REAL NOT NULL DEFAULT 0"),
@@ -426,6 +438,7 @@ class Store:
             knowledge=row["knowledge"],
             script=row["script"],
             summary_fields=_json_list(row["summary_fields"]),
+            max_call_minutes=row["max_call_minutes"],
         )
 
     def save_agent(self, agent: AgentSettings) -> AgentSettings:
@@ -434,8 +447,8 @@ class Store:
                 """
                 INSERT INTO agent
                     (id, name, greeting, system_prompt, model, voice, accent, knowledge, script,
-                     summary_fields, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     summary_fields, max_call_minutes, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE SET
                     name = excluded.name,
                     greeting = excluded.greeting,
@@ -446,6 +459,7 @@ class Store:
                     knowledge = excluded.knowledge,
                     script = excluded.script,
                     summary_fields = excluded.summary_fields,
+                    max_call_minutes = excluded.max_call_minutes,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -458,6 +472,7 @@ class Store:
                     agent.knowledge,
                     agent.script,
                     json.dumps(agent.summary_fields),
+                    agent.max_call_minutes,
                     utc_now(),
                 ),
             )
@@ -719,23 +734,41 @@ class Store:
     # Where each call's summary is sent (app/notify.py)
 
     def get_summary_webhook(self) -> dict:
-        """{"url", "last_result" ("sent" or what went wrong), "last_at"}; url "" when none is set."""
+        """{"url", "alerts", "last_result" ("sent" or what went wrong), "last_at"}; url "" when none is set.
+
+        `alerts`: missed calls and a key running low are sent too.
+        """
         with self._lock:
             row = self._db.execute("SELECT * FROM summary_webhook WHERE id = 1").fetchone()
         if row is None:
-            return {"url": "", "last_result": "", "last_at": ""}
-        return {"url": row["url"], "last_result": row["last_result"], "last_at": row["last_at"]}
+            return {"url": "", "alerts": True, "last_result": "", "last_at": ""}
+        return {
+            "url": row["url"],
+            "alerts": bool(row["alerts"]),
+            "last_result": row["last_result"],
+            "last_at": row["last_at"],
+        }
 
-    def save_summary_webhook_url(self, url: str) -> dict:
+    def save_summary_webhook_url(self, url: str, alerts: bool = True) -> dict:
         with self._lock:
             self._db.execute(
                 """
-                INSERT INTO summary_webhook (id, url) VALUES (1, ?)
-                ON CONFLICT (id) DO UPDATE SET url = excluded.url, last_result = '', last_at = ''
+                INSERT INTO summary_webhook (id, url, alerts) VALUES (1, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET url = excluded.url, alerts = excluded.alerts,
+                    last_result = '', last_at = ''
                 """,
-                (url,),
+                (url, int(alerts)),
             )
         return self.get_summary_webhook()
+
+    def low_credit_alerted_at(self) -> str:
+        with self._lock:
+            row = self._db.execute("SELECT low_credit_alerted_at FROM summary_webhook WHERE id = 1").fetchone()
+        return row["low_credit_alerted_at"] if row else ""
+
+    def record_low_credit_alert(self) -> None:
+        with self._lock:
+            self._db.execute("UPDATE summary_webhook SET low_credit_alerted_at = ? WHERE id = 1", (utc_now(),))
 
     def record_summary_webhook_result(self, result: str) -> None:
         with self._lock:
@@ -743,6 +776,31 @@ class Store:
                 "UPDATE summary_webhook SET last_result = ?, last_at = ? WHERE id = 1",
                 (result[:500], utc_now()),
             )
+
+    # Numbers whose calls are refused (app/phone.py)
+
+    def get_blocked_numbers(self) -> list[str]:
+        """As the owner wrote them, in the order the list was saved in."""
+        with self._lock:
+            rows = self._db.execute("SELECT number FROM blocked_numbers ORDER BY rowid").fetchall()
+        return [row["number"] for row in rows]
+
+    def save_blocked_numbers(self, numbers: list[str]) -> list[str]:
+        """Replace the list."""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute("DELETE FROM blocked_numbers")
+                for number in numbers:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO blocked_numbers (number, added_at) VALUES (?, ?)",
+                        (number, utc_now()),
+                    )
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+        return self.get_blocked_numbers()
 
     # WhatsApp (written by the WhatsApp process, read by the dashboard)
 

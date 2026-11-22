@@ -209,10 +209,11 @@ def client(tmp_path):
 
 
 def test_the_address_is_saved_and_shown(client):
-    assert client.get("/api/summary-webhook").json() == {"url": "", "last_result": "", "last_at": ""}
+    assert client.get("/api/summary-webhook").json() == {"url": "", "alerts": True, "last_result": "", "last_at": ""}
     saved = client.put("/api/summary-webhook", json={"url": f" {HOOK} "}).json()
-    assert saved == {"url": HOOK, "last_result": "", "last_at": ""}
+    assert saved == {"url": HOOK, "alerts": True, "last_result": "", "last_at": ""}
     assert client.get("/api/summary-webhook").json()["url"] == HOOK
+    assert client.put("/api/summary-webhook", json={"url": HOOK, "alerts": False}).json()["alerts"] is False
     assert client.put("/api/summary-webhook", json={"url": ""}).json()["url"] == ""
 
 

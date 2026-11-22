@@ -50,6 +50,7 @@ from app.speech import (
     TRANSCRIPT_MODEL,
     VOICE_MODEL,
     EchoGate,
+    FarewellFrame,
     GreetingFrame,
     OpenRouterVoiceService,
     Recordings,
@@ -1897,3 +1898,40 @@ async def test_a_reply_cut_off_before_it_started_does_not_move_the_script():
     call = await run_voice(frames, chat=slowly(first_after=1.0), script=script)
     assert call.text == ""
     assert script.talks == []
+
+
+
+# Goodbye at the call's time limit
+
+FAREWELL = "I'm sorry, we've reached the time limit for this call. Goodbye."
+
+
+async def test_the_goodbye_is_asked_for_word_for_word_and_then_nothing_is_answered():
+    call = await run_voice(
+        [FarewellFrame(FAREWELL), SleepFrame(0.6), *caller_turn(1.0), SleepFrame(0.6)], chat=spoken(FAREWELL)
+    )
+    assert call.errors == []
+    (body,) = call.chat  # the goodbye, and no reply to what the caller said after it
+    assert body["messages"] == [
+        {"role": "system", "content": INSTRUCTIONS},
+        {"role": "user", "content": say_request(FAREWELL)},
+    ]
+    assert call.text == FAREWELL
+    assert call.of(FarewellFrame) == []  # an instruction to the service, not passed on
+
+
+async def test_the_goodbye_is_recorded_once_and_played_from_then_on(tmp_path):
+    recordings = Recordings(tmp_path)
+    first = await run_voice([FarewellFrame(FAREWELL), SleepFrame(0.5)], chat=spoken(FAREWELL), recordings=recordings)
+    assert len(first.chat) == 1 and len(list(tmp_path.glob("farewell-*.pcm"))) == 1
+    again = await run_voice([FarewellFrame(FAREWELL), SleepFrame(0.5)], chat=refusing, recordings=recordings)
+    assert again.chat == [] and again.errors == [] and again.text == FAREWELL
+    assert samples_in(again.audio) == samples_in(first.audio)
+
+
+async def test_a_goodbye_said_otherwise_is_not_kept(tmp_path):
+    call = await run_voice(
+        [FarewellFrame(FAREWELL), SleepFrame(0.5)], chat=spoken("Bye now!"), recordings=Recordings(tmp_path)
+    )
+    assert call.text == "Bye now!"
+    assert list(tmp_path.iterdir()) == []

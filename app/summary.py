@@ -20,6 +20,7 @@ Phone numbers are the part that must not be wrong, measured on 2026-11-12:
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -29,8 +30,8 @@ from loguru import logger
 
 from app.calls import CallManager
 from app.config import Config
-from app.costs import USAGE, CostMeter
-from app.notify import send_summary, summary_payload
+from app.costs import USAGE, CostMeter, KeyCredit
+from app.notify import LOW_CREDIT_DOLLARS, low_credit_payload, missed_call_payload, send_summary, summary_payload
 from app.openrouter import DEFAULT_BASE_URL, auth_headers, describe_failure
 from app.research import ResearchFailed, write_research
 from app.store import AgentSettings, CallKind
@@ -52,6 +53,9 @@ DETAILS_INSTRUCTION = (
     "said about it, in a few words (twenty at most), with any number or name copied from "
     'the transcript. "" if the call did not say.'
 )
+
+# While the key stays low, the owner hears about it this often.
+LOW_CREDIT_ALERT_EVERY = timedelta(hours=24)
 
 # A call where only Oscar's side was written down has nothing to summarise.
 NOTHING_HEARD = "Only {name} was heard on this call."
@@ -431,6 +435,48 @@ async def send_to_owner(calls: CallManager, call: dict, agent: AgentSettings) ->
     if problem:
         logger.warning(f"Call {call['id']}: its summary could not be sent: {problem}")
     calls.store.record_summary_webhook_result(problem or "sent")
+
+
+def alert_owner(calls: CallManager, payload: dict) -> None:
+    """Send an alert (app/notify.py) to the owner's webhook in the background, when an
+    address is set and alerts are on."""
+    webhook = calls.store.get_summary_webhook()
+    if webhook["url"] and webhook["alerts"]:
+        calls.spawn(_send_alert(calls, webhook["url"], payload))
+
+
+async def _send_alert(calls: CallManager, url: str, payload: dict) -> None:
+    problem = await send_summary(url, payload)
+    if problem:
+        logger.warning(f"An alert ({payload.get('event')}) could not be sent: {problem}")
+    calls.store.record_summary_webhook_result(problem or "sent")
+
+
+def alert_if_missed(calls: CallManager, call: dict, agent_name: str) -> None:
+    """Tell the owner about an incoming call the caller never spoke on: turned away,
+    failed, or hung up on before they said anything."""
+    if call.get("kind") != "phone_inbound":
+        return
+    if any(message["role"] == "user" for message in calls.store.get_messages(call["id"])):
+        return
+    alert_owner(calls, missed_call_payload(call, agent_name=agent_name))
+
+
+async def alert_if_low_credit(calls: CallManager, credit: KeyCredit, agent_name: str) -> bool:
+    """Tell the owner when the OpenRouter key has less than LOW_CREDIT_DOLLARS left of
+    its limit: once a day while it stays low. Returns whether an alert went out."""
+    known = await credit.get()
+    if not known or known["left"] is None or known["limit"] is None or known["left"] >= LOW_CREDIT_DOLLARS:
+        return False
+    webhook = calls.store.get_summary_webhook()
+    if not webhook["url"] or not webhook["alerts"]:
+        return False
+    last = calls.store.low_credit_alerted_at()
+    if last and datetime.now(timezone.utc) - datetime.fromisoformat(last) < LOW_CREDIT_ALERT_EVERY:
+        return False
+    calls.store.record_low_credit_alert()
+    alert_owner(calls, low_credit_payload(known, agent_name=agent_name))
+    return True
 
 
 async def _summary_fields(

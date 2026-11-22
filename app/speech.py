@@ -223,6 +223,15 @@ class GreetingFrame(DataFrame):
 
 
 @dataclass
+class FarewellFrame(DataFrame):
+    """Asks the voice service to close the call with this line (the call's time is
+    up). Nothing the caller says after it is answered, and "on_farewell_said" fires
+    once it has been heard, so the call can be hung up."""
+
+    text: str
+
+
+@dataclass
 class SearchingFrame(SystemFrame):
     """Sent up the pipeline when Oscar starts and stops looking something up mid-reply."""
 
@@ -407,6 +416,9 @@ class OpenRouterVoiceService(AIService):
         self._register_event_handler("on_web_search")
         self._register_event_handler("on_facts_failed")
         self._register_event_handler("on_script_lost")
+        self._register_event_handler("on_farewell_said")
+        # Saying goodbye (FarewellFrame): no more replies.
+        self._closing = False
         self._context = context
         self._chat_url = f"{base_url}/chat/completions"
         self._transcript_url = f"{base_url}/audio/transcriptions"
@@ -524,6 +536,8 @@ class OpenRouterVoiceService(AIService):
             if self._speaking_since is not None:  # said to the end, not cut off
                 self._speaking_since = None
                 self._unanswered.clear()
+            if self._closing:
+                await self._call_event_handler("on_farewell_said")
         elif isinstance(frame, InterruptionFrame):
             # The caller spoke over Oscar (or over a reply still on its way).
             since, self._speaking_since = self._speaking_since, None
@@ -532,6 +546,9 @@ class OpenRouterVoiceService(AIService):
             await self._abort_response()
         elif isinstance(frame, GreetingFrame):
             await self._speak_greeting(frame.text)
+            return
+        elif isinstance(frame, FarewellFrame):
+            await self._speak_farewell(frame.text)
             return
 
         await self.push_frame(frame, direction)
@@ -553,6 +570,8 @@ class OpenRouterVoiceService(AIService):
     async def _turn_stopped(self) -> None:
         audio = bytes(self._turn_audio or b"")
         self._turn_audio = None
+        if self._closing:
+            return  # goodbye has been said: nothing more is answered
         if len(audio) < self._in_rate // 5:  # under a tenth of a second: nothing to hear
             return
 
@@ -610,6 +629,29 @@ class OpenRouterVoiceService(AIService):
             capture, self._capture = self._capture, None
         if capture and capture.complete and capture.audio and same_words(capture.words, greeting):
             self._keep("greeting", bytes(capture.audio), self._line_instructions, greeting)
+
+    async def _speak_farewell(self, line: str) -> None:
+        self._closing = True
+        await self._abort_response()
+        self._response_task = self.create_task(self._say_farewell(line))
+
+    async def _say_farewell(self, line: str) -> None:
+        """Close the call with `line`: as recorded on an earlier call, or asked for now (and kept)."""
+        recorded = self._recorded("farewell", self._line_instructions, line)
+        if recorded:
+            self._timing = timing = TurnTiming("Farewell (recorded)")
+            await self._play_recorded(recorded, line)
+            await self._end_reply(timing)
+            return
+        self._capture = _Capture() if self._recordings else None
+        try:
+            self._timing = timing = TurnTiming("Farewell")
+            await self._say_line([{"role": "system", "content": self._line_instructions}], line)
+            await self._end_reply(timing)
+        finally:
+            capture, self._capture = self._capture, None
+        if capture and capture.complete and capture.audio and same_words(capture.words, line):
+            self._keep("farewell", bytes(capture.audio), self._line_instructions, line)
 
     def _recording_key(self, *shaped_by: str) -> str:
         """What a recorded line depends on: its words and how the model was asked to say them."""

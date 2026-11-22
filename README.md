@@ -732,6 +732,19 @@ Call back on: 0412345678
 To do: Call Sam back about the quote.
 ```
 
+**Alerts.** With **Also tell me about missed calls, and when the OpenRouter key
+runs low** ticked (it is, unless you untick it), the same address also gets:
+
+- **A missed call:** someone phoned and never spoke to Oscar: turned away
+  (the lines were busy, or the key had too little left), the call failed, or
+  they hung up before saying anything. "Oscar missed a call from
+  +61412345678: ..." with the reason.
+- **A key running low:** less than $1.00 left of the OpenRouter key's limit,
+  checked every ten minutes, and sent once a day while it stays low.
+
+Besides the message, each has an `event` (`missed_call` or `low_credit`), for
+an app such as Zapier to tell them apart.
+
 **Send a test** posts a made-up summary so you can see it arrive, and the card
 says whether the last one did. A webhook that fails for a moment is tried once
 more three seconds later. Only `https://` addresses are taken. Not sent: calls
@@ -820,6 +833,18 @@ Edit these on the dashboard. They apply from the next call.
   section above.
 - **Note from each call:** what else each call's summary should note, one on
   each line. See Call summaries.
+- **Longest call:** the most minutes a call runs (30 by default, 1 to 120). At
+  the limit Oscar says "I'm sorry, we've reached the time limit for this call.
+  Please call back if there's anything else. Goodbye.", hangs up once that has
+  been heard (or after 15 seconds), and the transcript notes it. Each reply
+  resends the conversation so far, so a long call costs more a minute: shorter
+  limits keep a forgotten or endless call cheap.
+
+**Try in a call** (in the save bar, while there are unsaved changes) starts a
+browser call with the settings in the form, saved or not, so you can hear a new
+greeting, script or set of instructions before keeping it. The saved settings
+stay as they were until you press **Save changes**, and the call's transcript
+starts with a note that it used unsaved settings.
 
 **Hear this voice** (under Voice) plays about six seconds of Oscar saying hello
 with the voice, accent and name in the form, before you save them. Each sample
@@ -955,7 +980,9 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   signed with one of the team's keys, made for this application and not
   expired. Oscar fetches the keys from Cloudflare, and fetches them again when
   Cloudflare changes them.
-- Calls are capped at 30 minutes.
+- A call runs at most **Longest call** minutes (30 unless you change it in Agent
+  settings, 1 to 120). Oscar then says the time is up, says goodbye and hangs up
+  once that has been heard; the transcript notes it.
 
 ## Project layout
 
@@ -982,6 +1009,28 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `scripts/autostart.py` | Has macOS start Oscar at login and keep it running (`--status`, `--restart`, `--remove`) |
 | `deploy.sh` | Sets Oscar up on a Linux server, or brings it up to date, under pm2 (`--whatsapp`, `--force`) |
 | `ecosystem.config.cjs` | How pm2 runs Oscar and its WhatsApp connection on a server |
+
+## Backups
+
+Once a day Oscar copies its database (calls, transcripts, summaries, settings)
+to `data/backups/oscar-YYYY-MM-DD.db`, first a few minutes after it starts and
+then each day, and keeps the last 14. Only you can read them, like the database
+itself. They hold everything the database holds, so copy them somewhere else
+too if the computer itself could be lost.
+
+To go back to one: stop Oscar (and its WhatsApp copy, which uses the same
+database), delete `data/oscar.db-wal` and `data/oscar.db-shm` (what the old
+database had not yet written into itself: left there, they would be written
+into the backup and spoil it), copy the backup over `data/oscar.db`, and start
+Oscar again. On a server with pm2 (pm2 says it does not know
+`oscar-whatsapp` if WhatsApp is not set up there, which is fine):
+
+```bash
+pm2 stop oscar oscar-whatsapp
+rm -f data/oscar.db-wal data/oscar.db-shm
+cp data/backups/oscar-2026-11-22.db data/oscar.db
+pm2 start oscar oscar-whatsapp
+```
 
 ## Troubleshooting
 

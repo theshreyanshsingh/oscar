@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
 from app.calls import CallManager, lines_busy
+from app.backup import back_up
 from app.catalog import ModelCatalog
 from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
 from app.preview import PreviewFailed, voice_sample
@@ -42,9 +43,12 @@ from app.config import (
 )
 from app.events import EventBus
 from app.phone import (
+    BLOCKED_NUMBERS_MOST,
     PhoneCallError,
+    blocked_entry,
     create_phone_router,
     hang_up_phone_call,
+    number_digits,
     place_outbound_call,
 )
 from app.store import (
@@ -58,7 +62,7 @@ from app.store import (
     without_excerpts,
 )
 from app.speech import Recordings
-from app.summary import start_summary
+from app.summary import alert_if_low_credit, start_summary
 
 STATIC_DIR = ROOT_DIR / "app" / "static"
 STUN_SERVER = "stun:stun.l.google.com:19302"
@@ -69,6 +73,8 @@ class BrowserCallOffer(BaseModel):
     type: Literal["offer"]
     # The caller is on headphones, so talking over Oscar can safely interrupt it.
     interruptible: bool = False
+    # Settings to try on this call only, before they are saved ("Try in a call").
+    agent: AgentSettings | None = None
 
 
 class EndCallRequest(BaseModel):
@@ -83,12 +89,26 @@ class TodoDone(BaseModel):
 
 class SummaryWebhook(BaseModel):
     url: str = Field(default="", max_length=4000)
+    alerts: bool = True  # missed calls and a key running low, too
+
+
+class BlockedNumbers(BaseModel):
+    numbers: list[str] = Field(default_factory=list, max_length=BLOCKED_NUMBERS_MOST)
 
 
 class PhoneCallRequest(BaseModel):
     to: str = Field(pattern=r"^\+[1-9]\d{7,14}$", description="E.164 number, e.g. +14155550123")
 
 
+# How often to see whether today's backup is made yet, and the first time after starting
+# (not at once: a server started and stopped again soon, as in tests, makes none).
+BACKUP_CHECK_SECONDS = 60 * 60
+BACKUP_FIRST_SECONDS = 5 * 60
+# How often the key's credit is checked for the low-credit alert, and the first time after starting.
+CREDIT_WATCH_SECONDS = 10 * 60
+CREDIT_WATCH_FIRST_SECONDS = 60
+# Written at the top of a call made with settings that were not saved yet.
+TRYING_SETTINGS_NOTE = "Made with Agent settings that were not saved yet."
 # How many searches of the call history (and CSV downloads) run at once.
 SLOW_READS_AT_ONCE = 2
 # The most calls one export holds.
@@ -184,7 +204,11 @@ def create_app(
                 f"Browser calls send their audio straight to this server over UDP ports {low}-{high}, "
                 "not through the web address: let those in through the firewall (on EC2, the security group)"
             )
+        watching = asyncio.create_task(watch_credit())
+        backing_up = asyncio.create_task(keep_backing_up())
         yield
+        watching.cancel()
+        backing_up.cancel()
         await calls.shutdown()
         await webrtc.close()
         store.close()
@@ -230,6 +254,28 @@ def create_app(
     # of them cannot take every core from the calls. A plain page of the history
     # never waits for them.
     slow_reads = asyncio.Semaphore(SLOW_READS_AT_ONCE)
+
+    async def watch_credit() -> None:
+        """Every while, whether the key is running low: the owner is told (app/summary.py)."""
+        await asyncio.sleep(CREDIT_WATCH_FIRST_SECONDS)
+        while True:
+            try:
+                await alert_if_low_credit(calls, credit, store.get_agent().name)
+            except Exception:
+                logger.exception("Checking whether the OpenRouter key is running low failed")
+            await asyncio.sleep(CREDIT_WATCH_SECONDS)
+
+    async def keep_backing_up() -> None:
+        """A copy of the database each day (app/backup.py), checked for every hour."""
+        await asyncio.sleep(BACKUP_FIRST_SECONDS)
+        while True:
+            try:
+                made = await asyncio.to_thread(back_up, cfg.db_path)
+                if made:
+                    logger.info(f"Backed up the database to {made}")
+            except Exception:
+                logger.exception("Backing up the database failed")
+            await asyncio.sleep(BACKUP_CHECK_SECONDS)
 
     def require_a_free_line() -> None:
         """No new call while Oscar is on as many as it takes at once (MAX_CALLS)."""
@@ -296,6 +342,28 @@ def create_app(
         """OpenRouter's chat models, as suggestions for the Chat model field ([] when unknown)."""
         return {"models": await catalog.get()}
 
+    @app.get("/api/blocked-numbers")
+    async def get_blocked_numbers() -> dict:
+        return {"numbers": store.get_blocked_numbers()}
+
+    @app.put("/api/blocked-numbers")
+    async def save_blocked_numbers(blocked: BlockedNumbers) -> dict:
+        """Numbers whose calls Oscar refuses before answering (app/phone.py)."""
+        kept: list[str] = []
+        seen: set[str] = set()
+        for number in blocked.numbers:
+            if not number.strip():
+                continue
+            try:
+                entry = blocked_entry(number)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            digits = number_digits(entry).lstrip("0")
+            if digits not in seen:
+                seen.add(digits)
+                kept.append(entry)
+        return {"numbers": store.save_blocked_numbers(kept)}
+
     @app.get("/api/summary-webhook")
     async def get_summary_webhook() -> dict:
         return store.get_summary_webhook()
@@ -306,7 +374,7 @@ def create_app(
             url = webhook_url(webhook.url)
         except WebhookRefused as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        return store.save_summary_webhook_url(url)
+        return store.save_summary_webhook_url(url, webhook.alerts)
 
     @app.post("/api/summary-webhook/test")
     async def test_summary_webhook() -> dict:
@@ -419,12 +487,14 @@ def create_app(
         require_agent_keys()
         require_a_free_line()
         await require_credit()
-        agent = store.get_agent()
+        agent = offer.agent or store.get_agent()
         started: dict[str, str] = {}
 
         async def on_connection(connection: SmallWebRTCConnection) -> None:
             call = calls.create("browser", status="connecting")
             started["call_id"] = call["id"]
+            if offer.agent is not None:
+                calls.add_message(call["id"], "note", TRYING_SETTINGS_NOTE)
             try:
                 transport = SmallWebRTCTransport(
                     webrtc_connection=connection,

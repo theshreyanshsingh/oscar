@@ -2214,3 +2214,22 @@ button.danger-button:disabled {
     visibility: hidden;
   }
 }
+
+/* The webhook card's alerts choice */
+
+.notify-alerts {
+  margin-top: 16px;
+  font-size: 14px;
+}
+
+/* "Try in a call": the live call says it uses unsaved settings */
+
+.call-trying {
+  max-width: 420px;
+  margin: 14px auto 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--blue-soft);
+  color: var(--navy);
+  text-align: center;
+}
