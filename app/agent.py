@@ -9,13 +9,16 @@ the transport and the audio sample rates differ.
 """
 
 import asyncio
+import copy
+import threading
 from dataclasses import asdict
 from datetime import date, datetime
 
 from loguru import logger
-from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.base_smart_turn import BaseSmartTurn, SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADState
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -294,6 +297,59 @@ def build_voice(
     )
 
 
+class InlineSileroVAD(SileroVADAnalyzer):
+    """Silero voice detection, run where the audio arrives instead of on a thread.
+
+    Pipecat hands each 20 ms of audio to a thread of its own and waits for the
+    answer. The answer takes under a millisecond; the handing over took 3 ms on
+    an idle computer and far longer with calls going, so each call's audio fell
+    behind: with ten calls at once, Oscar noticed callers start and stop talking
+    about 7 seconds late (stress tests on 2026-11-22).
+    """
+
+    async def analyze_audio(self, buffer: bytes) -> VADState:
+        return self._run_analyzer(buffer)
+
+
+# The two models, loaded once for all calls (see turn_detectors).
+_turn_models: tuple[InlineSileroVAD, LocalSmartTurnAnalyzerV3] | None = None
+_turn_models_lock = threading.Lock()
+
+
+def _loaded_turn_models() -> tuple[InlineSileroVAD, LocalSmartTurnAnalyzerV3]:
+    global _turn_models
+    with _turn_models_lock:
+        if _turn_models is None:
+            _turn_models = (
+                InlineSileroVAD(),
+                LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=UNFINISHED_TURN_SILENCE_SECONDS)),
+            )
+        return _turn_models
+
+
+def turn_detectors() -> tuple[SileroVADAnalyzer, LocalSmartTurnAnalyzerV3]:
+    """The two models that tell when the caller speaks and when they have finished.
+
+    The models themselves are loaded once and shared: loading them took about a
+    tenth of a second each call, more with calls going, and with ten calls
+    starting together their greetings began 3 to 7 seconds late, so callers
+    spoke over them (stress tests on 2026-11-22). An ONNX session can be used
+    by many threads at once. What each call keeps of its own audio is set up
+    afresh for it by pipecat's own code, on a copy. The first call loads the
+    models, so run_call has this done on a worker thread.
+    In realtime mode the caller's turn ends on their silence alone, without
+    waiting for a transcript (the model hears the audio itself).
+    """
+    voice_model, turn_model = _loaded_turn_models()
+    voice_activity = copy.copy(voice_model)
+    VADAnalyzer.__init__(voice_activity)
+    voice_activity._model = copy.copy(voice_model._model)  # the shared session, with ...
+    voice_activity._model.reset_states()  # ... this call's own state
+    end_of_turn = copy.copy(turn_model)
+    BaseSmartTurn.__init__(end_of_turn, params=turn_model._params)
+    return voice_activity, end_of_turn
+
+
 async def run_call(
     *,
     transport: BaseTransport,
@@ -323,15 +379,11 @@ async def run_call(
             spawn=calls.spawn,
         )
         voice = build_voice(cfg, agent, context, meter, earlier_calls_for(calls.store, call_id))
-        # Realtime mode: the caller's turn ends on their silence alone, without
-        # waiting for a transcript (the model hears the audio itself).
-        end_of_turn = LocalSmartTurnAnalyzerV3(
-            params=SmartTurnParams(stop_secs=UNFINISHED_TURN_SILENCE_SECONDS)
-        )
+        voice_activity, end_of_turn = await asyncio.to_thread(turn_detectors)
         aggregators = LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
-                vad_analyzer=SileroVADAnalyzer(),
+                vad_analyzer=voice_activity,
                 user_turn_strategies=UserTurnStrategies(
                     stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=end_of_turn)]
                 ),

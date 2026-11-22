@@ -2,6 +2,7 @@
 
 import asyncio
 import csv
+import functools
 import io
 import json
 import re
@@ -27,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
-from app.calls import CallManager
+from app.calls import CallManager, lines_busy
 from app.catalog import ModelCatalog
 from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
 from app.preview import PreviewFailed, voice_sample
@@ -88,6 +89,8 @@ class PhoneCallRequest(BaseModel):
     to: str = Field(pattern=r"^\+[1-9]\d{7,14}$", description="E.164 number, e.g. +14155550123")
 
 
+# How many searches of the call history (and CSV downloads) run at once.
+SLOW_READS_AT_ONCE = 2
 # The most calls one export holds.
 CSV_MOST_CALLS = 10000
 CSV_COLUMNS = [
@@ -223,6 +226,17 @@ def create_app(
                 detail=f"Add {' and '.join(missing)} to the .env file, then restart the server.",
             )
 
+    # Searches and CSV downloads read the whole history: two at a time, so a burst
+    # of them cannot take every core from the calls. A plain page of the history
+    # never waits for them.
+    slow_reads = asyncio.Semaphore(SLOW_READS_AT_ONCE)
+
+    def require_a_free_line() -> None:
+        """No new call while Oscar is on as many as it takes at once (MAX_CALLS)."""
+        busy = lines_busy(store, cfg)
+        if busy:
+            raise HTTPException(status_code=503, detail=busy)
+
     async def require_credit() -> None:
         """No new call when the OpenRouter key's own limit is all but used up."""
         too_little = await credit.too_little_for_a_call()
@@ -337,8 +351,14 @@ def create_app(
         show: Literal["all", "todo", "incoming", "outgoing", "browser", "failed"] = "all",
     ) -> dict:
         """Calls for Call history, newest first. `before_id` (the last call shown) gives the next page."""
-        found, more = store.find_calls(limit=limit, before=before, before_id=before_id, query=q, show=show)
-        return {"calls": found, "more": more, "open_todos": store.count_open_todos()}
+        # On a worker thread: a search of a long history takes a while (Store.find_calls).
+        find = functools.partial(store.find_calls, limit=limit, before=before, before_id=before_id, query=q, show=show)
+        if q:
+            async with slow_reads:
+                found, more = await asyncio.to_thread(find)
+        else:
+            found, more = await asyncio.to_thread(find)
+        return {"calls": found, "more": more, "open_todos": await asyncio.to_thread(store.count_open_todos)}
 
     @app.put("/api/calls/{call_id}/todo")
     async def tick_todo(call_id: str, todo: TodoDone) -> dict:
@@ -357,10 +377,11 @@ def create_app(
         show: Literal["all", "todo", "incoming", "outgoing", "browser", "failed"] = "all",
     ) -> Response:
         """Call history as a spreadsheet: the calls the search and filter show, newest first."""
-        found, _ = store.find_calls(limit=CSV_MOST_CALLS, query=q, show=show)
+        async with slow_reads:
+            found, _ = await asyncio.to_thread(store.find_calls, limit=CSV_MOST_CALLS, query=q, show=show)
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return Response(
-            content=calls_csv(found, store.get_agent().summary_fields),
+            content=await asyncio.to_thread(calls_csv, found, store.get_agent().summary_fields),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="oscar-calls-{day}.csv"'},
         )
@@ -396,6 +417,7 @@ def create_app(
     @app.post("/api/calls/browser")
     async def start_browser_call(offer: BrowserCallOffer) -> dict:
         require_agent_keys()
+        require_a_free_line()
         await require_credit()
         agent = store.get_agent()
         started: dict[str, str] = {}
@@ -441,6 +463,7 @@ def create_app(
     @app.post("/api/calls/phone")
     async def start_phone_call(request: PhoneCallRequest) -> dict:
         require_agent_keys()
+        require_a_free_line()
         await require_credit()
         missing = cfg.missing_phone_settings()
         if missing:

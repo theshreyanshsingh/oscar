@@ -299,6 +299,9 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS calls_started_at ON calls (started_at);
                 CREATE INDEX IF NOT EXISTS calls_twilio_sid ON calls (twilio_sid);
+                CREATE INDEX IF NOT EXISTS calls_from_number ON calls (from_number);
+                CREATE INDEX IF NOT EXISTS calls_to_number ON calls (to_number);
+                CREATE INDEX IF NOT EXISTS calls_status ON calls (status);
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     call_id TEXT NOT NULL REFERENCES calls (id),
@@ -348,6 +351,17 @@ class Store:
                 """
             )
             self._add_missing_columns()
+        # Reads that can take a while (searching a long call history, a CSV of
+        # it) are made on worker threads, each with a connection of its own: they
+        # never wait for Oscar's own writes, nor for each other, nor hold anything
+        # up (the database is in WAL mode). Searching 50,000 calls took most of a
+        # second; on the event loop it held up every call's audio for that long,
+        # and on one shared connection a plain page of the history waited behind
+        # other people's searches (stress tests on 2026-11-22).
+        self._path = path
+        self._readers: list[sqlite3.Connection] = []
+        self._readers_lock = threading.Lock()
+        self._thread_reader = threading.local()
 
     def _add_missing_columns(self) -> None:
         """Bring a database made by an earlier version of Oscar up to date."""
@@ -374,9 +388,24 @@ class Store:
                 if column not in columns:
                     raise
 
+    def _reader(self) -> sqlite3.Connection:
+        """This thread's own connection for reading."""
+        reader = getattr(self._thread_reader, "connection", None)
+        if reader is None:
+            reader = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None, timeout=10)
+            reader.row_factory = sqlite3.Row
+            self._thread_reader.connection = reader
+            with self._readers_lock:
+                self._readers.append(reader)
+        return reader
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
+        with self._readers_lock:
+            for reader in self._readers:
+                reader.close()
+            self._readers.clear()
 
     # Agent settings
 
@@ -519,12 +548,11 @@ class Store:
         or dashes it was typed with. `show` is one of SHOW_FILTERS.
         """
         conditions, values = [], []
-        with self._lock:
-            after = (
-                self._db.execute("SELECT started_at, rowid FROM calls WHERE id = ?", (before_id,)).fetchone()
-                if before_id
-                else None
-            )
+        after = (
+            self._reader().execute("SELECT started_at, rowid FROM calls WHERE id = ?", (before_id,)).fetchone()
+            if before_id
+            else None
+        )
         if after is not None:
             conditions.append("(started_at < ? OR (started_at = ? AND rowid < ?))")
             values.extend([after["started_at"], after["started_at"], after["rowid"]])
@@ -551,11 +579,10 @@ class Store:
                     values.append(f"%{digits.lstrip('+')}%")
             conditions.append("(" + " OR ".join(searched) + ")")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        with self._lock:
-            rows = self._db.execute(
-                f"SELECT * FROM calls {where} ORDER BY started_at DESC, rowid DESC LIMIT ?",
-                (*values, limit + 1),
-            ).fetchall()
+        rows = self._reader().execute(
+            f"SELECT * FROM calls {where} ORDER BY started_at DESC, rowid DESC LIMIT ?",
+            (*values, limit + 1),
+        ).fetchall()
         return [self._call_dict(row) for row in rows[:limit]], len(rows) > limit
 
     def delete_call(self, call_id: str) -> bool:
@@ -598,9 +625,17 @@ class Store:
         return [self._call_dict(row) for row in rows]
 
     def count_open_todos(self) -> int:
+        row = self._reader().execute(
+            f"SELECT COUNT(*) AS open FROM calls WHERE {SHOW_FILTERS['todo']}"
+        ).fetchone()
+        return int(row["open"])
+
+    def count_open_calls(self) -> int:
+        """Calls connecting, ringing or going on now."""
+        placeholders = ", ".join("?" for _ in OPEN_STATUSES)
         with self._lock:
             row = self._db.execute(
-                f"SELECT COUNT(*) AS open FROM calls WHERE {SHOW_FILTERS['todo']}"
+                f"SELECT COUNT(*) AS open FROM calls WHERE status IN ({placeholders})", OPEN_STATUSES
             ).fetchone()
         return int(row["open"])
 

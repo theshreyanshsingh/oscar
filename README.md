@@ -218,6 +218,32 @@ place says why, and someone phoning in hears "Sorry, this agent cannot take
 calls right now" and the call shows in **Call history** with the reason. A
 call already going carries on.
 
+### How many calls at once
+
+Oscar takes up to 8 calls at once (browser and phone together). The next caller
+is turned away politely: someone phoning in hears "Sorry, all our lines are busy
+right now. Please call back in a few minutes", a browser call or a call you
+place says why, and the call shows in **Call history** with the reason. Change
+the number with `MAX_CALLS` in `.env` (1 to 100), then restart Oscar.
+
+Why a limit: all of a computer's calls are handled by one Oscar process, and
+past what it can keep up with, every call goes wrong at once, not just the
+newest. Stress tests on 2026-11-22 (an M-series Mac with 10 cores, also busy
+with other work; OpenRouter stood in for by a local fake that answers in half
+a second, so the times below are Oscar's own share):
+
+| Phone calls at once | Answered and written down | Reply begins after the caller stops |
+|---|---|---|
+| 1 | 1 | about 1.2 s |
+| 10 | 10 | 1.9 s to 2.4 s |
+| 8, with the Mac much busier with other work | 8 (2 more turned away) | 3.3 s to 3.7 s |
+
+Beyond about 12 the Mac fell behind: callers were heard seconds late, and
+greetings and replies were cut short. Before the fixes those tests led to,
+10 calls at once got replies 12 to 17 seconds late, and in a run partway
+through them 6 of 10 greetings were never heard. A small cloud server takes fewer than this Mac, so keep
+`MAX_CALLS` at 8 or lower there unless you have tried more.
+
 ## Run it on a server (pm2)
 
 Oscar can also run on a Linux server, such as an EC2 machine, under pm2. Then it

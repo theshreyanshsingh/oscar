@@ -36,6 +36,9 @@ USAGE = {"include": True}
 LOOKUP_DELAYS = (5.0, 10.0, 20.0, 40.0)
 # How long what the key has left is trusted before it is asked again.
 KEY_CHECK_SECONDS = 30.0
+# The longest a new call waits to hear what is left on the key. Past it, the call
+# goes ahead (the answer still comes in, for the calls after it).
+CALL_CHECK_SECONDS = 2.0
 # Below this much left on the key, no call starts: a few turns of a call cost
 # about this much, and one that runs out part-way stops answering mid-call.
 CALL_MINIMUM_DOLLARS = 0.05
@@ -127,7 +130,11 @@ class KeyCredit:
         self._headers = auth_headers(api_key) if api_key else {}
         self._client = client or new_client(timeout=10)
         self._known: dict | None = None
-        self._known_at = 0.0
+        # When OpenRouter was last asked, answered or not: a key check that failed
+        # is not tried again for a while either. Before, every new call asked again
+        # and waited its turn, one after another, behind the lock: 20 calls starting
+        # together waited up to 29 seconds (stress tests on 2026-11-22).
+        self._asked_at = 0.0
         self._lock = asyncio.Lock()
 
     async def aclose(self) -> None:
@@ -139,8 +146,9 @@ class KeyCredit:
         if not self._headers:
             return None
         async with self._lock:
-            if not fresh and self._known is not None and time.monotonic() - self._known_at < KEY_CHECK_SECONDS:
-                return self._known
+            if not fresh and self._asked_at and time.monotonic() - self._asked_at < KEY_CHECK_SECONDS:
+                return self._known  # what was known (None if OpenRouter did not say)
+            self._asked_at = time.monotonic()
             try:
                 response = await self._client.get(self._url, headers=self._headers)
                 data = response.json()["data"] if response.status_code == 200 else None
@@ -155,12 +163,15 @@ class KeyCredit:
                 "today": _dollars(data.get("usage_daily")) or 0.0,
                 "this_month": _dollars(data.get("usage_monthly")) or 0.0,
             }
-            self._known_at = time.monotonic()
             return self._known
 
     async def too_little_for_a_call(self) -> str:
         """Why no call should start now (the key's limit is all but used up), or "" when one can."""
-        credit = await self.get()
+        try:
+            # Shielded: a slow answer still arrives, and is kept for the calls after this one.
+            credit = await asyncio.wait_for(asyncio.shield(self.get()), CALL_CHECK_SECONDS)
+        except TimeoutError:
+            return ""  # OpenRouter is slow to say: the call goes ahead
         if not credit or credit["left"] is None or credit["left"] >= CALL_MINIMUM_DOLLARS:
             return ""
         resets = f" It starts again when the limit resets ({credit['resets']})." if credit["resets"] else ""

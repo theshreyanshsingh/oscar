@@ -30,6 +30,17 @@ AUDIO_NEVER_CONNECTED = "The call audio never connected."
 SHUTDOWN_PATIENCE_SECONDS = 10
 
 
+def lines_busy(store, cfg) -> str:
+    """Why no more calls can start now (Oscar is on as many as MAX_CALLS lets it), or ""."""
+    on = store.count_open_calls()
+    if on < cfg.max_calls:
+        return ""
+    return (
+        f"Oscar is already on {on} call{'s' if on != 1 else ''}, the most it takes at once "
+        "(MAX_CALLS in .env). Try again when one ends."
+    )
+
+
 class CallManager:
     def __init__(self, store: Store, bus: EventBus):
         self.store = store

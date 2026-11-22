@@ -11,6 +11,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.tests.utils import SleepFrame
 
 from app.calls import CallManager
+from app import costs
 from app.costs import CALL_MINIMUM_DOLLARS, CostMeter, KeyCredit, cost_of
 from app.events import EventBus
 from app.main import create_app
@@ -324,6 +325,32 @@ async def test_when_openrouter_cannot_say_calls_go_ahead():
     credit = credit_with(lambda request: httpx.Response(500))
     assert await credit.get() is None
     assert await credit.too_little_for_a_call() == ""
+
+
+async def test_a_check_that_failed_is_not_tried_again_for_a_while():
+    asked = []
+    credit = credit_with(lambda request: asked.append(request) or httpx.Response(500))
+    for _ in range(5):
+        assert await credit.too_little_for_a_call() == ""
+    assert len(asked) == 1  # not once a call, one after another
+    await credit.get(fresh=True)  # the dashboard can still ask
+    assert len(asked) == 2
+
+
+async def test_a_slow_answer_does_not_hold_a_call_up(monkeypatch):
+    monkeypatch.setattr(costs, "CALL_CHECK_SECONDS", 0.05)
+
+    async def slow(request):
+        await asyncio.sleep(0.3)
+        return httpx.Response(200, json=key_answer(limit_remaining=0.01))
+
+    credit = KeyCredit(api_key="sk-or-test", base_url=BASE, client=httpx.AsyncClient(transport=httpx.MockTransport(slow)))
+    started = asyncio.get_running_loop().time()
+    assert await credit.too_little_for_a_call() == ""  # goes ahead without waiting
+    assert asyncio.get_running_loop().time() - started < 0.2
+    await asyncio.sleep(0.4)
+    # The answer still came in, and the next call is held back by it.
+    assert "left of its $50.00 limit" in await credit.too_little_for_a_call()
 
 
 async def test_what_was_known_is_kept_when_openrouter_stops_answering(monkeypatch):

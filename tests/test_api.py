@@ -587,6 +587,7 @@ def env(monkeypatch):
         "FIRECRAWL_BASE_URL",
         "CF_ACCESS_TEAM_DOMAIN",
         "CF_ACCESS_AUD",
+        "MAX_CALLS",
     ]:
         monkeypatch.delenv(name, raising=False)
     return monkeypatch

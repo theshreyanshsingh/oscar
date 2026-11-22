@@ -23,10 +23,13 @@ from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app import agent as voice_agent
-from app.calls import AUDIO_NEVER_CONNECTED, CallManager
+from app.calls import AUDIO_NEVER_CONNECTED, CallManager, lines_busy
 from app.config import Config
 from app.costs import KeyCredit
 from app.store import OPEN_STATUSES, Store
+
+# What someone phoning in hears while Oscar is on as many calls as MAX_CALLS lets it.
+LINES_BUSY_LINE = "Sorry, all our lines are busy right now. Please call back in a few minutes. Goodbye."
 
 FAILED_CALL_REASONS = {
     "busy": "The line was busy.",
@@ -154,8 +157,7 @@ def create_phone_router(
             response.hangup()
             return _twiml_response(str(response))
 
-        too_little = await credit.too_little_for_a_call() if credit else ""
-        if too_little:
+        def turn_away(reason: str, said: str) -> Response:
             # Kept in the call history, so the owner sees the call it missed and why.
             missed = calls.create(
                 "phone_inbound",
@@ -163,11 +165,18 @@ def create_phone_router(
                 from_number=form.get("From", ""),
                 to_number=form.get("To", ""),
             )
-            calls.finish(missed["id"], too_little)
+            calls.finish(missed["id"], reason)
             response = VoiceResponse()
-            response.say("Sorry, this agent cannot take calls right now. Please try again later. Goodbye.")
+            response.say(said)
             response.hangup()
             return _twiml_response(str(response))
+
+        busy = lines_busy(store, cfg)
+        if busy:
+            return turn_away(busy, LINES_BUSY_LINE)
+        too_little = await credit.too_little_for_a_call() if credit else ""
+        if too_little:
+            return turn_away(too_little, "Sorry, this agent cannot take calls right now. Please try again later. Goodbye.")
 
         call = calls.create(
             "phone_inbound",

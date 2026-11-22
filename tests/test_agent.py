@@ -182,3 +182,32 @@ def test_without_web_search_the_model_is_not_told_it_can_search(tmp_path):
     # A fact sheet alone gives a lookup, but no internet.
     told = system_instruction(knowing(), can_search=False)
     assert NO_TOOLS_NOTE in told and SEARCH_NOTE not in told
+
+
+# The two models that hear when a caller speaks and stops (shared by every call)
+
+
+def test_each_call_has_its_own_turn_detectors_on_models_loaded_once():
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+
+    from app.agent import turn_detectors
+
+    (voice_a, turn_a), (voice_b, turn_b) = turn_detectors(), turn_detectors()
+    # The loaded models are the same ones ...
+    assert voice_a._model.session is voice_b._model.session and turn_a._session is turn_b._session
+    # ... and what each call hears is its own.
+    assert voice_a._model._state is not voice_b._model._state
+    assert turn_a._audio_buffer is not turn_b._audio_buffer
+    # Exactly the state pipecat's own constructors make: an upgrade that adds some fails here.
+    assert set(vars(voice_a)) == set(vars(SileroVADAnalyzer()))
+    assert set(vars(turn_a)) == set(vars(LocalSmartTurnAnalyzerV3()))
+
+
+async def test_voice_detection_runs_where_the_audio_arrives():
+    from app.agent import turn_detectors
+
+    voice, _ = turn_detectors()
+    voice.set_sample_rate(8000)
+    voice._executor.shutdown()  # a thread hand-off would fail now
+    assert (await voice.analyze_audio(b"\x00\x00" * 160)).name == "QUIET"

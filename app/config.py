@@ -19,6 +19,11 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env", override=False)
 
 
+# How many calls Oscar is on at once, unless MAX_CALLS says otherwise, and the most it can say.
+DEFAULT_MAX_CALLS = 8
+MOST_MAX_CALLS = 100
+
+
 class ConfigError(RuntimeError):
     """The environment is set up in a way the app must refuse to run with."""
 
@@ -36,6 +41,10 @@ class Config:
     openrouter_base_url: str = DEFAULT_BASE_URL
     firecrawl_api_key: str = ""
     firecrawl_base_url: str = DEFAULT_FIRECRAWL_URL
+    # The most calls Oscar is on at once (MAX_CALLS). One more is turned away
+    # politely: past what the computer can take, every call goes wrong at once
+    # (README.md, How many calls at once).
+    max_calls: int = DEFAULT_MAX_CALLS
     # Cloudflare Access, when it guards the dashboard (app/access.py): the team
     # domain, such as "yourteam.cloudflareaccess.com", and the application's
     # audience (AUD) tag. Both or neither.
@@ -145,6 +154,14 @@ def load_config() -> Config:
 
     db_path = Path(_env("DATABASE_PATH") or ROOT_DIR / "data" / "oscar.db")
 
+    max_calls_raw = _env("MAX_CALLS", str(DEFAULT_MAX_CALLS))
+    try:
+        max_calls = int(max_calls_raw)
+    except ValueError:
+        raise ConfigError(f"MAX_CALLS must be a number, got {max_calls_raw!r}.") from None
+    if not 1 <= max_calls <= MOST_MAX_CALLS:
+        raise ConfigError(f"MAX_CALLS must be between 1 and {MOST_MAX_CALLS}, got {max_calls}.")
+
     team_domain = access_team_domain(_env("CF_ACCESS_TEAM_DOMAIN"))
     audience = _env("CF_ACCESS_AUD")
     if bool(team_domain) != bool(audience):
@@ -167,6 +184,7 @@ def load_config() -> Config:
         firecrawl_base_url=_env("FIRECRAWL_BASE_URL").rstrip("/") or DEFAULT_FIRECRAWL_URL,
         access_team_domain=team_domain,
         access_audience=audience,
+        max_calls=max_calls,
     )
 
 
