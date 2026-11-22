@@ -39,7 +39,7 @@ from neonize.utils.enum import ChatPresence, ChatPresenceMedia, Presence
 
 from app.config import Config
 from app.store import WHATSAPP_HEARTBEAT_SECONDS, Store
-from app.whatsapp import brain
+from app.whatsapp import brain, voice
 from app.whatsapp.chat import (
     ChatMemory,
     IncomingMessage,
@@ -56,6 +56,10 @@ from app.whatsapp.chat import (
 logger = logging.getLogger("oscar.whatsapp")
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# The longest voice note Oscar listens to, and the most it downloads for one (two
+# minutes of a WhatsApp voice note is about half a megabyte).
+MAX_VOICE_SECONDS = 2 * 60
+MAX_VOICE_BYTES = 3 * 1024 * 1024
 # WhatsApp shows the first linking code for 60 seconds and each later one for
 # 20. After a few minutes it stops issuing them, without saying so.
 FIRST_CODE_SECONDS = 60
@@ -89,6 +93,11 @@ LINK_INSTRUCTIONS = (
     "Settings → Linked devices → Link a device, and scan this code."
 )
 SORRY_REPLY = "Sorry, I can't answer right now. Please try again in a bit."
+VOICE_TOO_LONG_REPLY = (
+    "Sorry, I can only listen to voice notes up to 2 minutes long. "
+    "Could you send a shorter one, or type it?"
+)
+VOICE_UNCLEAR_REPLY = "I couldn't make out that voice note — could you type it?"
 
 _MEDIA_FIELDS = (
     ("imageMessage", "image"),
@@ -197,6 +206,17 @@ def _safe(handler):
             logger.exception("Error in WhatsApp event handler %s", handler.__name__)
 
     return wrapper
+
+
+class VoiceNoteProblem(Exception):
+    """A voice note Oscar was asked to answer could not be listened to.
+
+    The message says why, for the dashboard; `reply` is what the chat is told.
+    """
+
+    def __init__(self, reply: str, why: str):
+        super().__init__(why)
+        self.reply = reply
 
 
 class WhatsAppBridge:
@@ -491,16 +511,6 @@ class WhatsAppBridge:
             quoted.CopyFrom(event)
             chat_jid = event.Info.MessageSource.Chat
 
-            # What came before this message, and Oscar's answers since.
-            request_text = build_request_text(
-                message,
-                memory=self.memory,
-                my_ids=self.my_ids,
-                agent_name=agent.name,
-                own_number=own_number,
-                owner_name=self._owner_name,
-                members_called_oscar=members_called_oscar,
-            )
             now = datetime.now().astimezone()
 
             def system_prompt(web_search: bool) -> str:
@@ -522,6 +532,18 @@ class WhatsAppBridge:
             await self._typing(chat_jid, True)
             error = ""
             try:
+                # A voice note is listened to only now that it is known to be for Oscar.
+                await self._listen_to_voice_notes(event, message)
+                # What came before this message, and Oscar's answers since.
+                request_text = build_request_text(
+                    message,
+                    memory=self.memory,
+                    my_ids=self.my_ids,
+                    agent_name=agent.name,
+                    own_number=own_number,
+                    owner_name=self._owner_name,
+                    members_called_oscar=members_called_oscar,
+                )
                 raw = await brain.generate_reply(
                     api_key=self.cfg.openrouter_api_key,
                     base_url=self.cfg.openrouter_base_url,
@@ -540,6 +562,9 @@ class WhatsAppBridge:
                 if search_problems:
                     # The reply went out, but the owner should know the search did not.
                     error = f"Web search failed: {search_problems[0]}"
+            except VoiceNoteProblem as exc:
+                logger.warning("Could not listen to a voice note in %s: %s", chat_label, exc)
+                reply, error = exc.reply, str(exc)
             except brain.BrainError as exc:
                 logger.warning("No reply for %s: %s", chat_label, exc)
                 reply, error = SORRY_REPLY, str(exc)
@@ -646,6 +671,54 @@ class WhatsAppBridge:
             if data and len(data) <= MAX_IMAGE_BYTES:
                 images.append(brain.Image(data=data, mime_type=image.mimetype or "image/jpeg"))
         return images
+
+    async def _listen_to_voice_notes(self, event: MessageEv, message: IncomingMessage) -> None:
+        """Write down the voice note a message is, or replies to, as if its words had been typed.
+
+        Only for a message Oscar answers: other voice notes are never listened to.
+        The words of the message's own note are what Oscar remembers of it, too.
+        """
+        if message.kind == "audio" and not message.view_once and event.Message.HasField("audioMessage"):
+            message.text = await self._transcribe(event.Message, "the voice note")
+            self.memory.rewrite(message.chat_id, message.message_id, message.summary)
+        _, _, context = message_content(event.Message)
+        if message.quoted_kind == "audio" and context is not None and context.HasField("quotedMessage"):
+            note = context.quotedMessage
+            if note.HasField("audioMessage") and not note.audioMessage.viewOnce:
+                message.quoted_text = await self._transcribe(note, "the voice note it replies to")
+
+    async def _transcribe(self, source: Message, what: str) -> str:
+        """The words of a voice note. Raises VoiceNoteProblem when they cannot be had."""
+        note = source.audioMessage
+
+        def too_long(how: str) -> VoiceNoteProblem:
+            limit = f"Oscar listens to {MAX_VOICE_SECONDS // 60} minutes at most"
+            return VoiceNoteProblem(VOICE_TOO_LONG_REPLY, f"Not listened to: {what} is {how}, and {limit}.")
+
+        if note.seconds > MAX_VOICE_SECONDS:
+            raise too_long("{}:{:02d} long".format(*divmod(note.seconds, 60)))
+        if note.fileLength > MAX_VOICE_BYTES:
+            raise too_long("too big")
+        try:
+            audio = await self.client.download_any(source)
+        except Exception as exc:
+            raise VoiceNoteProblem(VOICE_UNCLEAR_REPLY, f"Could not download {what}: {exc}") from None
+        if not audio:
+            raise VoiceNoteProblem(VOICE_UNCLEAR_REPLY, f"Could not download {what}.")
+        if len(audio) > MAX_VOICE_BYTES:
+            raise too_long("too big")
+        try:
+            words = await voice.transcribe(
+                api_key=self.cfg.openrouter_api_key,
+                base_url=self.cfg.openrouter_base_url,
+                audio=audio,
+                mime_type=note.mimetype,
+            )
+        except voice.TranscriptionFailed as exc:
+            raise VoiceNoteProblem(VOICE_UNCLEAR_REPLY, f"Could not write down {what}: {exc}") from None
+        if not words:
+            raise VoiceNoteProblem(VOICE_UNCLEAR_REPLY, f"No words could be made out in {what}.")
+        return words
 
     async def _typing(self, chat_jid, typing: bool) -> None:
         state = ChatPresence.CHAT_PRESENCE_COMPOSING if typing else ChatPresence.CHAT_PRESENCE_PAUSED

@@ -414,7 +414,7 @@ async def test_a_call_is_summed_up_when_it_ends(server, monkeypatch):
         (asked,) = sent(server, "summary")
         assert asked["model"] == SUMMARY_MODEL and "modalities" not in asked
         system, transcript = asked["messages"]
-        assert system == {"role": "system", "content": SUMMARY_INSTRUCTIONS.format(name="Oscar")}
+        assert system == {"role": "system", "content": SUMMARY_INSTRUCTIONS.format(name="Oscar", details="")}
         assert transcript["role"] == "user"
         assert transcript["content"] == transcript_text(
             detail["messages"], kind="browser", agent_name="Oscar"

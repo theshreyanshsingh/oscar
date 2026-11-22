@@ -98,6 +98,10 @@ SummaryStatus = Literal["", "writing", "ready", "failed"]
 KNOWLEDGE_MAX_CHARACTERS = 12000
 # The longest script: the steps Oscar works through on a call (app/script.py).
 SCRIPT_MAX_CHARACTERS = 4000
+# What else the owner can have noted from each call ("Budget", "Address"): how
+# many things, and how long each one's name can be.
+SUMMARY_FIELDS_MAX = 8
+SUMMARY_FIELD_CHARS = 40
 
 
 class AgentSettings(BaseModel):
@@ -115,6 +119,23 @@ class AgentSettings(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     voice: VoiceId
     accent: AccentId = "indian"
+    # What else to note from each call, filled in with its summary (app/summary.py).
+    summary_fields: list[str] = Field(default_factory=list)
+
+    @field_validator("summary_fields")
+    @classmethod
+    def summary_fields_are_short_names(cls, value: list[str]) -> list[str]:
+        names: list[str] = []
+        for name in value:
+            name = re.sub(r"\s+", " ", name).strip()
+            if not name or name.casefold() in (kept.casefold() for kept in names):
+                continue  # a blank line, or the same thing twice
+            if len(name) > SUMMARY_FIELD_CHARS:
+                raise ValueError(f"Keep each one to {SUMMARY_FIELD_CHARS} characters or fewer.")
+            names.append(name)
+        if len(names) > SUMMARY_FIELDS_MAX:
+            raise ValueError(f"Keep it to {SUMMARY_FIELDS_MAX} or fewer.")
+        return names
 
     @field_validator("model")
     @classmethod
@@ -194,7 +215,19 @@ _SUMMARY_COLUMNS = (
     # the notes as JSON, or why they could not be written.
     "research",
     "research_error",
+    # What else the owner asked to have noted (AgentSettings.summary_fields), as a
+    # JSON object of what was found ("" when nothing).
+    "details",
 )
+
+
+def _json_list(text: str) -> list[str]:
+    """A list of names kept as JSON; [] for anything else."""
+    try:
+        value = json.loads(text or "[]")
+    except ValueError:
+        return []
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
 def without_excerpts(search: dict) -> dict:
@@ -322,6 +355,7 @@ class Store:
             ("agent", "accent", "TEXT NOT NULL DEFAULT 'australian'"),
             ("agent", "knowledge", "TEXT NOT NULL DEFAULT ''"),
             ("agent", "script", "TEXT NOT NULL DEFAULT ''"),
+            ("agent", "summary_fields", "TEXT NOT NULL DEFAULT '[]'"),
             ("whatsapp_settings", "own_number", "INTEGER NOT NULL DEFAULT 0"),
             # What the call cost on OpenRouter, in dollars (app/costs.py).
             ("calls", "cost", "REAL NOT NULL DEFAULT 0"),
@@ -362,6 +396,7 @@ class Store:
             accent=row["accent"] if row["accent"] in ACCENTS else DEFAULT_AGENT.accent,
             knowledge=row["knowledge"],
             script=row["script"],
+            summary_fields=_json_list(row["summary_fields"]),
         )
 
     def save_agent(self, agent: AgentSettings) -> AgentSettings:
@@ -370,8 +405,8 @@ class Store:
                 """
                 INSERT INTO agent
                     (id, name, greeting, system_prompt, model, voice, accent, knowledge, script,
-                     updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     summary_fields, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE SET
                     name = excluded.name,
                     greeting = excluded.greeting,
@@ -381,6 +416,7 @@ class Store:
                     accent = excluded.accent,
                     knowledge = excluded.knowledge,
                     script = excluded.script,
+                    summary_fields = excluded.summary_fields,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -392,6 +428,7 @@ class Store:
                     agent.accent,
                     agent.knowledge,
                     agent.script,
+                    json.dumps(agent.summary_fields),
                     utc_now(),
                 ),
             )
@@ -546,6 +583,20 @@ class Store:
             ).fetchall()
         return [(row["started_at"], float(row["cost"])) for row in rows]
 
+    def earlier_calls(self, number: str, *, before_id: str, limit: int = 3) -> list[dict]:
+        """The latest phone calls with this number (to it or from it) that have a summary,
+        newest first, not counting the call `before_id`."""
+        if not number:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM calls WHERE (from_number = ? OR to_number = ?) AND id != ? "
+                "AND kind IN ('phone_inbound', 'phone_outbound') AND summary_status = 'ready' "
+                "AND summary != '' ORDER BY started_at DESC, rowid DESC LIMIT ?",
+                (number, number, before_id, limit),
+            ).fetchall()
+        return [self._call_dict(row) for row in rows]
+
     def count_open_todos(self) -> int:
         with self._lock:
             row = self._db.execute(
@@ -627,6 +678,7 @@ class Store:
         call = dict(row)
         call["duration_seconds"] = _duration_seconds(call["started_at"], call["ended_at"])
         call["research"] = json.loads(call["research"]) if call["research"] else []
+        call["details"] = json.loads(call["details"]) if call.get("details") else {}
         return call
 
     # Where each call's summary is sent (app/notify.py)

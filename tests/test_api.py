@@ -60,6 +60,7 @@ def test_agent_settings_default_then_save(client):
         "accent": "british",
         "knowledge": "  We open at 9 am.\nA haircut is $45.  ",
         "script": "\n1. Ask who is calling.\n2. Say goodbye.\n",
+        "summary_fields": [" Budget ", "", "Preferred  time", "budget"],
     }
     saved = client.put("/api/agent", json=new)
     assert saved.status_code == 200
@@ -69,8 +70,18 @@ def test_agent_settings_default_then_save(client):
         "name": "Ava",
         "knowledge": "We open at 9 am.\nA haircut is $45.",
         "script": "1. Ask who is calling.\n2. Say goodbye.",
+        # Tidied: no blank names, and the same thing (whatever its capitals) once.
+        "summary_fields": ["Budget", "Preferred time"],
     }
     assert client.get("/api/agent").json() == kept
+
+
+def test_too_many_or_too_long_things_to_note_are_refused(client):
+    body = DEFAULT_AGENT.model_dump()
+    many = client.put("/api/agent", json={**body, "summary_fields": [f"Thing {n}" for n in range(9)]})
+    assert many.status_code == 422 and "Keep it to 8 or fewer" in many.text
+    long = client.put("/api/agent", json={**body, "summary_fields": ["x" * 41]})
+    assert long.status_code == 422 and "40 characters" in long.text
 
 
 def test_oscar_knows_nothing_about_a_business_until_it_is_told(client):

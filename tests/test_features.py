@@ -161,3 +161,15 @@ def test_the_dashboard_gets_the_models(tmp_path):
     catalog = ModelCatalog(base_url="https://or.test/api/v1", client=listing(HAIKU))
     with TestClient(create_app(make_config(tmp_path), catalog=catalog), base_url="http://localhost") as client:
         assert client.get("/api/models").json() == {"models": [{"id": HAIKU["id"], "name": HAIKU["name"]}]}
+
+
+def test_each_thing_noted_from_calls_has_its_own_column(client):
+    store = client.app.state.store
+    agent = store.get_agent().model_copy(update={"summary_fields": ["Budget", "Address"]})
+    store.save_agent(agent)
+    a_call(client, summary="Sam wants a fence.", details='{"Budget": "5000", "Colour": "Green"}')
+    a_call(client, summary="Jo asked about hours.")
+    rows = rows_of(client.get("/api/calls.csv"))
+    # The things asked for now, in order, then one only an older call has.
+    assert list(rows[0])[-3:] == ["Budget", "Address", "Colour"]
+    assert [(row["Budget"], row["Address"], row["Colour"]) for row in rows] == [("", "", ""), ("5000", "", "Green")]

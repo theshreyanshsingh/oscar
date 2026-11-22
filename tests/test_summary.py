@@ -168,7 +168,7 @@ async def test_the_summary_is_asked_for_in_one_request_to_a_text_model():
     assert body["reasoning"] == {"effort": "low"}
     assert body["max_tokens"] >= 1000  # room for that thinking and the note
     system, transcript = body["messages"]
-    assert system == {"role": "system", "content": SUMMARY_INSTRUCTIONS.format(name="Oscar")}
+    assert system == {"role": "system", "content": SUMMARY_INSTRUCTIONS.format(name="Oscar", details="")}
     assert transcript == {
         "role": "user",
         "content": transcript_text(SAMS_CALL, kind="phone_inbound", agent_name="Oscar"),
@@ -178,7 +178,7 @@ async def test_the_summary_is_asked_for_in_one_request_to_a_text_model():
 
 
 def test_the_instructions_ask_for_the_four_things_and_nothing_made_up():
-    instructions = SUMMARY_INSTRUCTIONS.format(name="Ava")
+    instructions = SUMMARY_INSTRUCTIONS.format(name="Ava", details="")
     assert "{" not in instructions.replace("{name}", "")
     for key in ('"summary"', '"caller_name"', '"callback_number"', '"follow_up"'):
         assert key in instructions
@@ -785,3 +785,56 @@ async def test_stopping_the_server_gives_up_on_a_summary_that_takes_too_long(cal
     assert calls.store.get_call(call.id)["summary_status"] == "writing"
     assert calls.store.forget_unfinished_summaries() == 1
     assert calls.store.get_call(call.id)["summary_status"] == ""
+
+
+# What else the owner asked to have noted
+
+
+FIELDS = ["Budget", "Preferred time", "Address"]
+
+
+def test_the_owners_things_to_note_are_asked_for_by_name():
+    told = summary.summary_instructions("Oscar", FIELDS)
+    assert '- "details": an object with exactly these keys: "Budget", "Preferred time", "Address".' in told
+    # Without any, the instructions are as they always were.
+    assert summary.summary_instructions("Oscar") == SUMMARY_INSTRUCTIONS.format(name="Oscar", details="")
+    assert '"details"' not in summary.summary_instructions("Oscar")
+
+
+async def test_each_thing_to_note_is_kept_by_the_owners_name_when_the_call_said_it():
+    call = talk(("user", "Hi, it's Sam. I've about five thousand dollars to spend, and mornings suit me."))
+    answer = {**SAMS_NOTE, "caller_name": "", "callback_number": "",
+              "details": {"budget": 5000, "Preferred time": " Mornings ", "Address": "", "Colour": "Green"}}
+    client, requests = answering(json.dumps(answer))
+    note = await write_summary(call, kind="phone_inbound", agent_name="Oscar", api_key="sk-or-test",
+                               base_url=OPENROUTER, client=client, fields=FIELDS)
+    # Any capitals, a number as text, nothing for what was not said or not asked for.
+    assert note.details == {"Budget": "5000", "Preferred time": "Mornings"}
+    assert '"Preferred time"' in json.loads(requests[0].content)["messages"][0]["content"]
+
+
+async def test_a_detail_with_a_number_that_was_not_said_is_left_out_and_the_rest_kept():
+    call = talk(("user", "It's Sam on 0412 345 678. Mornings suit me."))
+    answer = {**SAMS_NOTE, "callback_number": "",
+              "details": {"Preferred time": "Mornings", "Address": "Ring 0499 999 999 first", "Budget": "Call 0412 345 678"}}
+    client, _ = answering(json.dumps(answer))
+    note = await write_summary(call, kind="phone_inbound", agent_name="Oscar", api_key="sk-or-test",
+                               base_url=OPENROUTER, client=client, fields=FIELDS)
+    assert note.details == {"Preferred time": "Mornings", "Budget": "Call 0412 345 678"}
+    assert note.summary == SAMS_NOTE["summary"]
+
+
+@pytest.mark.parametrize("details", [None, "Budget: 5000", ["5000"], {}])
+def test_details_that_are_not_an_object_are_none(details):
+    assert summary.parse_details(details, FIELDS) == {}
+    assert summary.parse_details({"Budget": "5000"}, []) == {}
+
+
+async def test_the_details_are_saved_with_the_summary(calls, tmp_path, monkeypatch):
+    seen = writing_with(monkeypatch, CallSummary(**SAMS_NOTE, details={"Budget": "5000"}))
+    cfg = make_config(tmp_path, openrouter_api_key="sk-or-test", openrouter_base_url=OPENROUTER)
+    call = ended_call(calls, SAMS_CALL)
+    start_summary(cfg, calls, call, DEFAULT_AGENT.model_copy(update={"summary_fields": FIELDS}))
+    await finished(calls)
+    assert calls.store.get_call(call["id"])["details"] == {"Budget": "5000"}
+    assert seen[0]["fields"] == FIELDS

@@ -22,7 +22,7 @@ import asyncio
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from loguru import logger
@@ -44,6 +44,14 @@ SUMMARY_CHARS = 400
 NAME_CHARS = 80
 NUMBER_CHARS = 40
 FOLLOW_UP_CHARS = 300
+DETAIL_CHARS = 200
+
+# What else the owner asked to have noted from each call (AgentSettings.summary_fields).
+DETAILS_INSTRUCTION = (
+    '\n- "details": an object with exactly these keys: {keys}. For each, what the call '
+    "said about it, in a few words (twenty at most), with any number or name copied from "
+    'the transcript. "" if the call did not say.'
+)
 
 # A call where only Oscar's side was written down has nothing to summarise.
 NOTHING_HEARD = "Only {name} was heard on this call."
@@ -64,7 +72,7 @@ SUMMARY_INSTRUCTIONS = (
     '- "follow_up": what the owner now has to do because the other person asked for it or '
     "{name} promised it, as one short instruction to the owner such as \"Call Sam back about "
     'a quote for the fence." "" if nothing was asked for or promised that is still to be '
-    "done.\n\n"
+    "done.{details}\n\n"
     "Use only what is in the transcript. Never guess a name, a number, a request or how the "
     "call ended when it is not there. In every sentence you write, the other person is "
     '"they" and {name} is "it", never "he" or "she": a name does not tell you which. The '
@@ -109,6 +117,14 @@ class CallSummary:
     caller_name: str = ""
     callback_number: str = ""
     follow_up: str = ""
+    # What the call said about each thing the owner asked to have noted; only those it did.
+    details: dict[str, str] = field(default_factory=dict)
+
+
+def summary_instructions(agent_name: str, fields: list[str] = ()) -> str:
+    """What the summary model is told: SUMMARY_INSTRUCTIONS, with the owner's own things to note."""
+    keys = ", ".join(json.dumps(name, ensure_ascii=False) for name in fields)
+    return SUMMARY_INSTRUCTIONS.format(name=agent_name, details=DETAILS_INSTRUCTION.format(keys=keys) if keys else "")
 
 
 def transcript_text(messages: list[dict], *, kind: CallKind, agent_name: str) -> str:
@@ -132,7 +148,24 @@ def one_line(value: object, limit: int) -> str:
     return re.sub(r"\s+", " ", text).strip()[:limit].rstrip()
 
 
-def parse_summary(text: object) -> CallSummary:
+def parse_details(value: object, fields: list[str]) -> dict[str, str]:
+    """What the model wrote for each thing to note, by the owner's names for them; only
+    those it filled in. A key it spelt with other capitals still counts."""
+    if not isinstance(value, dict) or not fields:
+        return {}
+    by_name = {str(key).casefold(): answer for key, answer in value.items()}
+    details = {}
+    for name in fields:
+        answer = by_name.get(name.casefold())
+        if isinstance(answer, (int, float)) and not isinstance(answer, bool):
+            answer = str(answer)
+        text = one_line(answer, DETAIL_CHARS)
+        if text:
+            details[name] = text
+    return details
+
+
+def parse_summary(text: object, fields: list[str] = ()) -> CallSummary:
     """The model's answer as a summary. Raises SummaryFailed when it is not one."""
     text = text if isinstance(text, str) else ""
     # The object itself, whatever the model wrapped it in (a code fence, a sentence).
@@ -151,6 +184,7 @@ def parse_summary(text: object) -> CallSummary:
         caller_name=one_line(data.get("caller_name"), NAME_CHARS),
         callback_number=one_line(data.get("callback_number"), NUMBER_CHARS),
         follow_up=one_line(data.get("follow_up"), FOLLOW_UP_CHARS),
+        details=parse_details(data.get("details"), list(fields)),
     )
 
 
@@ -222,11 +256,18 @@ def only_what_was_said(summary: CallSummary, messages: list[dict]) -> CallSummar
     # dashboard gets the digits alone.
     number = summary.callback_number
     plus = "+" if number.startswith("+") else ""
+    # A detail naming a number that was never said is left out, not the whole summary.
+    details = {
+        name: value
+        for name, value in summary.details.items()
+        if all(_DATE_OR_TIMES.fullmatch(found) or was_said(found) for found in _LONG_NUMBER.findall(value))
+    }
     return CallSummary(
         summary=summary.summary,
         caller_name=summary.caller_name if name_was_said else "",
         callback_number=plus + digits_in(number) if _given_whole(number, messages) else "",
         follow_up=summary.follow_up,
+        details=details,
     )
 
 
@@ -279,8 +320,12 @@ async def write_summary(
     base_url: str = DEFAULT_BASE_URL,
     client: httpx.AsyncClient | None = None,
     meter: CostMeter | None = None,
+    fields: list[str] = (),
 ) -> CallSummary:
-    """The summary of a call from its transcript. Raises SummaryFailed when it could not be written."""
+    """The summary of a call from its transcript. Raises SummaryFailed when it could not be written.
+
+    `fields` are what else the owner asked to have noted (AgentSettings.summary_fields).
+    """
     payload = {
         "model": SUMMARY_MODEL,
         "usage": USAGE,
@@ -292,7 +337,7 @@ async def write_summary(
         # 32 with it. Nobody is waiting on the line for this answer.
         "reasoning": {"effort": "low"},
         "messages": [
-            {"role": "system", "content": SUMMARY_INSTRUCTIONS.format(name=agent_name)},
+            {"role": "system", "content": summary_instructions(agent_name, fields)},
             {"role": "user", "content": transcript_text(messages, kind=kind, agent_name=agent_name)},
         ],
     }
@@ -324,7 +369,7 @@ async def write_summary(
         text = body["choices"][0]["message"]["content"]
     except (LookupError, TypeError):
         text = None
-    return only_what_was_said(parse_summary(text), messages)
+    return only_what_was_said(parse_summary(text, fields), messages)
 
 
 def start_summary(
@@ -401,6 +446,7 @@ async def _summary_fields(
             api_key=cfg.openrouter_api_key,
             base_url=cfg.openrouter_base_url,
             meter=meter,
+            fields=agent.summary_fields,
         )
     except SummaryFailed as exc:
         logger.warning(f"Call {call_id}: its summary could not be written: {exc}")
@@ -415,6 +461,7 @@ async def _summary_fields(
         "caller_name": note.caller_name,
         "callback_number": note.callback_number,
         "follow_up": note.follow_up,
+        "details": json.dumps(note.details, ensure_ascii=False) if note.details else "",
         # A summary written again may have a different to-do: it starts out not done.
         "follow_up_done_at": "",
         "summary_error": "",

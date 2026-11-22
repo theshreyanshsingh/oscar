@@ -524,8 +524,15 @@ Ctrl+C; nothing is lost. To unlink Oscar, stop it and run
   you chose cannot use tools, Oscar answers without searching and says when
   something may be out of date.
 - If the model you chose can't see photos, Oscar says so instead of guessing.
-- It does not understand voice notes.
-- It never looks at view-once photos.
+- It listens to a voice note only when the note is for it (in a private chat
+  it answers, or as a reply to one of its messages), or when a question for it
+  replies to one ("@oscar what did she say?"). It then answers the words as if
+  they had been typed, and remembers the note by them. Every other voice note
+  stays "[voice message]", never listened to. Notes are written down by the
+  transcriber calls use (deepgram/nova-3 through OpenRouter), at about half a
+  cent a minute, and only up to 2 minutes long: Oscar says so for a longer one,
+  and asks for the words in writing when it cannot make a note out.
+- It never looks at view-once photos, or listens to view-once voice notes.
 - In chats with disappearing messages, its replies disappear too.
 - It forgets messages that are deleted for everyone.
 
@@ -639,6 +646,14 @@ and when you open a call:
   on, if they gave them.
 - **To do:** what is left for you to do, such as calling someone back. Empty
   when the caller got what they needed.
+- **Your own things to note:** whatever you list under **Note from each call**
+  in Agent settings (up to 8, such as Budget, Address or Preferred time), with
+  what the call said about each. Only those the call covered are shown. They
+  are also in the CSV download (a column each) and in the summary sent to you.
+  Tried on a real call on 2026-11-22: asked for Budget, Address, Preferred time
+  and Fence colour, it gave the first three as said and left the colour out
+  (the caller never named one). A detail with a phone number in it that was not
+  said on the call is left out.
 
 It is one request to a text model after the call, so it never slows a reply.
 It took one to two seconds and cost about a hundredth of a cent for a short
@@ -655,6 +670,16 @@ call when measured on 2026-11-12.
 - **A call where only Oscar spoke** is noted as that, without asking a model.
 - A summary is a model's reading of the call. The transcript below it is the
   record.
+
+**Callers Oscar has spoken with before.** When a number calls in (or Oscar
+calls it) and earlier phone calls with that number have a summary, Oscar is
+told the latest three: when, what they were about, the name given, and any
+to-do and whether it is done. So a caller asking "any news on my quote?" is
+answered as someone Oscar knows. Oscar is told the phone may be someone else's
+and not to read the notes out. Tried on 2026-11-22 with eight real replies:
+the Indian accent held on all eight, a returning caller asking about a quote
+was greeted by name and told it was still pending, and an unrelated question
+got an ordinary answer. Browser calls have no number, so they start fresh.
 
 ### Summaries sent to you
 
@@ -767,6 +792,8 @@ Edit these on the dashboard. They apply from the next call.
 - **Script:** the steps Oscar works through on a call. See the section above.
 - **What Oscar knows:** facts about whoever Oscar answers for. See the
   section above.
+- **Note from each call:** what else each call's summary should note, one on
+  each line. See Call summaries.
 
 **Hear this voice** (under Voice) plays about six seconds of Oscar saying hello
 with the voice, accent and name in the form, before you save them. Each sample

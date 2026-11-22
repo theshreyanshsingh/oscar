@@ -117,12 +117,21 @@ def spreadsheet_safe(value: object) -> str:
     return text
 
 
-def calls_csv(found: list[dict]) -> str:
+def calls_csv(found: list[dict], detail_names: list[str] = ()) -> str:
+    """The calls as CSV: the columns every call has, then one for each thing the owner
+    has noted from calls (the ones asked for now, then any older ones the calls have)."""
+    names = list(detail_names)
+    for call in found:
+        names += [name for name in call.get("details") or {} if name not in names]
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow([heading for heading, _ in CSV_COLUMNS])
+    writer.writerow([heading for heading, _ in CSV_COLUMNS] + names)
     for call in found:
-        writer.writerow([spreadsheet_safe(call.get(field)) for _, field in CSV_COLUMNS])
+        details = call.get("details") or {}
+        writer.writerow(
+            [spreadsheet_safe(call.get(field)) for _, field in CSV_COLUMNS]
+            + [spreadsheet_safe(details.get(name, "")) for name in names]
+        )
     # A byte order mark, so Excel reads it as UTF-8 (names in any script).
     return "\ufeff" + out.getvalue()
 
@@ -351,7 +360,7 @@ def create_app(
         found, _ = store.find_calls(limit=CSV_MOST_CALLS, query=q, show=show)
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return Response(
-            content=calls_csv(found),
+            content=calls_csv(found, store.get_agent().summary_fields),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="oscar-calls-{day}.csv"'},
         )

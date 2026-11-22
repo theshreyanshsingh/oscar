@@ -195,6 +195,12 @@ class ChatMemory:
         log = self.entries.setdefault(chat_id, deque(maxlen=HISTORY_MESSAGES))
         log.append(_Entry(timestamp, agent_name, text, True, answer=True))
 
+    def rewrite(self, chat_id: str, message_id: str, text: str) -> None:
+        """Change what a remembered message says: a voice note, once Oscar has listened to it."""
+        for entry in self.entries.get(chat_id, ()):
+            if message_id and entry.message_id == message_id:
+                entry.text = text
+
     def forget(self, chat_id: str, message_id: str) -> None:
         """Drop a message its sender deleted for everyone."""
         log = self.entries.get(chat_id)

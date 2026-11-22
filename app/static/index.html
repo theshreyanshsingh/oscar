@@ -312,6 +312,20 @@
                 <input type="file" id="agent-knowledge-file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" hidden />
               </p>
             </div>
+            <div class="field span-all">
+              <label class="field-label" for="agent-summary-fields">Note from each call</label>
+              <textarea
+                id="agent-summary-fields"
+                name="summary_fields"
+                rows="4"
+                spellcheck="false"
+                placeholder="What you want noted, one on each line. For example:&#10;Budget&#10;Address&#10;Preferred time"
+              ></textarea>
+              <p class="hint" id="agent-summary-fields-hint">
+                Up to 8, each 40 characters at most. After every call its summary says what was
+                said about each one, in Call history, the CSV download and the summary sent to you.
+              </p>
+            </div>
             </div>
             <div class="actions">
               <button type="submit" class="primary" id="agent-save">
@@ -654,6 +668,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=26"></script>
+    <script src="/static/app.js?v=27"></script>
   </body>
 </html>

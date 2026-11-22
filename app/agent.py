@@ -10,7 +10,7 @@ the transport and the audio sample rates differ.
 
 import asyncio
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime
 
 from loguru import logger
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
@@ -36,7 +36,7 @@ from app.costs import CostMeter
 from app.script import ScriptKeeper, script_steps
 from app.search import WebLookup
 from app.speech import EchoGate, GreetingFrame, OpenRouterVoiceService, Recordings
-from app.store import ACCENTS, AgentSettings
+from app.store import ACCENTS, AgentSettings, Store
 from app.summary import start_summary
 
 # Input and output sample rates (Hz). Phone audio is 8 kHz.
@@ -158,8 +158,53 @@ def spoken_date(day: date) -> str:
     return f"{day:%A} {day.day} {day:%B %Y}"
 
 
+# A phone number that has called (or been called) before: what the notes of those
+# calls say, so Oscar can pick up where they left off. Last in the instructions,
+# after everything that shapes how Oscar sounds.
+EARLIER_CALLS_NOTE = (
+    "You have spoken with this phone number before. The notes of those calls, newest "
+    "first:\n{calls}\n"
+    "Someone else can use the same phone, so do not assume it is the same person. Use "
+    "these notes only where they help, for example to ask whether they are calling about "
+    "the same thing. Never read the notes out, and do not mention them unless it helps the "
+    "caller."
+)
+EARLIER_CALL_CHARS = 500
+
+
+def earlier_calls_note(earlier: list[dict]) -> str:
+    """What Oscar is told of a number's earlier calls ("" when there are none)."""
+    lines = []
+    for call in earlier:
+        try:
+            day = datetime.fromisoformat(call["started_at"])
+            when = f"{day.day} {day:%B}"
+        except (TypeError, ValueError):
+            when = "Earlier"
+        line = f"- {when}: {call['summary']}"
+        if call.get("caller_name"):
+            line += f" (They gave their name as {call['caller_name']}.)"
+        if call.get("follow_up"):
+            done = "Done since" if call.get("follow_up_done_at") else "Still to do"
+            line += f" {done}: {call['follow_up']}"
+        lines.append(line[:EARLIER_CALL_CHARS])
+    return EARLIER_CALLS_NOTE.format(calls="\n".join(lines)) if lines else ""
+
+
+def earlier_calls_for(store: Store, call_id: str) -> list[dict]:
+    """The earlier calls with the other end of this phone call: the number that is
+    calling in, or the number being called. None for a browser call."""
+    call = store.get_call(call_id) or {}
+    number = {"phone_inbound": call.get("from_number"), "phone_outbound": call.get("to_number")}
+    return store.earlier_calls(number.get(call.get("kind"), "") or "", before_id=call_id)
+
+
 def system_instruction(
-    agent: AgentSettings, *, can_search: bool = False, today: date | None = None
+    agent: AgentSettings,
+    *,
+    can_search: bool = False,
+    today: date | None = None,
+    earlier: list[dict] = (),
 ) -> str:
     if can_search:
         # The model does not know the date, and "today" or "the latest" need one.
@@ -172,6 +217,7 @@ def system_instruction(
         agent.system_prompt,
         NO_KNOWLEDGE_NOTE,
         abilities,
+        earlier_calls_note(list(earlier)),
     ]
     return "\n\n".join(part for part in parts if part)
 
@@ -221,15 +267,20 @@ def build_script(cfg: Config, agent: AgentSettings, meter: CostMeter | None = No
 
 
 def build_voice(
-    cfg: Config, agent: AgentSettings, context: LLMContext, meter: CostMeter | None = None
+    cfg: Config,
+    agent: AgentSettings,
+    context: LLMContext,
+    meter: CostMeter | None = None,
+    earlier: list[dict] = (),
 ) -> OpenRouterVoiceService:
+    """`earlier` is the caller's number's earlier calls (CallStore.earlier_calls)."""
     today = date.today()
     lookup = build_lookup(cfg, agent, today, meter)
     return OpenRouterVoiceService(
         api_key=cfg.openrouter_api_key,
         base_url=cfg.openrouter_base_url,
         voice=agent.voice,
-        instructions=system_instruction(agent, can_search=cfg.search_enabled, today=today),
+        instructions=system_instruction(agent, can_search=cfg.search_enabled, today=today, earlier=earlier),
         reminder=accent_reminder(agent),
         line_instructions=line_instruction(agent),
         lookup=lookup,
@@ -271,7 +322,7 @@ async def run_call(
             base_url=cfg.openrouter_base_url,
             spawn=calls.spawn,
         )
-        voice = build_voice(cfg, agent, context, meter)
+        voice = build_voice(cfg, agent, context, meter, earlier_calls_for(calls.store, call_id))
         # Realtime mode: the caller's turn ends on their silence alone, without
         # waiting for a transcript (the model hears the audio itself).
         end_of_turn = LocalSmartTurnAnalyzerV3(

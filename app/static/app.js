@@ -23,6 +23,7 @@ const FIELD_LABELS = {
   accent: "Accent",
   to: "Number to call",
   instructions: "Chat instructions",
+  summary_fields: "Note from each call",
 };
 const SERVICE_NAMES = { OPENROUTER_API_KEY: "OpenRouter" };
 const IDLE_CALL_TEXT = "Press Start call and allow the microphone.";
@@ -262,6 +263,8 @@ function summaryRows(call) {
     if (call.caller_name) rows.push(["Name", call.caller_name]);
     if (call.callback_number) rows.push(["Call back on", call.callback_number]);
     if (call.follow_up) rows.push(["To do", todoControl(call)]);
+    // What else the owner asked to have noted, by their own names for it.
+    for (const [name, value] of Object.entries(call.details || {})) rows.push([name, value]);
   }
   if (call.research && call.research.length) {
     rows.push(["Research", researchList(call.research)]);
@@ -484,6 +487,7 @@ const AGENT_FIELDS = [
   "agent-prompt",
   "agent-script",
   "agent-knowledge",
+  "agent-summary-fields",
 ];
 
 // What was measured for each accent (README.md, Agent settings; ACCENT_NOTE in
@@ -670,6 +674,8 @@ function agentFormBody() {
     system_prompt: $("agent-prompt").value,
     script: $("agent-script").value,
     knowledge: $("agent-knowledge").value,
+    // One a line; the server tidies blanks and repeats away.
+    summary_fields: $("agent-summary-fields").value.split("\n"),
   };
 }
 
@@ -728,6 +734,7 @@ function fillAgentForm(agent) {
   $("agent-prompt").value = agent.system_prompt;
   $("agent-script").value = agent.script || "";
   $("agent-knowledge").value = agent.knowledge || "";
+  $("agent-summary-fields").value = (agent.summary_fields || []).join("\n");
   countKnowledge();
   showAccentHint();
   updateCounters();

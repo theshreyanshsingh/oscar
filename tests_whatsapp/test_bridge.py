@@ -4,12 +4,15 @@ Run with the WhatsApp environment: .venv-whatsapp/bin/python -m pytest tests_wha
 """
 
 import asyncio
+import base64
 import dataclasses
+import json
 import logging
 import sqlite3
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 from neonize.events import (
     ClientOutdatedEv,
@@ -1389,3 +1392,120 @@ async def test_a_private_chat_the_owner_asks_in_is_named_after_the_other_person(
     await own.bridge.handle_message(owners)
     assert "a private WhatsApp chat with Jay" in own.asked[0]["system_prompt"]
     assert own.store.list_whatsapp_activity()[0]["chat_name"] == "Jay"
+
+
+# Voice notes
+
+
+def voice_message(seconds: int = 6) -> Message:
+    """A voice note as WhatsApp records one: Opus audio in an Ogg file."""
+    message = Message()
+    note = message.audioMessage
+    note.mimetype = "audio/ogg; codecs=opus"
+    note.PTT = True
+    note.seconds = seconds
+    note.fileLength = 4000 * seconds
+    return message
+
+
+def voice_note(seconds: int = 6, *, quoted: Message | None = None, quoted_from: str = "", **options) -> MessageEv:
+    event = group_event("", **options)
+    event.Message.Clear()
+    event.Message.CopyFrom(voice_message(seconds))
+    if quoted is not None:
+        context = event.Message.audioMessage.contextInfo
+        context.quotedMessage.CopyFrom(quoted)
+        context.participant = quoted_from
+    return event
+
+
+DM = dict(chat=JAY_PHONE, chat_server="s.whatsapp.net", is_group=False)
+HEARD = "what time do you open tomorrow?"
+
+
+@pytest.fixture
+def transcriber(monkeypatch):
+    """OpenRouter's transcription endpoint, faked: what it was sent, and what it answers."""
+    fake = dataclasses.make_dataclass("Transcriber", ["sent", "status", "body"])([], 200, {"text": HEARD})
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/audio/transcriptions")
+        fake.sent.append(json.loads(request.content))
+        return httpx.Response(fake.status, json=fake.body)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **options: real(transport=httpx.MockTransport(answer), **options))
+    return fake
+
+
+async def test_a_voice_note_sent_to_oscar_is_written_down_and_answered(setup, transcriber):
+    setup.store.save_whatsapp_settings(WhatsAppSettings(reply_in_private_chats=True))
+    await connect(setup)
+    await setup.bridge.handle_message(voice_note(message_id="V1", **DM))
+
+    (sent,) = transcriber.sent
+    assert (sent["model"], sent["language"], sent["input_audio"]["format"]) == ("deepgram/nova-3", "multi", "ogg")
+    assert base64.b64decode(sent["input_audio"]["data"]) == b"\x89PNG fake image"  # what was downloaded
+    (call,) = setup.asked
+    assert call["request_text"].endswith(f"Jay: [voice message] {HEARD}")  # as if it had been typed
+    assert len(setup.client.replies) == 1
+    (activity,) = setup.store.list_whatsapp_activity()
+    assert activity["request"] == f"[voice message] {HEARD}" and activity["error"] == ""
+
+    # Remembered by its words, and not listened to again.
+    await setup.bridge.handle_message(group_event("and on Sundays?", message_id="T2", **DM))
+    assert f"Jay: [voice message] {HEARD}" in setup.asked[1]["request_text"]
+    assert len(transcriber.sent) == 1
+
+
+async def test_only_a_voice_note_meant_for_oscar_is_listened_to(setup, transcriber):
+    await connect(setup)
+    await setup.bridge.handle_message(voice_note(message_id="V1"))  # to the group, not to Oscar
+    assert transcriber.sent == [] and setup.client.downloads == [] and setup.asked == []
+
+    # A voice note that replies to one of Oscar's messages is meant for it.
+    await setup.bridge.handle_message(
+        voice_note(quoted=text_message("We open at 9."), quoted_from=f"{OSCAR_LID}@lid", message_id="V2")
+    )
+    assert len(transcriber.sent) == 1
+    (call,) = setup.asked
+    assert "Jay: [voice message]\n" in call["request_text"]  # the first one, never listened to
+    assert call["request_text"].endswith(f'replying to you: "We open at 9.": [voice message] {HEARD}')
+
+
+async def test_a_voice_note_a_question_replies_to_is_written_down(setup, transcriber):
+    await connect(setup)
+    transcriber.body = {"text": "I'll be there at eight"}
+    await setup.bridge.handle_message(
+        group_event("@oscar what did she say?", quoted=voice_message(), quoted_from=f"{ROMAN_PHONE}@s.whatsapp.net")
+    )
+    assert len(transcriber.sent) == 1
+    assert "\"[voice message] I'll be there at eight\": @oscar what did she say?" in setup.asked[0]["request_text"]
+
+
+async def test_a_voice_note_over_two_minutes_is_not_listened_to(setup, transcriber):
+    setup.store.save_whatsapp_settings(WhatsAppSettings(reply_in_private_chats=True))
+    await connect(setup)
+    await setup.bridge.handle_message(voice_note(seconds=150, **DM))
+    assert transcriber.sent == [] and setup.client.downloads == [] and setup.asked == []
+    assert setup.client.replies[0][0] == bridge_module.VOICE_TOO_LONG_REPLY
+    (activity,) = setup.store.list_whatsapp_activity()
+    assert activity["request"] == "[voice message]" and "2:30 long" in activity["error"]
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "why"),
+    [
+        (402, {"error": {"message": "Insufficient credits"}}, "out of credits"),
+        (200, {"text": "  "}, "No words could be made out"),
+    ],
+)
+async def test_a_voice_note_that_cannot_be_made_out_is_asked_for_in_writing(setup, transcriber, status, body, why):
+    setup.store.save_whatsapp_settings(WhatsAppSettings(reply_in_private_chats=True))
+    transcriber.status, transcriber.body = status, body
+    await connect(setup)
+    await setup.bridge.handle_message(voice_note(**DM))
+    assert setup.asked == []  # nothing for the model to guess from
+    assert setup.client.replies[0][0] == bridge_module.VOICE_UNCLEAR_REPLY
+    (activity,) = setup.store.list_whatsapp_activity()
+    assert why in activity["error"]

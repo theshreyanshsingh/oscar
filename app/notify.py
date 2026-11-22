@@ -40,6 +40,7 @@ CALL_FIELDS = (
     "caller_name",
     "callback_number",
     "follow_up",
+    "details",
     "research",
 )
 
@@ -87,6 +88,9 @@ def summary_message(call: dict, *, agent_name: str) -> str:
         lines.append(f"Call back on: {call['callback_number']}")
     if call.get("follow_up"):
         lines.append(f"To do: {call['follow_up']}")
+    details = call.get("details")
+    for name, value in (details.items() if isinstance(details, dict) else ()):
+        lines.append(f"{name}: {value}")
     research = call.get("research") or []
     if research:
         lines.append(f"Research: {len(research)} note{'s' if len(research) != 1 else ''}, in Call history")
@@ -149,5 +153,6 @@ SAMPLE_CALL = {
     "caller_name": "Sam",
     "callback_number": "+14155550123",
     "follow_up": "Nothing: this is only a test.",
+    "details": {},
     "research": [],
 }

@@ -245,3 +245,10 @@ def test_a_test_sends_a_made_up_summary_and_says_how_it_went(client, monkeypatch
         "The webhook answered 404: no_service",
         "The webhook answered 404: no_service",
     )
+
+
+def test_the_owners_own_details_are_in_the_message():
+    call = {**SAMPLE_CALL, "details": {"Budget": "5000", "Preferred time": "Mornings"}}
+    text = summary_message(call, agent_name="Oscar")
+    assert text.splitlines()[-2:] == ["Budget: 5000", "Preferred time: Mornings"]
+    assert summary_payload(call, agent_name="Oscar")["call"]["details"] == {"Budget": "5000", "Preferred time": "Mornings"}
