@@ -11,6 +11,8 @@ the transport and the audio sample rates differ.
 import asyncio
 import copy
 import threading
+from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import date, datetime
 
@@ -36,6 +38,7 @@ from pipecat.workers.runner import WorkerRunner
 from app.calls import CallManager
 from app.config import Config
 from app.costs import CostMeter
+from app.recording import CallRecorder, recordings_folder
 from app.script import ScriptKeeper, script_steps
 from app.search import WebLookup
 from app.speech import EchoGate, FarewellFrame, GreetingFrame, OpenRouterVoiceService, Recordings
@@ -56,6 +59,18 @@ FAREWELL_LINE = (
     "Please call back if there's anything else. Goodbye."
 )
 FAREWELL_WAIT_SECONDS = 15
+# Said when the caller could not be put through (Twilio refused to), before hanging up.
+TRANSFER_FAILED_LINE = (
+    "I'm sorry, I couldn't put you through just now. Someone will call you back soon. Goodbye."
+)
+# Once Twilio has the call (to put it through), its audio stream here ends within
+# moments. If it has not after this long, the call's pipeline is stopped anyway
+# (without hanging the call up).
+TRANSFER_HANDOVER_SECONDS = 10
+# A voicemail message is given this long to be said, plus a second for every
+# SPOKEN_CHARACTERS_A_SECOND characters of it, before the call is hung up anyway.
+VOICEMAIL_WAIT_SECONDS = 15
+SPOKEN_CHARACTERS_A_SECOND = 12
 SECONDS_IN_A_MINUTE = 60  # what a minute of max_call_minutes is (tests make it shorter)
 
 # The caller's turn ends as soon as what they said sounds finished. When it
@@ -211,10 +226,21 @@ def earlier_calls_for(store: Store, call_id: str) -> list[dict]:
     return store.earlier_calls(number.get(call.get("kind"), "") or "", before_id=call_id)
 
 
+# When the owner has given a number to put callers through to. Another part of
+# the system decides when to (app/search.py); the model is told what to say, so
+# that a reply that plays before that decision does not contradict it.
+TRANSFER_NOTE = (
+    "When the caller asks to speak to a person, you can put them through: say \"Of course, "
+    "I'll put you through now.\" and nothing more. Never say you cannot put them through, "
+    "and never say the number they are put through to."
+)
+
+
 def system_instruction(
     agent: AgentSettings,
     *,
     can_search: bool = False,
+    can_transfer: bool = False,
     today: date | None = None,
     earlier: list[dict] = (),
 ) -> str:
@@ -229,6 +255,7 @@ def system_instruction(
         agent.system_prompt,
         NO_KNOWLEDGE_NOTE,
         abilities,
+        TRANSFER_NOTE if can_transfer else "",
         earlier_calls_note(list(earlier)),
     ]
     return "\n\n".join(part for part in parts if part)
@@ -248,8 +275,9 @@ def line_instruction(agent: AgentSettings) -> str:
 def build_lookup(
     cfg: Config, agent: AgentSettings, today: date, meter: CostMeter | None = None
 ) -> WebLookup | None:
-    """What a call can look things up in: the web with a Firecrawl key, and the owner's fact sheet."""
-    if not cfg.search_enabled and not agent.knowledge.strip():
+    """What a call can look things up in: the web with a Firecrawl key, and the owner's fact
+    sheet. It also decides when to put a caller through (AgentSettings.transfer_number)."""
+    if not cfg.search_enabled and not agent.knowledge.strip() and not agent.transfer_number:
         return None
     return WebLookup(
         firecrawl_api_key=cfg.firecrawl_api_key if cfg.search_enabled else "",
@@ -261,6 +289,7 @@ def build_lookup(
         knowledge=agent.knowledge,
         today=spoken_date(today),
         meter=meter,
+        can_transfer=bool(agent.transfer_number),
     )
 
 
@@ -292,7 +321,13 @@ def build_voice(
         api_key=cfg.openrouter_api_key,
         base_url=cfg.openrouter_base_url,
         voice=agent.voice,
-        instructions=system_instruction(agent, can_search=cfg.search_enabled, today=today, earlier=earlier),
+        instructions=system_instruction(
+            agent,
+            can_search=cfg.search_enabled,
+            can_transfer=bool(agent.transfer_number),
+            today=today,
+            earlier=earlier,
+        ),
         reminder=accent_reminder(agent),
         line_instructions=line_instruction(agent),
         lookup=lookup,
@@ -368,16 +403,21 @@ async def run_call(
     agent: AgentSettings,
     sample_rates: tuple[int, int],
     barge_in: bool,
+    transfer: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """Run one call from connection to hang-up, logging it as it goes.
 
     `barge_in` lets the caller interrupt Oscar by talking over it. That only
     works where Oscar's voice cannot leak back into the caller's microphone (a
     phone, or headphones). Without it, Oscar finishes speaking before it listens.
+
+    `transfer(number)` hands a phone call over to that number (app/phone.py).
+    A browser call has none: one that would be put through ends instead.
     """
     error = ""
     connected = False
     watchdog: asyncio.Task | None = None
+    recorder: CallRecorder | None = None
     try:
         context = LLMContext()
         # Everything this call asks OpenRouter for is counted toward it.
@@ -402,10 +442,14 @@ async def run_call(
         user, assistant = aggregators.user(), aggregators.assistant()
 
         listening = [] if barge_in else [EchoGate()]
-        pipeline = Pipeline(
-            [transport.input(), *listening, user, voice, transport.output(), assistant]
-        )
         in_rate, out_rate = sample_rates
+        # Both sides of the call, as the caller heard it (app/recording.py).
+        if agent.record_calls:
+            recorder = CallRecorder(recordings_folder(cfg.db_path), call_id, in_rate)
+        recording = [recorder.processor] if recorder else []
+        pipeline = Pipeline(
+            [transport.input(), *listening, user, voice, transport.output(), *recording, assistant]
+        )
         worker = PipelineWorker(
             pipeline,
             params=PipelineParams(audio_in_sample_rate=in_rate, audio_out_sample_rate=out_rate),
@@ -487,23 +531,73 @@ async def run_call(
             logger.warning(f"Call {call_id}: {frame.error}")
             calls.note_error(call_id, str(frame.error))
 
-        farewell_said = asyncio.Event()
+        # A closing line (app/speech.py, FarewellFrame) of each kind has been heard.
+        heard: defaultdict[str, asyncio.Event] = defaultdict(asyncio.Event)
 
         @voice.event_handler("on_farewell_said")
-        async def on_farewell_said(service):
-            farewell_said.set()
+        async def on_farewell_said(service, kind):
+            if kind == "transfer":
+                # Not here: this runs in the middle of the voice service's frames.
+                calls.spawn(put_through())
+            else:
+                heard[kind].set()
+
+        async def say_and_end(line: str, kind: str, wait: float, reason: str, *, keep: bool = True):
+            """Say a closing line, then hang up once it has been heard (or after `wait` seconds)."""
+            await worker.queue_frames([FarewellFrame(line, kind=kind, keep=keep)])
+            try:
+                await asyncio.wait_for(heard[kind].wait(), wait)
+            except TimeoutError:
+                logger.warning(f"Call {call_id}: the closing line ({kind}) was not heard; hanging up")
+            await worker.cancel(reason=reason)
 
         async def end_after_max_length():
             await asyncio.sleep(agent.max_call_minutes * SECONDS_IN_A_MINUTE)
             calls.add_message(call_id, "note", f"The call reached its {agent.max_call_minutes} minute limit.")
-            await worker.queue_frames([FarewellFrame(FAREWELL_LINE)])
+            await say_and_end(FAREWELL_LINE, "goodbye", FAREWELL_WAIT_SECONDS, "Maximum call length reached")
+
+        async def put_through():
+            """The caller asked for a person and has heard Oscar say it is putting them through."""
+            number = agent.transfer_number
+            if transfer is None:
+                calls.add_message(
+                    call_id,
+                    "note",
+                    f"{agent.name} would now put the caller through to {number}. A browser call "
+                    "cannot be put through, so this one ends here.",
+                )
+                await worker.cancel(reason="Put through (a browser call cannot be)")
+                return
+            calls.add_message(call_id, "note", f"Put the caller through to {number}.")
+            calls.update(call_id, transferred_to=number)
             try:
-                await asyncio.wait_for(farewell_said.wait(), FAREWELL_WAIT_SECONDS)
-            except TimeoutError:
-                logger.warning(f"Call {call_id}: the goodbye at the time limit was not heard; hanging up")
-            await worker.cancel(reason="Maximum call length reached")
+                await transfer(number)
+            except Exception as exc:
+                logger.warning(f"Call {call_id}: could not put the caller through: {exc}")
+                calls.update(call_id, transfer_result="failed")
+                calls.note_error(call_id, f"Could not put the caller through: {exc}")
+                await say_and_end(TRANSFER_FAILED_LINE, "transfer-failed", FAREWELL_WAIT_SECONDS, "Could not put through")
+                return
+            # Twilio now has the call; its audio stream here is about to end.
+            await asyncio.sleep(TRANSFER_HANDOVER_SECONDS)
+            if call_id in calls.active_call_ids:
+                await worker.cancel(reason="Put through")
+
+        async def leave_voicemail():
+            """A voicemail answered a call Oscar made (app/phone.py): leave the message, or hang up."""
+            message = agent.voicemail_message
+            if not message:
+                calls.add_message(call_id, "note", "A voicemail answered, so the call was ended without a message.")
+                await worker.cancel(reason="A voicemail answered")
+                return
+            calls.add_message(call_id, "note", "A voicemail answered. Left this message: " + message)
+            # A message made for one person (a call list fills in their name) is not kept to replay.
+            keep = message == calls.store.get_agent().voicemail_message
+            wait = VOICEMAIL_WAIT_SECONDS + len(message) / SPOKEN_CHARACTERS_A_SECOND
+            await say_and_end(message, "voicemail", wait, "Left a voicemail", keep=keep)
 
         calls.register_worker(call_id, worker)
+        calls.on_voicemail(call_id, leave_voicemail)
         watchdog = asyncio.create_task(end_after_max_length())
 
         runner = WorkerRunner(handle_sigint=False)
@@ -525,3 +619,17 @@ async def run_call(
         if call:
             alert_if_missed(calls, call, agent.name)
             start_summary(cfg, calls, call, agent, notify=True)
+        if recorder:
+            await keep_recording(calls, call_id, recorder)
+
+
+async def keep_recording(calls: CallManager, call_id: str, recorder: CallRecorder) -> None:
+    """Encode the call's recording (on a worker thread) and note how long it is."""
+    try:
+        seconds = await asyncio.to_thread(recorder.finish)
+    except Exception:
+        logger.exception(f"Call {call_id}: its recording could not be kept")
+        recorder.discard()
+        return
+    if seconds and calls.store.get_call(call_id):
+        calls.update(call_id, recording_seconds=round(seconds, 1))

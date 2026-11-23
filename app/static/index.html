@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=15" />
+    <link rel="stylesheet" href="/static/style.css?v=18" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -34,6 +34,7 @@
         <div class="nav-links" id="nav-links">
           <a href="#call">Talk</a>
           <a href="#phone">Phone</a>
+          <a href="#lists">Lists</a>
           <a href="#agent">Agent</a>
           <a href="#whatsapp">WhatsApp</a>
           <a href="#history">History</a>
@@ -230,6 +231,144 @@
         </div>
       </section>
 
+      <section class="section" id="lists" aria-labelledby="lists-heading">
+        <div class="title-grid reveal">
+          <div>
+            <p class="eyebrow">Call lists</p>
+            <h2 class="title" id="lists-heading">Hand Oscar a list,<br />it makes the calls</h2>
+          </div>
+          <p class="title-side">
+            Give Oscar a spreadsheet of people to call. It rings them a few at a time in the
+            hours you choose, knows each person's details, leaves a voicemail when no one picks
+            up, and notes how every call went.
+          </p>
+        </div>
+
+        <p class="panel panel-outline lists-off reveal" id="lists-off" hidden>
+          Call lists use phone calls. Set up a Twilio number first (see Phone above). You can
+          still save a list for later.
+        </p>
+
+        <div class="lists-grid">
+          <form class="panel panel-soft list-form reveal" id="list-form" novalidate>
+            <h3 class="panel-title">New call list</h3>
+            <div class="list-fields">
+              <div class="field span-all">
+                <label class="field-label" for="list-name">Name</label>
+                <input id="list-name" maxlength="80" placeholder="November quote follow-ups" required />
+              </div>
+              <div class="field span-all">
+                <span class="field-label" id="list-file-label">People to call</span>
+                <label class="dropzone" id="list-drop" for="list-file">
+                  <input type="file" id="list-file" accept=".csv,text/csv,.txt" aria-labelledby="list-file-label" />
+                  <span class="dropzone-icon" aria-hidden="true"></span>
+                  <span class="dropzone-text">
+                    <span class="dropzone-title" id="list-file-name">Choose a CSV file</span>
+                    <span class="dropzone-note" id="list-drop-note">or drop one here: a row for each person, with a column of phone numbers</span>
+                  </span>
+                </label>
+                <button type="button" class="link list-paste-toggle" id="list-paste-toggle" aria-expanded="false" aria-controls="list-paste">
+                  Paste the rows instead
+                </button>
+                <textarea
+                  id="list-paste"
+                  rows="5"
+                  spellcheck="false"
+                  hidden
+                  aria-label="Rows to call, as CSV"
+                  placeholder="Name,Phone,Quote&#10;Sam Taylor,+61 412 345 678,Back fence&#10;Lee Chen,+61 498 765 432,Gate"
+                ></textarea>
+                <div class="list-preview" id="list-preview" aria-live="polite" hidden></div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="list-country">Country code</label>
+                <input id="list-country" maxlength="5" inputmode="tel" placeholder="+61" />
+                <p class="hint">For numbers written without one, like 0412 345 678.</p>
+              </div>
+              <div class="field">
+                <label class="field-label" for="list-at-once">Calls at once</label>
+                <select id="list-at-once">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                </select>
+                <p class="hint">A line is always kept free for people calling in.</p>
+              </div>
+              <div class="field span-all">
+                <label class="field-label" for="list-instructions">What these calls are about</label>
+                <textarea
+                  id="list-instructions"
+                  rows="4"
+                  maxlength="4000"
+                  placeholder="You're calling {{name}} about the quote for their {{quote}}. Ask whether they have any questions, and whether they'd like to go ahead."
+                ></textarea>
+                <p class="hint">
+                  Added to Oscar's call instructions for these calls. A column's heading in double
+                  braces, like {{name}}, becomes that person's value, and Oscar is told their whole row.
+                </p>
+              </div>
+              <div class="field span-all">
+                <label class="field-label" for="list-greeting">Opening line <span class="optional">optional</span></label>
+                <input id="list-greeting" maxlength="500" placeholder="Hi {{name}}, it's Oscar from Taylor Fencing." />
+              </div>
+              <div class="field span-all">
+                <label class="field-label" for="list-voicemail">Voicemail message <span class="optional">optional</span></label>
+                <input id="list-voicemail" maxlength="500" placeholder="Hi {{name}}, it's Oscar from Taylor Fencing. Give us a call back when you can." />
+                <p class="hint">Left blank, these use the ones in Agent settings.</p>
+              </div>
+              <div class="field">
+                <label class="field-label" for="list-from">Call between</label>
+                <div class="hours">
+                  <input type="time" id="list-from" value="09:00" required />
+                  <span class="hours-and">and</span>
+                  <input type="time" id="list-until" value="18:00" required aria-label="Call until" />
+                </div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="list-timezone">Their time zone</label>
+                <select id="list-timezone"></select>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="list-start">
+                <span class="btn-label">Start calling</span>
+              </button>
+              <button type="button" class="secondary" id="list-save">Save for later</button>
+            </div>
+            <p class="error" id="list-error" role="alert" hidden></p>
+          </form>
+
+          <div class="lists-side">
+            <div class="lists" id="lists-cards">
+              <div class="lists-empty panel panel-outline">
+                <p class="panel-title">No call lists yet</p>
+                <p class="hint">
+                  A list you start shows here as Oscar works through it: who answered, who got a
+                  voicemail, and a link to every call.
+                </p>
+              </div>
+            </div>
+
+            <div class="panel panel-outline dnc reveal" id="dnc-panel">
+              <h3 class="panel-title">Do not call</h3>
+              <p class="hint">
+                When someone asks Oscar on a call not to be called again, their number goes here and
+                call lists skip it. They can still call Oscar.
+              </p>
+              <ul class="dnc-list" id="dnc-list"></ul>
+              <form id="dnc-form" class="dnc-form" novalidate>
+                <label class="visually-hidden" for="dnc-number">Number not to call</label>
+                <input id="dnc-number" type="tel" inputmode="tel" placeholder="+61 412 345 678" />
+                <button type="submit" class="secondary" id="dnc-add">Add</button>
+              </form>
+              <p class="error" id="dnc-error" role="alert" hidden></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="section" id="agent" aria-labelledby="agent-heading">
         <div class="title-grid reveal">
           <div>
@@ -358,6 +497,48 @@
               <p class="hint">
                 At this point Oscar says the time is up, says goodbye and hangs up. Every
                 reply resends the conversation so far, so long calls cost more a minute.
+              </p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="agent-transfer">Put callers through to</label>
+              <input
+                id="agent-transfer"
+                name="transfer_number"
+                type="tel"
+                inputmode="tel"
+                autocomplete="off"
+                maxlength="40"
+                placeholder="+61 412 345 678"
+              />
+              <p class="hint">
+                When a phone caller asks for a person, Oscar says it is putting them through and
+                rings this number. If no one answers, the caller is told someone will call back,
+                and you get an alert. Leave it blank and Oscar handles every call itself.
+              </p>
+            </div>
+            <div class="field span-all">
+              <label class="field-label" for="agent-voicemail">Voicemail message</label>
+              <textarea
+                id="agent-voicemail"
+                name="voicemail_message"
+                rows="2"
+                maxlength="500"
+                placeholder="Hi, this is Oscar calling from the shop. Please call us back when you can. Thanks!"
+              ></textarea>
+              <p class="hint">
+                When a voicemail answers a call Oscar makes, Oscar waits for the beep, leaves this
+                message in its own voice and hangs up. Leave it blank to hang up without one.
+              </p>
+            </div>
+            <div class="field span-all">
+              <label class="check">
+                <input type="checkbox" id="agent-record" name="record_calls" />
+                Record calls
+              </label>
+              <p class="hint">
+                Both sides of every call, to play back from Call history. Recordings are kept on
+                this server for 90 days. In some places everyone on a call has to be told it is
+                recorded: if so, say it in the opening line.
               </p>
             </div>
             </div>
@@ -696,6 +877,12 @@
         </div>
       </div>
       <p class="error" id="detail-error" hidden></p>
+      <p class="call-outcome" id="detail-outcome" hidden></p>
+      <div class="recording" id="detail-recording" hidden>
+        <p class="recording-label">Recording <span id="detail-recording-length"></span></p>
+        <audio id="detail-audio" controls preload="none"></audio>
+        <a class="link" id="detail-download" href="#" download>Download</a>
+      </div>
       <div class="call-summary" id="detail-summary" hidden></div>
       <button type="button" class="link" id="detail-summarise" hidden>Write a summary</button>
       <div class="transcript" id="detail-transcript"></div>
@@ -708,6 +895,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=32"></script>
+    <script src="/static/app.js?v=36"></script>
   </body>
 </html>

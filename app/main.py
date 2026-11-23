@@ -30,9 +30,23 @@ from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
 from app.calls import CallManager, lines_busy
 from app.backup import back_up
+from app.campaigns import (
+    CALL_AGAIN_STATUSES,
+    CSV_MOST_CHARACTERS,
+    TICK_SECONDS,
+    CampaignDialer,
+    CampaignRequest,
+    clock_of,
+    country_code,
+    minutes_of,
+    parse_contacts,
+    placeholders,
+    field_key,
+)
 from app.catalog import ModelCatalog
 from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
 from app.preview import PreviewFailed, voice_sample
+from app.recording import finish_leftovers, prune, recording_path, recordings_folder
 from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
 from app.config import (
     ROOT_DIR,
@@ -58,6 +72,7 @@ from app.store import (
     AgentSettings,
     Store,
     WhatsAppSettings,
+    phone_number,
     utc_now,
     without_excerpts,
 )
@@ -98,6 +113,21 @@ class BlockedNumbers(BaseModel):
 
 class PhoneCallRequest(BaseModel):
     to: str = Field(pattern=r"^\+[1-9]\d{7,14}$", description="E.164 number, e.g. +14155550123")
+
+
+class ContactsPreview(BaseModel):
+    contacts_csv: str = Field(min_length=1, max_length=CSV_MOST_CHARACTERS)
+    country_code: str = Field(default="", max_length=6)
+    # The list's instructions, opening line and voicemail message, to check their {{columns}}.
+    templates: list[str] = Field(default_factory=list, max_length=3)
+
+
+class DoNotCallEntry(BaseModel):
+    number: str = Field(min_length=1, max_length=40)
+
+
+# The most problems with a CSV shown at once.
+CSV_PROBLEMS_SHOWN = 20
 
 
 # How often to see whether today's backup is made yet, and the first time after starting
@@ -206,9 +236,11 @@ def create_app(
             )
         watching = asyncio.create_task(watch_credit())
         backing_up = asyncio.create_task(keep_backing_up())
+        dialing = asyncio.create_task(keep_dialing())
         yield
         watching.cancel()
         backing_up.cancel()
+        dialing.cancel()
         await calls.shutdown()
         await webrtc.close()
         store.close()
@@ -266,7 +298,8 @@ def create_app(
             await asyncio.sleep(CREDIT_WATCH_SECONDS)
 
     async def keep_backing_up() -> None:
-        """A copy of the database each day (app/backup.py), checked for every hour."""
+        """A copy of the database each day (app/backup.py), checked for every hour. Recordings
+        a stopped server left unfinished are finished, and old ones go (app/recording.py)."""
         await asyncio.sleep(BACKUP_FIRST_SECONDS)
         while True:
             try:
@@ -275,7 +308,33 @@ def create_app(
                     logger.info(f"Backed up the database to {made}")
             except Exception:
                 logger.exception("Backing up the database failed")
+            try:
+                await tidy_recordings()
+            except Exception:
+                logger.exception("Tidying the call recordings failed")
             await asyncio.sleep(BACKUP_CHECK_SECONDS)
+
+    async def tidy_recordings() -> None:
+        folder = recordings_folder(cfg.db_path)
+        open_ids = set(calls.active_call_ids)
+        finished = await asyncio.to_thread(finish_leftovers, folder, lambda call_id: call_id in open_ids)
+        for call_id, seconds in finished.items():
+            if seconds and store.get_call(call_id):
+                calls.update(call_id, recording_seconds=round(seconds, 1))
+        for call_id in await asyncio.to_thread(prune, folder):
+            if store.get_call(call_id):
+                calls.update(call_id, recording_seconds=0)
+
+    dialer = CampaignDialer(cfg, calls, credit)
+
+    async def keep_dialing() -> None:
+        """Make the calls of the call lists that are running (app/campaigns.py)."""
+        while True:
+            try:
+                await dialer.tick()
+            except Exception:
+                logger.exception("The call lists could not go on")
+            await asyncio.sleep(TICK_SECONDS)
 
     def require_a_free_line() -> None:
         """No new call while Oscar is on as many as it takes at once (MAX_CALLS)."""
@@ -467,8 +526,25 @@ def create_app(
                 status_code=409, detail="Its summary is still being written. Delete it once that is done."
             )
         store.delete_call(call_id)
+        recording_path(cfg.db_path, call_id).unlink(missing_ok=True)
         bus.publish({"type": "call_deleted", "id": call_id})
         return {"deleted": call_id}
+
+    @app.get("/api/calls/{call_id}/recording")
+    async def call_recording(call_id: str, download: bool = False) -> FileResponse:
+        """The call's audio, both sides, as an .m4a (app/recording.py)."""
+        call = store.get_call(call_id)
+        path = recording_path(cfg.db_path, call_id)
+        if call is None or not path.is_file():
+            raise HTTPException(status_code=404, detail="This call has no recording.")
+        day = (call["started_at"] or "")[:10]
+        return FileResponse(
+            path,
+            media_type="audio/mp4",
+            filename=f"oscar-call-{day}-{call_id[:8]}.m4a",
+            content_disposition_type="attachment" if download else "inline",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
 
     @app.get("/api/calls/{call_id}")
     async def get_call(call_id: str) -> dict:
@@ -592,6 +668,146 @@ def create_app(
                 status_code=400, detail="Nothing was said on this call, so there is nothing to sum up."
             )
         return {"call": call}
+
+    # Call lists (app/campaigns.py)
+
+    def campaign_or_404(campaign_id: str) -> dict:
+        campaign = store.get_campaign(campaign_id)
+        if campaign is None:
+            raise HTTPException(status_code=404, detail="Call list not found.")
+        return campaign
+
+    def publish_campaign(campaign_id: str) -> dict:
+        campaign = campaign_or_404(campaign_id)
+        bus.publish({"type": "campaign", "campaign": campaign})
+        return campaign
+
+    @app.get("/api/campaigns")
+    async def list_campaigns() -> dict:
+        return {"campaigns": store.list_campaigns(), "do_not_call": store.get_do_not_call()}
+
+    @app.post("/api/campaigns/preview")
+    async def preview_contacts(preview: ContactsPreview) -> dict:
+        """What a CSV holds, before it is made into a list: how many numbers, and what is wrong."""
+        try:
+            code = country_code(preview.country_code)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        contacts, headings, problems = await asyncio.to_thread(parse_contacts, preview.contacts_csv, code)
+        known = {field_key(heading) for heading in headings}
+        unknown = sorted({name for template in preview.templates for name in placeholders(template)} - known)
+        return {
+            "count": len(contacts),
+            "headings": headings,
+            "sample": contacts[:3],
+            "problems": problems[:CSV_PROBLEMS_SHOWN],
+            "more_problems": max(0, len(problems) - CSV_PROBLEMS_SHOWN),
+            "unknown_placeholders": unknown,
+        }
+
+    @app.post("/api/campaigns")
+    async def create_campaign(request: CampaignRequest) -> dict:
+        contacts, _, _ = await asyncio.to_thread(parse_contacts, request.contacts_csv, request.country_code)
+        if not contacts:
+            raise HTTPException(status_code=400, detail="The CSV has no phone numbers Oscar can call.")
+        if request.start:
+            require_agent_keys()
+            missing = cfg.missing_phone_settings()
+            if missing:
+                raise HTTPException(
+                    status_code=400, detail=f"Call lists need phone calls set up: add {', '.join(missing)} to the .env file."
+                )
+        campaign = store.create_campaign(
+            {
+                "name": request.name,
+                "status": "running" if request.start else "paused",
+                "instructions": request.instructions,
+                "greeting": request.greeting,
+                "voicemail_message": request.voicemail_message,
+                "calling_from": minutes_of(request.calling_from),
+                "calling_until": minutes_of(request.calling_until),
+                "timezone": request.timezone,
+                "at_once": request.at_once,
+            },
+            contacts,
+        )
+        bus.publish({"type": "campaign", "campaign": campaign})
+        return {"campaign": campaign}
+
+    @app.get("/api/campaigns/{campaign_id}")
+    async def get_campaign(campaign_id: str) -> dict:
+        campaign = campaign_or_404(campaign_id)
+        return {
+            "campaign": {
+                **campaign,
+                "calling_from": clock_of(campaign["calling_from"]),
+                "calling_until": clock_of(campaign["calling_until"]),
+            },
+            "contacts": store.campaign_contacts(campaign_id),
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/pause")
+    async def pause_campaign(campaign_id: str) -> dict:
+        campaign = campaign_or_404(campaign_id)
+        if campaign["status"] == "running":
+            store.update_campaign(campaign_id, status="paused", status_detail="")
+        return {"campaign": publish_campaign(campaign_id)}
+
+    @app.post("/api/campaigns/{campaign_id}/resume")
+    async def resume_campaign(campaign_id: str) -> dict:
+        campaign = campaign_or_404(campaign_id)
+        if campaign["status"] in ("paused", "done", "stopped"):
+            require_agent_keys()
+            missing = cfg.missing_phone_settings()
+            if missing:
+                raise HTTPException(
+                    status_code=400, detail=f"Call lists need phone calls set up: add {', '.join(missing)} to the .env file."
+                )
+            store.update_campaign(campaign_id, status="running", status_detail="")
+        return {"campaign": publish_campaign(campaign_id)}
+
+    @app.post("/api/campaigns/{campaign_id}/stop")
+    async def stop_campaign(campaign_id: str) -> dict:
+        """No more calls from the list. Calls going on now carry on to their end."""
+        campaign_or_404(campaign_id)
+        store.update_campaign(campaign_id, status="stopped", status_detail="")
+        return {"campaign": publish_campaign(campaign_id)}
+
+    @app.post("/api/campaigns/{campaign_id}/call-again")
+    async def call_again(campaign_id: str) -> dict:
+        """Put the numbers that went to voicemail, did not answer, were busy or failed back in line."""
+        campaign = campaign_or_404(campaign_id)
+        again = store.call_again(campaign_id, CALL_AGAIN_STATUSES)
+        if again and campaign["status"] == "done":
+            # A finished list starts again; a paused one waits for Resume.
+            ready = not cfg.missing_phone_settings() and not cfg.missing_agent_keys()
+            store.update_campaign(campaign_id, status="running" if ready else "paused", status_detail="")
+        return {"again": again, "campaign": publish_campaign(campaign_id)}
+
+    @app.delete("/api/campaigns/{campaign_id}")
+    async def delete_campaign(campaign_id: str) -> dict:
+        campaign = campaign_or_404(campaign_id)
+        if campaign["counts"].get("calling"):
+            raise HTTPException(status_code=409, detail="Wait for its calls going on now to end, then delete it.")
+        store.delete_campaign(campaign_id)
+        bus.publish({"type": "campaign_deleted", "id": campaign_id})
+        return {"deleted": campaign_id}
+
+    @app.post("/api/do-not-call")
+    async def add_do_not_call(entry: DoNotCallEntry) -> dict:
+        try:
+            number = phone_number(entry.number)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        store.add_do_not_call(number)
+        bus.publish({"type": "do_not_call"})
+        return {"do_not_call": store.get_do_not_call()}
+
+    @app.delete("/api/do-not-call/{number}")
+    async def remove_do_not_call(number: str) -> dict:
+        store.remove_do_not_call(number)
+        bus.publish({"type": "do_not_call"})
+        return {"do_not_call": store.get_do_not_call()}
 
     @app.get("/api/whatsapp")
     async def whatsapp() -> dict:

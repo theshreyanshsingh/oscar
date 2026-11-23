@@ -5,7 +5,7 @@ Every change is saved to the store and published to the dashboard.
 
 import asyncio
 import secrets
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 from loguru import logger
@@ -13,6 +13,7 @@ from loguru import logger
 from app.events import EventBus
 from app.store import (
     OPEN_STATUSES,
+    AgentSettings,
     CallKind,
     CallStatus,
     MessageRole,
@@ -48,6 +49,10 @@ class CallManager:
         self._workers: dict[str, Any] = {}
         self._tasks: set[asyncio.Task] = set()
         self._phone_tokens: dict[str, tuple[str, asyncio.TimerHandle]] = {}
+        # What a running call does when a voicemail answers it (app/agent.py).
+        self._voicemail: dict[str, Callable[[], Awaitable[None]]] = {}
+        # Settings made for one phone call before it connects (a call list's), by call.
+        self._agents: dict[str, AgentSettings] = {}
 
     # Records
 
@@ -58,9 +63,10 @@ class CallManager:
         status: CallStatus = "connecting",
         from_number: str = "",
         to_number: str = "",
+        campaign_id: str = "",
     ) -> dict:
         call = self.store.create_call(
-            kind, status=status, from_number=from_number, to_number=to_number
+            kind, status=status, from_number=from_number, to_number=to_number, campaign_id=campaign_id
         )
         self._publish_call(call)
         return call
@@ -86,6 +92,7 @@ class CallManager:
     def finish(self, call_id: str, error: str = "") -> None:
         # A finished call must not be able to start its audio stream afterwards.
         self._drop_phone_token(call_id)
+        self._agents.pop(call_id, None)
         self.set_status_if_open(call_id, "failed" if error else "ended", error)
 
     def note_error(self, call_id: str, error: str) -> None:
@@ -161,6 +168,26 @@ class CallManager:
 
     def unregister_worker(self, call_id: str) -> None:
         self._workers.pop(call_id, None)
+        self._voicemail.pop(call_id, None)
+
+    def use_agent(self, call_id: str, agent: AgentSettings) -> None:
+        """Run this phone call with these settings instead of the saved ones."""
+        self._agents[call_id] = agent
+
+    def agent_for(self, call_id: str) -> AgentSettings | None:
+        """The settings made for this call, if any (handed over once)."""
+        return self._agents.pop(call_id, None)
+
+    def on_voicemail(self, call_id: str, leave: Callable[[], Awaitable[None]]) -> None:
+        self._voicemail[call_id] = leave
+
+    def voicemail_answered(self, call_id: str) -> bool:
+        """A voicemail answered the call: have it leave its message. False when it is not running here."""
+        leave = self._voicemail.pop(call_id, None)
+        if leave is None:
+            return False
+        self.spawn(leave())
+        return True
 
     @property
     def active_call_ids(self) -> list[str]:

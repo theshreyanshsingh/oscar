@@ -17,6 +17,7 @@ import time
 import wave
 from types import SimpleNamespace
 
+import av
 import httpx
 import numpy as np
 import pytest
@@ -428,9 +429,25 @@ async def test_a_call_is_summed_up_when_it_ends(server, monkeypatch):
             for e in recorder.events
             if e["type"] == "call" and e["call"]["id"] == call_id
         ]
-        assert seen[-3:] == [("ended", ""), ("ended", "writing"), ("ended", "ready")]
+        # (Its recording being saved is one more update, at the same stage.)
+        stages = [stage for i, stage in enumerate(seen) if i == 0 or stage != seen[i - 1]]
+        assert stages[-3:] == [("ended", ""), ("ended", "writing"), ("ended", "ready")]
         assert recorder.events[-1]["call"]["summary"] == call["summary"]
         await recorder.stop()
+
+        # Both sides of the call were recorded, to listen to in Call history.
+        async def recorded():
+            call = (await http.get(f"/api/calls/{call_id}")).json()["call"]
+            return call if call["recording_seconds"] > 0 else None
+
+        call = await wait_until(recorded, 15, "the call's recording")
+        audio = await http.get(f"/api/calls/{call_id}/recording")
+        assert audio.status_code == 200 and audio.headers["content-type"] == "audio/mp4"
+        with av.open(io.BytesIO(audio.content)) as played:
+            seconds = float(played.duration / av.time_base)
+            samples = np.concatenate([frame.to_ndarray().ravel() for frame in played.decode(audio=0)])
+        assert seconds == pytest.approx(call["recording_seconds"], abs=0.5) and seconds > 5
+        assert np.abs(samples).max() > 0.05  # sound, not silence: the caller and Oscar
 
         # And the summary was sent to the owner, once.
         ((sent_summary),) = delivered
@@ -1134,3 +1151,97 @@ async def test_settings_can_be_tried_on_a_call_before_they_are_saved(server):
         assert (await http.get("/api/agent")).json()["name"] == DEFAULT_AGENT.name
         await http.post(f"/api/calls/{call_id}/end")
     await peer.close()
+
+
+# Putting a phone caller through to a person
+
+TRANSFER_TO = "+61412345678"
+
+
+@pytest.fixture
+async def transfer_server(tmp_path):
+    """Oscar with a number to put callers through to. The stand-in decides the caller's
+    question is a request for a person (and that "Hi there", said first, is not)."""
+    openrouter = create_fake_openrouter(
+        heard=HEARD, heard_in_brief_clips=HEARD_FIRST, reply=REPLY, api_key=API_KEY, answer_delay=0.5, decision="TRANSFER"
+    )
+    openrouter_server = await serve(openrouter)
+    cfg = make_config(
+        tmp_path, openrouter_api_key=API_KEY, openrouter_base_url=f"http://127.0.0.1:{openrouter_server[0]}/api/v1"
+    )
+    app = create_app(cfg)
+    app.state.store.save_agent(DEFAULT_AGENT.model_copy(update={"transfer_number": TRANSFER_TO}))
+    oscar_server = await serve(app)
+    yield SimpleNamespace(base=f"http://127.0.0.1:{oscar_server[0]}", port=oscar_server[0], app=app, openrouter=openrouter)
+    await shut_down(oscar_server, openrouter_server)
+
+
+async def test_a_phone_caller_who_asks_for_a_person_is_put_through(transfer_server, monkeypatch):
+    from app import phone
+    from app.speech import TRANSFER_LINE
+    from tests.test_phone import FakeTwilioCalls, FakeTwilioClient
+
+    twilio = FakeTwilioCalls()
+    monkeypatch.setattr(phone, "_twilio_client", lambda cfg: FakeTwilioClient(twilio))
+    hang_ups: list[str] = []
+
+    async def record_hang_up(serializer):
+        hang_ups.append(serializer._call_sid)
+
+    monkeypatch.setattr(TwilioFrameSerializer, "_hang_up_call", record_hang_up)
+    server = transfer_server
+    store = server.app.state.store
+
+    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        signature = RequestValidator(TWILIO_AUTH_TOKEN).compute_signature(PUBLIC_URL + "/twilio/voice", INBOUND)
+        voice = await http.post("/twilio/voice", data=INBOUND, headers={"X-Twilio-Signature": signature})
+        _, params = stream_parameters(voice.text)
+        call_id = params["call_id"]
+
+        pcm, rate = read_wav(CALLER_CLIP)
+        audio = b"\x00\x00" * int(rate * 3.5) + pcm + b"\x00\x00" * (rate * 15)
+        caller_ulaw = await pcm_to_ulaw(audio, rate, 8000, create_stream_resampler())
+        stream_sid = "MZ" + "6" * 32
+        start = {
+            "event": "start",
+            "sequenceNumber": "1",
+            "streamSid": stream_sid,
+            "start": {
+                "streamSid": stream_sid,
+                "callSid": INBOUND["CallSid"],
+                "accountSid": "AC" + "0" * 32,
+                "customParameters": params,
+                "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1},
+            },
+        }
+        async with websockets.connect(f"ws://127.0.0.1:{server.port}/twilio/media") as ws:
+            await ws.send(json.dumps({"event": "connected", "protocol": "Call", "version": "1.0.0"}))
+            await ws.send(json.dumps(start))
+            # The audio stream plays the caller in real time, and Twilio would
+            # play Oscar's audio as it comes: here it is read and dropped.
+            reader = asyncio.create_task(ws.wait_closed())
+            for chunk_number, offset in enumerate(range(0, len(caller_ulaw), 160)):
+                payload = base64.b64encode(caller_ulaw[offset : offset + 160]).decode()
+                await ws.send(json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": payload}}))
+                await asyncio.sleep(0.02)
+                if twilio.updates:
+                    break
+            assert twilio.updates, store.get_messages(call_id)
+            # Twilio now has the call, and ends Oscar's audio stream.
+            await ws.close()
+            reader.cancel()
+
+        async def ended():
+            call = store.get_call(call_id)
+            return call if call["status"] == "ended" else None
+
+        call = await wait_until(ended, 20, "Oscar's side of the call to end")
+
+    ((sid, update),) = twilio.updates
+    assert sid == INBOUND["CallSid"] and f">{TRANSFER_TO}</Dial>" in update["twiml"]
+    said = [(m["role"], m["text"]) for m in store.get_messages(call_id)]
+    assert ("agent", TRANSFER_LINE) in said
+    assert ("note", f"Put the caller through to {TRANSFER_TO}.") in said
+    assert REPLY not in [text for role, text in said if role == "agent"]  # the reply to the question was dropped
+    assert (call["error"], call["transferred_to"]) == ("", TRANSFER_TO)
+    assert hang_ups == []  # Oscar stopping did not hang up the call it handed over

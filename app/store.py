@@ -104,6 +104,18 @@ SUMMARY_FIELDS_MAX = 8
 SUMMARY_FIELD_CHARS = 40
 # The most minutes a call can be let run.
 MAX_CALL_MINUTES = 120
+# The longest message Oscar leaves when a voicemail answers a call it makes.
+VOICEMAIL_MESSAGE_CHARS = 500
+
+
+def phone_number(value: str) -> str:
+    """A number Oscar can dial, as +<country code><number> (E.164). Raises ValueError otherwise."""
+    digits = re.sub(r"\D", "", value)
+    if not value.strip().startswith("+") or not 8 <= len(digits) <= 15 or digits[0] == "0":
+        raise ValueError("Write the number with its country code, like +61412345678.")
+    if re.search(r"[^\d\s()+.\-]", value):
+        raise ValueError("A phone number has only digits, spaces and + ( ) . -")
+    return "+" + digits
 
 
 class AgentSettings(BaseModel):
@@ -125,6 +137,17 @@ class AgentSettings(BaseModel):
     summary_fields: list[str] = Field(default_factory=list)
     # The longest a call runs: Oscar then says goodbye and hangs up (app/agent.py).
     max_call_minutes: int = Field(default=30, ge=1, le=MAX_CALL_MINUTES)
+    # Each call's audio is kept, both sides, to listen to in Call history (app/recording.py).
+    record_calls: bool = True
+    # Where a phone caller who asks for a person is put through to; "" when nobody is.
+    transfer_number: str = Field(default="", max_length=40)
+    # What Oscar says when a voicemail answers a call it makes; "" hangs up instead.
+    voicemail_message: str = Field(default="", max_length=VOICEMAIL_MESSAGE_CHARS)
+
+    @field_validator("transfer_number")
+    @classmethod
+    def transfer_number_can_be_dialled(cls, value: str) -> str:
+        return phone_number(value) if value else ""
 
     @field_validator("summary_fields")
     @classmethod
@@ -347,6 +370,40 @@ class Store:
                     number TEXT PRIMARY KEY,
                     added_at TEXT NOT NULL
                 );
+                -- People who asked not to be called again: call lists skip them (app/campaigns.py).
+                CREATE TABLE IF NOT EXISTS do_not_call (
+                    number TEXT PRIMARY KEY,
+                    added_at TEXT NOT NULL,
+                    call_id TEXT NOT NULL DEFAULT ''
+                );
+                -- Lists of numbers Oscar calls one after another (app/campaigns.py).
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    status_detail TEXT NOT NULL DEFAULT '',
+                    instructions TEXT NOT NULL DEFAULT '',
+                    greeting TEXT NOT NULL DEFAULT '',
+                    voicemail_message TEXT NOT NULL DEFAULT '',
+                    calling_from INTEGER NOT NULL,
+                    calling_until INTEGER NOT NULL,
+                    timezone TEXT NOT NULL,
+                    at_once INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS campaign_contacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL REFERENCES campaigns (id),
+                    number TEXT NOT NULL,
+                    fields TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'waiting',
+                    detail TEXT NOT NULL DEFAULT '',
+                    call_id TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS campaign_contacts_campaign
+                    ON campaign_contacts (campaign_id, status);
                 CREATE TABLE IF NOT EXISTS whatsapp_activity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_name TEXT NOT NULL,
@@ -379,6 +436,9 @@ class Store:
             ("agent", "script", "TEXT NOT NULL DEFAULT ''"),
             ("agent", "summary_fields", "TEXT NOT NULL DEFAULT '[]'"),
             ("agent", "max_call_minutes", "INTEGER NOT NULL DEFAULT 30"),
+            ("agent", "record_calls", "INTEGER NOT NULL DEFAULT 1"),
+            ("agent", "transfer_number", "TEXT NOT NULL DEFAULT ''"),
+            ("agent", "voicemail_message", "TEXT NOT NULL DEFAULT ''"),
             # Missed calls and a key running low are sent to the webhook too (app/notify.py).
             ("summary_webhook", "alerts", "INTEGER NOT NULL DEFAULT 1"),
             ("summary_webhook", "low_credit_alerted_at", "TEXT NOT NULL DEFAULT ''"),
@@ -387,6 +447,15 @@ class Store:
             ("calls", "cost", "REAL NOT NULL DEFAULT 0"),
             # When the owner ticked the call's to-do off ("" while it is still to do).
             ("calls", "follow_up_done_at", "TEXT NOT NULL DEFAULT ''"),
+            # Seconds of the call's audio kept in its recording; 0 when there is none (app/recording.py).
+            ("calls", "recording_seconds", "REAL NOT NULL DEFAULT 0"),
+            # "voicemail" or "fax" when a machine answered a call Oscar made ("" otherwise).
+            ("calls", "answered_by", "TEXT NOT NULL DEFAULT ''"),
+            # The number a caller was put through to, and how that went (app/phone.py).
+            ("calls", "transferred_to", "TEXT NOT NULL DEFAULT ''"),
+            ("calls", "transfer_result", "TEXT NOT NULL DEFAULT ''"),
+            # The call list it was made for (app/campaigns.py).
+            ("calls", "campaign_id", "TEXT NOT NULL DEFAULT ''"),
             *(("calls", column, "TEXT NOT NULL DEFAULT ''") for column in _SUMMARY_COLUMNS),
         ):
             columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
@@ -439,6 +508,9 @@ class Store:
             script=row["script"],
             summary_fields=_json_list(row["summary_fields"]),
             max_call_minutes=row["max_call_minutes"],
+            record_calls=bool(row["record_calls"]),
+            transfer_number=row["transfer_number"],
+            voicemail_message=row["voicemail_message"],
         )
 
     def save_agent(self, agent: AgentSettings) -> AgentSettings:
@@ -447,8 +519,9 @@ class Store:
                 """
                 INSERT INTO agent
                     (id, name, greeting, system_prompt, model, voice, accent, knowledge, script,
-                     summary_fields, max_call_minutes, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     summary_fields, max_call_minutes, record_calls, transfer_number,
+                     voicemail_message, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE SET
                     name = excluded.name,
                     greeting = excluded.greeting,
@@ -460,6 +533,9 @@ class Store:
                     script = excluded.script,
                     summary_fields = excluded.summary_fields,
                     max_call_minutes = excluded.max_call_minutes,
+                    record_calls = excluded.record_calls,
+                    transfer_number = excluded.transfer_number,
+                    voicemail_message = excluded.voicemail_message,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -473,6 +549,9 @@ class Store:
                     agent.script,
                     json.dumps(agent.summary_fields),
                     agent.max_call_minutes,
+                    int(agent.record_calls),
+                    agent.transfer_number,
+                    agent.voicemail_message,
                     utc_now(),
                 ),
             )
@@ -481,20 +560,37 @@ class Store:
     # Calls
 
     def create_call(
-        self, kind: CallKind, *, status: CallStatus, from_number: str = "", to_number: str = ""
+        self,
+        kind: CallKind,
+        *,
+        status: CallStatus,
+        from_number: str = "",
+        to_number: str = "",
+        campaign_id: str = "",
     ) -> dict:
         call_id = uuid.uuid4().hex
         with self._lock:
             self._db.execute(
                 """
-                INSERT INTO calls (id, kind, status, from_number, to_number, started_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO calls (id, kind, status, from_number, to_number, campaign_id, started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (call_id, kind, status, from_number, to_number, utc_now()),
+                (call_id, kind, status, from_number, to_number, campaign_id, utc_now()),
             )
         return self.get_call(call_id)
 
-    _UPDATABLE = {"status", "twilio_sid", "error", "ended_at", "follow_up_done_at", *_SUMMARY_COLUMNS}
+    _UPDATABLE = {
+        "status",
+        "twilio_sid",
+        "error",
+        "ended_at",
+        "follow_up_done_at",
+        "recording_seconds",
+        "answered_by",
+        "transferred_to",
+        "transfer_result",
+        *_SUMMARY_COLUMNS,
+    }
 
     def update_call(self, call_id: str, **fields) -> dict | None:
         unknown = set(fields) - self._UPDATABLE
@@ -608,6 +704,8 @@ class Store:
             try:
                 self._db.execute("DELETE FROM messages WHERE call_id = ?", (call_id,))
                 self._db.execute("DELETE FROM searches WHERE call_id = ?", (call_id,))
+                # A call list that made it keeps the number, without the call.
+                self._db.execute("UPDATE campaign_contacts SET call_id = '' WHERE call_id = ?", (call_id,))
                 cursor = self._db.execute("DELETE FROM calls WHERE id = ?", (call_id,))
             except BaseException:
                 self._db.execute("ROLLBACK")
@@ -689,6 +787,14 @@ class Store:
             "text": text,
             "created_at": created_at,
         }
+
+    def caller_spoke(self, call_id: str) -> bool:
+        """Whether anything the other person said on the call was written down."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM messages WHERE call_id = ? AND role = 'user' LIMIT 1", (call_id,)
+            ).fetchone()
+        return row is not None
 
     def get_messages(self, call_id: str) -> list[dict]:
         with self._lock:
@@ -801,6 +907,180 @@ class Store:
                 raise
             self._db.execute("COMMIT")
         return self.get_blocked_numbers()
+
+    # People who asked not to be called again (app/campaigns.py)
+
+    def get_do_not_call(self) -> list[dict]:
+        """[{"number", "added_at", "call_id"}], newest first. `number` is digits only."""
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM do_not_call ORDER BY added_at DESC, rowid DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def add_do_not_call(self, number: str, call_id: str = "") -> bool:
+        """Put a number (any format) on the list. Returns whether it was not on it already."""
+        digits = re.sub(r"\D", "", number)
+        if not digits:
+            return False
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT OR IGNORE INTO do_not_call (number, added_at, call_id) VALUES (?, ?, ?)",
+                (digits, utc_now(), call_id),
+            )
+        return cursor.rowcount > 0
+
+    def remove_do_not_call(self, number: str) -> bool:
+        digits = re.sub(r"\D", "", number)
+        with self._lock:
+            cursor = self._db.execute("DELETE FROM do_not_call WHERE number = ?", (digits,))
+        return cursor.rowcount > 0
+
+    # Call lists (app/campaigns.py)
+
+    _CAMPAIGN_UPDATABLE = {"name", "status", "status_detail", "instructions", "greeting",
+                           "voicemail_message", "calling_from", "calling_until", "timezone", "at_once"}
+
+    def create_campaign(self, fields: dict, contacts: list[dict]) -> dict:
+        """A new call list with its numbers ({"number", "fields"}), in one go."""
+        campaign_id = uuid.uuid4().hex
+        now = utc_now()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    """
+                    INSERT INTO campaigns (id, name, status, status_detail, instructions, greeting,
+                        voicemail_message, calling_from, calling_until, timezone, at_once,
+                        created_at, updated_at)
+                    VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        campaign_id, fields["name"], fields["status"], fields["instructions"],
+                        fields["greeting"], fields["voicemail_message"], fields["calling_from"],
+                        fields["calling_until"], fields["timezone"], fields["at_once"], now, now,
+                    ),
+                )
+                self._db.executemany(
+                    "INSERT INTO campaign_contacts (campaign_id, number, fields, updated_at) VALUES (?, ?, ?, ?)",
+                    [
+                        (campaign_id, contact["number"], json.dumps(contact["fields"], ensure_ascii=False), now)
+                        for contact in contacts
+                    ],
+                )
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+        return self.get_campaign(campaign_id)
+
+    def get_campaign(self, campaign_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
+            counts = self._db.execute(
+                "SELECT status, COUNT(*) AS n FROM campaign_contacts WHERE campaign_id = ? GROUP BY status",
+                (campaign_id,),
+            ).fetchall() if row else []
+        if row is None:
+            return None
+        campaign = dict(row)
+        campaign["counts"] = {count["status"]: count["n"] for count in counts}
+        campaign["total"] = sum(campaign["counts"].values())
+        return campaign
+
+    def list_campaigns(self) -> list[dict]:
+        """Every call list, newest first, each with how many of its numbers are at each stage."""
+        with self._lock:
+            ids = [row["id"] for row in self._db.execute(
+                "SELECT id FROM campaigns ORDER BY created_at DESC, rowid DESC"
+            ).fetchall()]
+        return [campaign for campaign in map(self.get_campaign, ids) if campaign]
+
+    def campaigns_with_status(self, status: str) -> list[dict]:
+        with self._lock:
+            ids = [row["id"] for row in self._db.execute(
+                "SELECT id FROM campaigns WHERE status = ? ORDER BY created_at, rowid", (status,)
+            ).fetchall()]
+        return [campaign for campaign in map(self.get_campaign, ids) if campaign]
+
+    def update_campaign(self, campaign_id: str, **fields) -> dict | None:
+        unknown = set(fields) - self._CAMPAIGN_UPDATABLE
+        if unknown:
+            raise ValueError(f"Cannot update call list fields: {sorted(unknown)}")
+        if fields:
+            assignments = ", ".join(f"{name} = ?" for name in fields)
+            with self._lock:
+                self._db.execute(
+                    f"UPDATE campaigns SET {assignments}, updated_at = ? WHERE id = ?",
+                    (*fields.values(), utc_now(), campaign_id),
+                )
+        return self.get_campaign(campaign_id)
+
+    def delete_campaign(self, campaign_id: str) -> bool:
+        """Forget a call list and its numbers. The calls it made stay in Call history."""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute("DELETE FROM campaign_contacts WHERE campaign_id = ?", (campaign_id,))
+                cursor = self._db.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _contact_dict(row: sqlite3.Row) -> dict:
+        contact = dict(row)
+        try:
+            fields = json.loads(contact["fields"] or "{}")
+        except ValueError:
+            fields = {}
+        contact["fields"] = fields if isinstance(fields, dict) else {}
+        return contact
+
+    def campaign_contacts(self, campaign_id: str, *, status: str = "", limit: int = 0) -> list[dict]:
+        """The list's numbers in the order they were given (only those at `status`, when given)."""
+        query = "SELECT * FROM campaign_contacts WHERE campaign_id = ?"
+        params: list = [campaign_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY id"
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._lock:
+            rows = self._db.execute(query, params).fetchall()
+        return [self._contact_dict(row) for row in rows]
+
+    def update_contact(self, contact_id: int, **fields) -> None:
+        unknown = set(fields) - {"status", "detail", "call_id"}
+        if unknown:
+            raise ValueError(f"Cannot update call list number fields: {sorted(unknown)}")
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        with self._lock:
+            self._db.execute(
+                f"UPDATE campaign_contacts SET {assignments}, updated_at = ? WHERE id = ?",
+                (*fields.values(), utc_now(), contact_id),
+            )
+
+    def call_again(self, campaign_id: str, statuses: tuple[str, ...]) -> int:
+        """Put the list's numbers at these stages back in line. Returns how many."""
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            cursor = self._db.execute(
+                f"UPDATE campaign_contacts SET status = 'waiting', detail = '', updated_at = ? "
+                f"WHERE campaign_id = ? AND status IN ({placeholders})",
+                (utc_now(), campaign_id, *statuses),
+            )
+        return cursor.rowcount
+
+    def contacts_calling(self) -> list[dict]:
+        """Numbers of any call list whose call is under way (or was, when the server stopped)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM campaign_contacts WHERE status = 'calling' ORDER BY id"
+            ).fetchall()
+        return [self._contact_dict(row) for row in rows]
 
     # WhatsApp (written by the WhatsApp process, read by the dashboard)
 

@@ -76,7 +76,10 @@ SUMMARY_INSTRUCTIONS = (
     '- "follow_up": what the owner now has to do because the other person asked for it or '
     "{name} promised it, as one short instruction to the owner such as \"Call Sam back about "
     'a quote for the fence." "" if nothing was asked for or promised that is still to be '
-    "done.{details}\n\n"
+    "done.\n"
+    '- "do_not_call": true only if the other person clearly asked not to be called again '
+    '("stop calling me", "take me off your list"), otherwise false. Asking to be called '
+    "later, or at another time, is false.{details}\n\n"
     "Use only what is in the transcript. Never guess a name, a number, a request or how the "
     "call ended when it is not there. In every sentence you write, the other person is "
     '"they" and {name} is "it", never "he" or "she": a name does not tell you which. The '
@@ -123,6 +126,8 @@ class CallSummary:
     follow_up: str = ""
     # What the call said about each thing the owner asked to have noted; only those it did.
     details: dict[str, str] = field(default_factory=dict)
+    # The other person asked not to be called again.
+    do_not_call: bool = False
 
 
 def summary_instructions(agent_name: str, fields: list[str] = ()) -> str:
@@ -189,6 +194,7 @@ def parse_summary(text: object, fields: list[str] = ()) -> CallSummary:
         callback_number=one_line(data.get("callback_number"), NUMBER_CHARS),
         follow_up=one_line(data.get("follow_up"), FOLLOW_UP_CHARS),
         details=parse_details(data.get("details"), list(fields)),
+        do_not_call=data.get("do_not_call") is True,
     )
 
 
@@ -421,9 +427,20 @@ async def _write_and_save(
         _summary_fields(cfg, call, agent, messages, meter),
         _research_fields(cfg, call, agent, messages, calls.store.get_searches(call["id"]), meter),
     )
+    opted_out = summary.pop("_do_not_call", False)
     done = calls.update(call["id"], **summary, **research)
+    if opted_out and done:
+        note_do_not_call(calls, done)
     if notify and done and done["summary_status"] == "ready":
         await send_to_owner(calls, done, agent)
+
+
+def note_do_not_call(calls: CallManager, call: dict) -> None:
+    """The other person on a phone call asked not to be called again: call lists skip their number."""
+    number = {"phone_inbound": call.get("from_number"), "phone_outbound": call.get("to_number")}.get(call["kind"])
+    if number and calls.store.add_do_not_call(number, call["id"]):
+        calls.add_message(call["id"], "note", f"Asked not to be called again: {number} is on the do-not-call list.")
+        calls.bus.publish({"type": "do_not_call"})
 
 
 async def send_to_owner(calls: CallManager, call: dict, agent: AgentSettings) -> None:
@@ -502,6 +519,8 @@ async def _summary_fields(
         logger.exception(f"Call {call_id}: writing its summary crashed")
         return {"summary_status": "failed", "summary_error": f"Something went wrong: {exc}"[:500]}
     return {
+        # Not a column: _write_and_save takes it out (the number goes on the do-not-call list).
+        "_do_not_call": note.do_not_call,
         "summary_status": "ready",
         "summary": note.summary,
         "caller_name": note.caller_name,

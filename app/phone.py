@@ -1,9 +1,14 @@
 """Real phone calls through Twilio.
 
 Inbound:  Twilio calls POST /twilio/voice when someone dials your number.
-Outbound: the dashboard calls place_outbound_call().
+Outbound: the dashboard (or a call list) calls place_outbound_call().
 Both answer with TwiML that streams the call audio to the /twilio/media
 WebSocket, where the voice agent takes over.
+
+On a call Oscar makes, Twilio listens for a voicemail (answering machine
+detection) and says what answered at /twilio/answered-by. A caller who asks for
+a person is handed to a <Dial> (put_call_through), and how that went comes to
+/twilio/put-through.
 
 Every request from Twilio is checked against its X-Twilio-Signature, and the
 media stream must present a one-time token minted for that call, so nobody
@@ -27,8 +32,9 @@ from app import agent as voice_agent
 from app.calls import AUDIO_NEVER_CONNECTED, CallManager, lines_busy
 from app.config import Config
 from app.costs import KeyCredit
-from app.store import OPEN_STATUSES, Store
-from app.summary import alert_if_missed
+from app.notify import not_put_through_payload
+from app.store import OPEN_STATUSES, AgentSettings, Store
+from app.summary import alert_if_missed, alert_owner
 
 # A blocked number matches a caller however the owner wrote it: "+61 412 345 678",
 # "0412 345 678" (without the country code, with the 0 before the area code) or
@@ -66,6 +72,21 @@ def is_blocked(caller: str, blocked: list[str]) -> bool:
 # What someone phoning in hears while Oscar is on as many calls as MAX_CALLS lets it.
 LINES_BUSY_LINE = "Sorry, all our lines are busy right now. Please call back in a few minutes. Goodbye."
 
+# How long the person a caller is put through to is rung before giving up.
+TRANSFER_RING_SECONDS = 25
+# What a caller hears when no one takes the call they were put through to.
+NOBODY_THERE_LINE = "Sorry, no one could take your call just now. We'll call you back as soon as we can. Goodbye."
+TRANSFER_RESULTS = {
+    "completed": "answered",
+    "answered": "answered",
+    "busy": "the line was busy",
+    "no-answer": "no one answered",
+    "failed": "the call could not be made",
+    "canceled": "the caller hung up first",
+}
+# What answered a call Oscar made, as Twilio's machine detection tells it.
+MACHINE_ANSWERS = {"machine_end_beep", "machine_end_silence", "machine_end_other", "machine_start"}
+
 FAILED_CALL_REASONS = {
     "busy": "The line was busy.",
     "no-answer": "No one answered.",
@@ -96,13 +117,24 @@ def _twilio_client(cfg: Config) -> Client:
     return Client(cfg.twilio_account_sid, cfg.twilio_auth_token)
 
 
-async def place_outbound_call(cfg: Config, calls: CallManager, to_number: str) -> dict:
+async def place_outbound_call(
+    cfg: Config,
+    calls: CallManager,
+    to_number: str,
+    *,
+    agent: AgentSettings | None = None,
+    campaign_id: str = "",
+) -> dict:
+    """Dial a number. `agent`: settings for this call only (a call list's), instead of the saved ones."""
     call = calls.create(
         "phone_outbound",
         status="connecting",
         from_number=cfg.twilio_phone_number,
         to_number=to_number,
+        campaign_id=campaign_id,
     )
+    if agent is not None:
+        calls.use_agent(call["id"], agent)
     token = calls.issue_phone_token(call["id"])
     try:
         twilio_call = await asyncio.to_thread(
@@ -116,6 +148,12 @@ async def place_outbound_call(cfg: Config, calls: CallManager, to_number: str) -
             status_callback=f"{cfg.public_url}/twilio/status?call_id={call['id']}",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             status_callback_method="POST",
+            # Oscar starts talking at once; if a voicemail answered, Twilio says so once
+            # its greeting has ended (at the beep), so the message lands on the recording.
+            machine_detection="DetectMessageEnd",
+            async_amd="true",
+            async_amd_status_callback=f"{cfg.public_url}/twilio/answered-by?call_id={call['id']}",
+            async_amd_status_callback_method="POST",
         )
     except Exception as exc:
         if isinstance(exc, TwilioRestException):
@@ -142,6 +180,23 @@ async def hang_up_phone_call(cfg: Config, twilio_sid: str) -> None:
     except Exception as exc:
         detail = exc.msg if isinstance(exc, TwilioRestException) else str(exc)
         raise PhoneCallError(f"Twilio could not hang up the call: {detail}") from exc
+
+
+async def put_call_through(cfg: Config, call_id: str, twilio_sid: str, number: str) -> None:
+    """Hand a call that is going on over to `number`: Twilio rings it and joins the caller to
+    whoever answers. Oscar's audio stream on the call ends."""
+    response = VoiceResponse()
+    response.dial(
+        number,
+        timeout=TRANSFER_RING_SECONDS,
+        action=f"{cfg.public_url}/twilio/put-through?call_id={call_id}",
+        method="POST",
+    )
+    try:
+        await asyncio.to_thread(_twilio_client(cfg).calls(twilio_sid).update, twiml=str(response))
+    except Exception as exc:
+        detail = exc.msg if isinstance(exc, TwilioRestException) else str(exc)
+        raise PhoneCallError(f"Twilio could not put the call through: {detail}") from exc
 
 
 async def _read_start_message(websocket: WebSocket) -> dict | None:
@@ -260,6 +315,65 @@ def create_phone_router(
                     alert_if_missed(calls, calls.store.get_call(call["id"]) or call, store.get_agent().name)
         return Response(status_code=204)
 
+    @router.post("/answered-by")
+    async def answered_by(request: Request) -> Response:
+        """What answered a call Oscar made: a person, a voicemail or a fax (Twilio's detection)."""
+        form = await signed_form(request)
+        if form is None:
+            return Response(status_code=403)
+        call = store.find_call_by_twilio_sid(form.get("CallSid", "")) or store.get_call(
+            request.query_params.get("call_id", "")
+        )
+        answer = form.get("AnsweredBy", "")
+        if call is None or call["kind"] != "phone_outbound":
+            return Response(status_code=204)
+        if answer in MACHINE_ANSWERS:
+            calls.update(call["id"], answered_by="voicemail")
+            if not calls.voicemail_answered(call["id"]):
+                logger.info(f"Call {call['id']}: a voicemail answered after the call ended")
+        elif answer == "fax":
+            calls.update(call["id"], answered_by="fax")
+            calls.add_message(call["id"], "note", "A fax machine answered, so the call was ended.")
+            if not await calls.hang_up(call["id"]) and call["twilio_sid"]:
+                try:
+                    await hang_up_phone_call(cfg, call["twilio_sid"])
+                except PhoneCallError as exc:
+                    logger.warning(f"Call {call['id']}: {exc}")
+        return Response(status_code=204)
+
+    @router.post("/put-through")
+    async def put_through_result(request: Request) -> Response:
+        """How putting a caller through went (the <Dial> has ended)."""
+        form = await signed_form(request)
+        if form is None:
+            return Response(status_code=403)
+        call = store.get_call(request.query_params.get("call_id", ""))
+        status = form.get("DialCallStatus", "")
+        result = TRANSFER_RESULTS.get(status, f"it ended as {status or 'unknown'}")
+        response = VoiceResponse()
+        if call is None:
+            return _twiml_response(str(response))
+        number = call["transferred_to"] or "the number in Agent settings"
+        if result == "answered":
+            try:
+                seconds = int(form.get("DialCallDuration") or 0)
+            except ValueError:
+                seconds = 0
+            minutes, seconds = divmod(seconds, 60)
+            length = f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
+            calls.update(call["id"], transfer_result="answered")
+            calls.add_message(call["id"], "note", f"Put through to {number}: they talked for {length}.")
+        else:
+            calls.update(call["id"], transfer_result=result)
+            calls.add_message(call["id"], "note", f"Put through to {number}, but {result}.")
+            alert_owner(
+                calls,
+                not_put_through_payload(call, agent_name=store.get_agent().name, number=number, result=result),
+            )
+            response.say(NOBODY_THERE_LINE)
+            response.hangup()
+        return _twiml_response(str(response))
+
     @router.websocket("/media")
     async def media_stream(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -302,15 +416,26 @@ def create_phone_router(
             ),
         )
         calls.update(call_id, twilio_sid=start["callSid"])
+
+        async def transfer(number: str) -> None:
+            # Twilio carries on with the call: stopping Oscar's side must not hang it up.
+            serializer._params.auto_hang_up = False
+            try:
+                await put_call_through(cfg, call_id, start["callSid"], number)
+            except PhoneCallError:
+                serializer._params.auto_hang_up = True
+                raise
+
         await voice_agent.run_call(
             transport=transport,
             call_id=call_id,
             calls=calls,
             cfg=cfg,
-            agent=store.get_agent(),
+            agent=calls.agent_for(call_id) or store.get_agent(),
             sample_rates=voice_agent.PHONE_SAMPLE_RATES,
             # A phone keeps its own speaker out of its microphone.
             barge_in=True,
+            transfer=transfer,
         )
 
     return router

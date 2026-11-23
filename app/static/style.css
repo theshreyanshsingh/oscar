@@ -2233,3 +2233,639 @@ button.danger-button:disabled {
   color: var(--navy);
   text-align: center;
 }
+
+/* ---------- call lists ---------- */
+
+.lists-off {
+  margin: 0 0 var(--gutter);
+  font-size: 14px;
+}
+
+.lists-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--gutter);
+}
+
+.list-form .panel-title {
+  margin-bottom: 20px;
+}
+
+.list-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px 24px;
+}
+
+.list-fields textarea {
+  min-height: 104px;
+  margin-top: 10px;
+}
+
+.optional {
+  margin-left: 6px;
+  color: var(--text-soft);
+  font-weight: 400;
+}
+
+.dropzone {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 18px;
+  border: 1.5px dashed rgba(54, 95, 224, 0.45);
+  border-radius: var(--radius);
+  background: var(--white);
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.dropzone:hover,
+.dropzone.over {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.dropzone.chosen {
+  border-style: solid;
+  border-color: var(--line);
+}
+
+/* The file input covers the zone, so a click or a drop anywhere on it lands there. */
+.dropzone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.dropzone:focus-within {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.dropzone-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20' fill='none' stroke='%23365fe0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M11.5 2.5H5.5a1.5 1.5 0 0 0-1.5 1.5v12a1.5 1.5 0 0 0 1.5 1.5h9a1.5 1.5 0 0 0 1.5-1.5V7z'/%3E%3Cpath d='M11.5 2.5V7H16M7 11h6M7 14h4'/%3E%3C/svg%3E")
+      no-repeat center / 20px 20px,
+    var(--blue-soft);
+}
+
+.dropzone.chosen .dropzone-icon {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20' fill='none' stroke='%231f9d63' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 10.5l3.5 3.5 7.5-8'/%3E%3C/svg%3E")
+      no-repeat center / 20px 20px,
+    #e8f6ef;
+}
+
+.dropzone-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dropzone-title {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropzone-note {
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.list-paste-toggle {
+  margin-top: 10px;
+}
+
+.list-preview {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--white);
+  border-left: 3px solid var(--green);
+}
+
+.list-preview.bad {
+  border-left-color: var(--red);
+}
+
+.list-preview .hint {
+  margin-top: 4px;
+}
+
+.preview-headline {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+.preview-warning {
+  margin: 8px 0 0;
+  color: #9a5b00;
+  font-size: 13px;
+}
+
+.preview-problems {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.hours {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hours input {
+  flex: 1;
+  min-width: 0;
+}
+
+.hours-and {
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.lists-side {
+  display: grid;
+  gap: var(--gutter);
+  min-width: 0;
+}
+
+.lists {
+  display: grid;
+  gap: var(--gutter);
+}
+
+.lists-empty {
+  padding: 28px 24px;
+}
+
+.list-card {
+  display: grid;
+  gap: 14px;
+  animation: line-in 0.5s var(--ease) both;
+}
+
+.list-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.list-name {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  overflow-wrap: anywhere;
+}
+
+.list-meta {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.list-state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 6px;
+  background: var(--lavender);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.list-state::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(0, 18, 46, 0.3);
+}
+
+.list-state.state-running {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.list-state.state-running::before {
+  background: var(--blue);
+  box-shadow: 0 0 0 0 rgba(54, 95, 224, 0.5);
+  animation: ping 2.4s var(--ease) infinite;
+}
+
+.list-state.state-done {
+  background: #e8f6ef;
+  color: #17734a;
+}
+
+.list-state.state-done::before {
+  background: var(--green);
+}
+
+.list-state.state-waiting::before {
+  background: #d98a1c;
+}
+
+.list-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--lavender-deep);
+}
+
+.list-bar .seg {
+  flex-basis: 0;
+  min-width: 4px;
+  transition: flex-grow 0.6s var(--ease);
+}
+
+.stage-answered {
+  --stage: var(--green);
+}
+
+.stage-voicemail {
+  --stage: #8b5cf6;
+}
+
+.stage-no_answer {
+  --stage: #d98a1c;
+}
+
+.stage-busy {
+  --stage: #e7b35a;
+}
+
+.stage-failed {
+  --stage: var(--red);
+}
+
+.stage-skipped {
+  --stage: rgba(0, 18, 46, 0.32);
+}
+
+.stage-calling {
+  --stage: var(--blue);
+}
+
+.stage-waiting {
+  --stage: var(--lavender-deep);
+}
+
+.list-bar .seg {
+  background: var(--stage);
+}
+
+.list-bar .seg.stage-calling {
+  background: linear-gradient(90deg, var(--blue), #7d9bff, var(--blue)) 0 0 / 200% 100%;
+  animation: bar-flow 1.6s linear infinite;
+}
+
+@keyframes bar-flow {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.list-tally {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.list-tally li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+}
+
+.list-tally strong {
+  color: var(--navy);
+  font-variant-numeric: tabular-nums;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--stage);
+}
+
+.dot.stage-waiting {
+  box-shadow: inset 0 0 0 1.5px rgba(0, 18, 46, 0.25);
+}
+
+.list-detail {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--lavender);
+  font-size: 13px;
+}
+
+.list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+}
+
+.list-actions button.secondary {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+.list-card .error {
+  margin: 0;
+}
+
+.list-people {
+  margin: 2px -24px -24px;
+  border-top: 1px solid var(--line);
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.list-people table {
+  font-size: 13px;
+}
+
+.list-people th:first-child,
+.list-people td:first-child {
+  padding-left: 24px;
+}
+
+.list-people .number {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.list-people > .hint {
+  margin: 0;
+  padding: 16px 24px;
+}
+
+.stage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.stage-chip::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--stage);
+}
+
+.stage-chip.stage-waiting::before {
+  box-shadow: inset 0 0 0 1.5px rgba(0, 18, 46, 0.25);
+}
+
+.stage-detail {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-soft);
+}
+
+/* ---------- do not call ---------- */
+
+.dnc .panel-title {
+  margin-bottom: 2px;
+}
+
+.dnc-list {
+  display: grid;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dnc-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-soft);
+  font-size: 14px;
+}
+
+.dnc-list li:last-child {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.dnc-list .number {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.dnc-since {
+  flex: 1;
+  color: var(--text-soft);
+  font-size: 12.5px;
+}
+
+.dnc-empty {
+  color: var(--text-soft);
+}
+
+.dnc-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.dnc-form input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  font-size: 16px;
+}
+
+/* ---------- a call's recording, how it ended, and tags in Call history ---------- */
+
+.call-outcome {
+  margin: 14px 0 0;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--blue-soft);
+  color: var(--navy);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.recording {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 14px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--white);
+}
+
+.recording-label {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.recording-label span {
+  margin-left: 4px;
+  color: var(--text-soft);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.recording audio {
+  width: 100%;
+  height: 36px;
+}
+
+.recording a.link {
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.recording a.link:hover {
+  opacity: 0.65;
+}
+
+.call-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.call-tag {
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--lavender);
+  color: var(--text-soft);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+@media (max-width: 960px) {
+  .lists-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* On phones each person is two short lines: who and their number, then how the call went. */
+@media (max-width: 720px) {
+  .list-people {
+    padding: 0 24px;
+  }
+
+  .list-people.table-wrap {
+    overflow-y: auto;
+  }
+
+  .list-people tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+    padding: 12px 0;
+  }
+
+  .list-people.table-wrap td[data-label] {
+    display: block;
+    padding: 0;
+  }
+
+  .list-people.table-wrap td[data-label]::before {
+    content: none;
+  }
+
+  .list-people th:first-child,
+  .list-people td:first-child {
+    padding-left: 0;
+  }
+
+  .list-people td:nth-child(1) {
+    font-weight: 500;
+  }
+
+  .list-people td:nth-child(2) {
+    grid-column: 2;
+    grid-row: 1;
+    color: var(--text-soft);
+  }
+
+  .list-people td:nth-child(3) {
+    grid-column: 1 / -1;
+  }
+
+  .list-people td:nth-child(4):not(:empty) {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 600px) {
+  .list-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .list-head {
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .list-bar .seg.stage-calling,
+  .list-state.state-running::before {
+    animation: none;
+  }
+}
+
+#agent-voicemail {
+  min-height: 76px;
+}

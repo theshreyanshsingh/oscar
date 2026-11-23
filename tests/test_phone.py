@@ -342,3 +342,153 @@ def test_media_stream_with_non_object_parameters(client):
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_text()
     assert closed.value.code == 1008
+
+
+# Voicemail on calls Oscar makes, and putting callers through to a person
+
+
+def test_calls_oscar_makes_listen_for_a_voicemail(client, twilio):
+    call = client.post("/api/calls/phone", json={"to": "+14155550123"}).json()["call"]
+    (request,) = twilio.created
+    assert request["machine_detection"] == "DetectMessageEnd"
+    assert request["async_amd"] == "true"
+    assert request["async_amd_status_callback"] == f"https://oscar.example.test/twilio/answered-by?call_id={call['id']}"
+
+
+def _outbound_call(cfg, sid: str = "CA" + "7" * 32) -> dict:
+    store = Store(cfg.db_path)
+    call = store.create_call("phone_outbound", status="live", to_number="+14155550123")
+    store.update_call(call["id"], twilio_sid=sid)
+    store.close()
+    return call
+
+
+@pytest.mark.parametrize("answer", ["machine_end_beep", "machine_end_silence", "machine_end_other"])
+def test_a_voicemail_answering_has_the_call_leave_its_message(client, cfg, answer):
+    call = _outbound_call(cfg)
+    left = []
+
+    async def leave():
+        left.append(call["id"])
+
+    client.app.state.calls.on_voicemail(call["id"], leave)
+    form = {"CallSid": "CA" + "7" * 32, "AnsweredBy": answer}
+    assert signed_post(client, f"/twilio/answered-by?call_id={call['id']}", form).status_code == 204
+    time.sleep(0.1)
+    assert left == [call["id"]]
+    assert client.get(f"/api/calls/{call['id']}").json()["call"]["answered_by"] == "voicemail"
+
+
+@pytest.mark.parametrize("answer", ["human", "unknown"])
+def test_a_person_answering_changes_nothing(client, cfg, answer):
+    call = _outbound_call(cfg)
+    left = []
+
+    async def leave():
+        left.append(call["id"])
+
+    client.app.state.calls.on_voicemail(call["id"], leave)
+    form = {"CallSid": "CA" + "7" * 32, "AnsweredBy": answer}
+    assert signed_post(client, f"/twilio/answered-by?call_id={call['id']}", form).status_code == 204
+    assert left == []
+    assert client.get(f"/api/calls/{call['id']}").json()["call"]["answered_by"] == ""
+
+
+def test_a_fax_answering_is_hung_up_on(client, cfg, twilio):
+    call = _outbound_call(cfg)
+    form = {"CallSid": "CA" + "7" * 32, "AnsweredBy": "fax"}
+    assert signed_post(client, f"/twilio/answered-by?call_id={call['id']}", form).status_code == 204
+    assert twilio.updates == [("CA" + "7" * 32, {"status": "completed"})]
+    detail = client.get(f"/api/calls/{call['id']}").json()
+    assert detail["call"]["answered_by"] == "fax"
+    assert detail["messages"][-1]["text"] == "A fax machine answered, so the call was ended."
+
+
+def test_what_answered_needs_twilios_signature(client, cfg):
+    call = _outbound_call(cfg)
+    form = {"CallSid": "CA" + "7" * 32, "AnsweredBy": "machine_end_beep"}
+    assert client.post(f"/twilio/answered-by?call_id={call['id']}", data=form).status_code == 403
+    assert client.get(f"/api/calls/{call['id']}").json()["call"]["answered_by"] == ""
+
+
+def test_putting_a_call_through_hands_it_to_a_dial(cfg, twilio):
+    import asyncio
+
+    asyncio.run(phone.put_call_through(cfg, "abc123", "CA" + "8" * 32, "+61412345678"))
+    ((sid, update),) = twilio.updates
+    assert sid == "CA" + "8" * 32
+    dial = ET.fromstring(update["twiml"]).find("./Dial")
+    assert dial.text == "+61412345678"
+    assert dial.get("action") == "https://oscar.example.test/twilio/put-through?call_id=abc123"
+    assert dial.get("timeout") == str(phone.TRANSFER_RING_SECONDS)
+
+
+def test_a_call_twilio_will_not_put_through_says_why(cfg, monkeypatch):
+    import asyncio
+
+    error = TwilioRestException(status=400, uri="/Calls", msg="Call is not in-progress.")
+    monkeypatch.setattr(phone, "_twilio_client", lambda cfg: FakeTwilioClient(FakeTwilioCalls(update_error=error)))
+    with pytest.raises(phone.PhoneCallError, match="not in-progress"):
+        asyncio.run(phone.put_call_through(cfg, "abc123", "CA" + "8" * 32, "+61412345678"))
+
+
+def _put_through_call(cfg) -> dict:
+    store = Store(cfg.db_path)
+    call = store.create_call("phone_inbound", status="ended", from_number="+14155550100")
+    store.update_call(call["id"], twilio_sid=INBOUND["CallSid"], transferred_to="+61412345678")
+    store.close()
+    return call
+
+
+def test_a_caller_put_through_and_answered_is_noted(client, cfg):
+    call = _put_through_call(cfg)
+    form = {"CallSid": INBOUND["CallSid"], "DialCallStatus": "completed", "DialCallDuration": "125"}
+    response = signed_post(client, f"/twilio/put-through?call_id={call['id']}", form)
+    assert response.status_code == 200
+    assert ET.fromstring(response.text).findall("*") == []  # nothing more: the call ends there
+    detail = client.get(f"/api/calls/{call['id']}").json()
+    assert detail["call"]["transfer_result"] == "answered"
+    assert detail["messages"][-1]["text"] == "Put through to +61412345678: they talked for 2 min 5 s."
+
+
+@pytest.mark.parametrize(
+    "status, result", [("no-answer", "no one answered"), ("busy", "the line was busy"), ("failed", "the call could not be made")]
+)
+def test_a_caller_put_through_to_nobody_hears_so_and_the_owner_is_told(client, cfg, monkeypatch, status, result):
+    alerts = []
+    monkeypatch.setattr(phone, "alert_owner", lambda calls, payload: alerts.append(payload))
+    call = _put_through_call(cfg)
+    form = {"CallSid": INBOUND["CallSid"], "DialCallStatus": status}
+    response = signed_post(client, f"/twilio/put-through?call_id={call['id']}", form)
+    root = ET.fromstring(response.text)
+    assert root.find("./Say").text == phone.NOBODY_THERE_LINE
+    assert root.find("./Hangup") is not None
+    detail = client.get(f"/api/calls/{call['id']}").json()
+    assert detail["call"]["transfer_result"] == result
+    assert detail["messages"][-1]["text"] == f"Put through to +61412345678, but {result}."
+    (alert,) = alerts
+    assert alert["event"] == "missed_call"
+    assert alert["text"] == (
+        f"Oscar tried to put +14155550100 through to +61412345678, but {result}. "
+        "They were told someone would call them back."
+    )
+
+
+def test_the_media_stream_gives_the_call_a_way_to_put_it_through(client, monkeypatch, twilio):
+    ran = {}
+
+    async def fake_run_call(**kwargs):
+        ran.update(kwargs)
+        await kwargs["transfer"]("+61412345678")
+
+    monkeypatch.setattr(phone.voice_agent, "run_call", fake_run_call)
+    _, params = stream_parameters(signed_post(client, "/twilio/voice", INBOUND).text)
+    with media_socket(client) as ws:
+        ws.send_json({"event": "connected", "protocol": "Call", "version": "1.0.0"})
+        ws.send_json(_start_message(params["call_id"], params["token"]))
+        time.sleep(0.3)
+    ((sid, update),) = twilio.updates
+    assert sid == INBOUND["CallSid"] and "<Dial" in update["twiml"]
+    # Oscar's side stopping must not hang up the call Twilio is putting through.
+    serializer = ran["transport"]._params.serializer
+    assert serializer._params.auto_hang_up is False

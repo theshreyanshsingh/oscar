@@ -269,6 +269,33 @@ ROUTER_INSTRUCTIONS_FACTS_ONLY = (
     "Today's date is {today}."
 )
 
+# When the owner has given a number to put callers through to (AgentSettings.transfer_number),
+# the decision can also be to put the caller through to a person.
+TRANSFER_RULE = (
+    "{name} can also put the caller through to a person. Choose that when the caller asks to "
+    "speak to a person, a human, a real person, the owner, a manager or someone by name, or "
+    "asks to be put through, transferred or connected. Do not choose it when they only ask "
+    "about someone, or for someone's number or details, or when {name} has just offered to "
+    "put them through and they have not said yes.\n\n"
+)
+TRANSFER_FORM = "When the caller is to be put through to a person, one line:\nTRANSFER\n"
+
+ROUTER_INSTRUCTIONS_TRANSFER_ONLY = (
+    "You decide whether a voice assistant called {name} should put the caller through to a "
+    "person on a live phone call. You hear the caller's latest turn. Earlier turns are given "
+    "as text.\n\n"
+    "{name}'s own instructions:\n"
+    '"""\n'
+    "{instructions}\n"
+    '"""\n'
+    "\n"
+    "Reply in plain text, in exactly one of these forms and nothing else.\n"
+    "When {name} answers by itself, one line:\n"
+    "NO\n"
+    "\n"
+    "Today's date is {today}."
+)
+
 FACTS_READER_INSTRUCTIONS = (
     "You write the next thing a voice assistant called {name} says on a live phone call. "
     "{name} answers calls for the people described in the fact sheet below, so it speaks "
@@ -341,6 +368,14 @@ class FactsRequest:
     """A turn to answer from the fact sheet."""
 
     question: str  # what the caller asked, in full
+
+
+@dataclass(frozen=True)
+class TransferRequest:
+    """A caller asking to be put through to a person."""
+
+
+Decision = SearchRequest | FactsRequest | TransferRequest | None
 
 
 def long_numbers(text: str) -> list[tuple[int, int]]:
@@ -576,10 +611,12 @@ def reading_matter(
     return "\n\n".join(parts)
 
 
-def parse_verdict(text: object) -> SearchRequest | FactsRequest | None:
+def parse_verdict(text: object) -> Decision:
     """The deciding model's reply as what to look up, or None for "Oscar answers by itself"."""
     text = text if isinstance(text, str) else ""
     lines = [line.strip().strip("<>").strip() for line in text.splitlines() if line.strip()]
+    if lines and lines[0].strip("*. ").upper() == "TRANSFER":
+        return TransferRequest()
     if len(lines) < 2:
         return None
     if lines[0].upper() == "FACTS":
@@ -609,6 +646,7 @@ class WebLookup:
         openrouter_base_url: str = DEFAULT_BASE_URL,
         client: httpx.AsyncClient | None = None,
         meter: CostMeter | None = None,
+        can_transfer: bool = False,
     ):
         self._firecrawl_api_key = firecrawl_api_key
         self._firecrawl_base_url = firecrawl_base_url
@@ -620,12 +658,16 @@ class WebLookup:
         self._findings: list[tuple[str, str]] = []
         self.can_search = bool(firecrawl_api_key)
         self.has_facts = bool(knowledge.strip())
-        if not self.has_facts:
+        self.can_transfer = can_transfer
+        if self.has_facts:
+            router = ROUTER_INSTRUCTIONS_WITH_FACTS if firecrawl_api_key else ROUTER_INSTRUCTIONS_FACTS_ONLY
+        elif firecrawl_api_key or not can_transfer:
             router = ROUTER_INSTRUCTIONS
-        elif firecrawl_api_key:
-            router = ROUTER_INSTRUCTIONS_WITH_FACTS
         else:
-            router = ROUTER_INSTRUCTIONS_FACTS_ONLY
+            router = ROUTER_INSTRUCTIONS_TRANSFER_ONLY
+        if can_transfer:
+            router = router.replace("{name}'s own instructions:", TRANSFER_RULE + "{name}'s own instructions:", 1)
+            router = router.replace("Today's date is {today}.", TRANSFER_FORM + "\nToday's date is {today}.", 1)
         self._router_instructions = router.format(
             name=agent_name, instructions=agent_instructions, today=today, knowledge=knowledge.strip()
         )
@@ -660,7 +702,7 @@ class WebLookup:
             return None
         return text if isinstance(text, str) else None
 
-    async def decide(self, earlier: list[dict], turn: dict) -> SearchRequest | FactsRequest | None:
+    async def decide(self, earlier: list[dict], turn: dict) -> Decision:
         """Whether the caller's turn (`turn`, as audio) needs a search or the fact sheet, given the talk so far.
 
         None means neither. Raises LookupFailed when the decision could not be had.
@@ -696,6 +738,8 @@ class WebLookup:
         if isinstance(verdict, FactsRequest) and not self.has_facts:
             return None
         if isinstance(verdict, SearchRequest) and not self._firecrawl_api_key:
+            return None
+        if isinstance(verdict, TransferRequest) and not self.can_transfer:
             return None
         return verdict
 

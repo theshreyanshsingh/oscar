@@ -25,6 +25,15 @@ const FIELD_LABELS = {
   instructions: "Chat instructions",
   summary_fields: "Note from each call",
   max_call_minutes: "Longest call",
+  transfer_number: "Put callers through to",
+  voicemail_message: "Voicemail message",
+  name_of_list: "Name",
+  contacts_csv: "People to call",
+  country_code: "Country code",
+  calling_from: "Calling from",
+  calling_until: "Calling until",
+  timezone: "Time zone",
+  at_once: "Calls at once",
 };
 const SERVICE_NAMES = { OPENROUTER_API_KEY: "OpenRouter" };
 const IDLE_CALL_TEXT = "Press Start call and allow the microphone.";
@@ -516,6 +525,7 @@ async function loadStatus() {
   }
 
   $("phone-ready").hidden = !status.phone.enabled;
+  showListsAvailability();
   $("blocked-panel").hidden = !status.phone.enabled;
   $("phone-setup").hidden = status.phone.enabled;
   if (status.phone.enabled) {
@@ -560,6 +570,9 @@ const AGENT_FIELDS = [
   "agent-knowledge",
   "agent-summary-fields",
   "agent-max-minutes",
+  "agent-transfer",
+  "agent-voicemail",
+  "agent-record",
 ];
 
 // What was measured for each accent (README.md, Agent settings; ACCENT_NOTE in
@@ -763,6 +776,9 @@ function agentFormBody() {
     // One a line; the server tidies blanks and repeats away.
     summary_fields: $("agent-summary-fields").value.split("\n"),
     max_call_minutes: Number($("agent-max-minutes").value),
+    transfer_number: $("agent-transfer").value,
+    voicemail_message: $("agent-voicemail").value,
+    record_calls: $("agent-record").checked,
   };
 }
 
@@ -823,6 +839,9 @@ function fillAgentForm(agent) {
   $("agent-knowledge").value = agent.knowledge || "";
   $("agent-summary-fields").value = (agent.summary_fields || []).join("\n");
   $("agent-max-minutes").value = String(agent.max_call_minutes || 30);
+  $("agent-transfer").value = agent.transfer_number || "";
+  $("agent-voicemail").value = agent.voicemail_message || "";
+  $("agent-record").checked = agent.record_calls !== false;
   countKnowledge();
   showAccentHint();
   updateCounters();
@@ -1118,6 +1137,19 @@ function summaryCell(call) {
   } else {
     cell.textContent = "—";
   }
+  const tags = outcomeTags(call);
+  if (tags.length) {
+    if (cell.textContent === "—") cell.textContent = "";
+    const line = document.createElement("span");
+    line.className = "call-tags";
+    for (const tag of tags) {
+      const chip = document.createElement("span");
+      chip.className = "call-tag";
+      chip.textContent = tag;
+      line.append(chip);
+    }
+    cell.append(line);
+  }
   return cell;
 }
 
@@ -1271,6 +1303,8 @@ async function openDetail(callId) {
   renderDetailActions(state.calls.get(callId));
   showError("detail-error", "");
   renderDetailSummary(null);
+  renderDetailRecording(null);
+  renderDetailOutcome(null);
   const container = $("detail-transcript");
   resetTranscript(container, "Loading…");
   renderCalls();
@@ -1288,6 +1322,8 @@ async function openDetail(callId) {
     }
     renderDetailSummary(call);
     renderDetailActions(call);
+    renderDetailRecording(call);
+    renderDetailOutcome(call);
     if (call.error) showError("detail-error", call.error);
   } catch (error) {
     showError("detail-error", error.message);
@@ -1452,6 +1488,9 @@ function onCallChanged(call) {
     renderDetailSummary(call);
     // The summary can bring a callback number the call did not have.
     renderDetailActions(call);
+    // The recording is ready a moment after the call ends.
+    renderDetailRecording(call);
+    renderDetailOutcome(call);
     if (call.error) showError("detail-error", call.error);
   }
   updateCallUi();
@@ -1494,6 +1533,7 @@ function connectEvents() {
     hideConnectionNotice();
     // Catch up on anything missed while disconnected.
     loadCalls().catch(() => {});
+    loadLists().catch(() => {});
     refreshDashboard();
     if (state.focusCallId) focusCall(state.focusCallId);
   };
@@ -1522,6 +1562,9 @@ function connectEvents() {
     else if (data.type === "message") onMessage(data.message);
     else if (data.type === "search") onSearch(data.search);
     else if (data.type === "call_deleted") onCallDeleted(data.id);
+    else if (data.type === "campaign") onListChanged(data.campaign);
+    else if (data.type === "campaign_deleted") onListDeleted(data.id);
+    else if (data.type === "do_not_call") loadLists().catch(() => {});
   };
 }
 
@@ -2455,6 +2498,710 @@ async function loadModelSuggestions() {
     "Calls always use OpenAI's gpt-audio, which hears and speaks in one step.";
 }
 
+
+// ---------- call lists (app/campaigns.py) ----------
+
+// Where each number of a list has got to, in the order the bar shows them.
+const PERSON_STAGES = [
+  ["answered", "answered"],
+  ["voicemail", "voicemail"],
+  ["no_answer", "no answer"],
+  ["busy", "busy"],
+  ["failed", "failed"],
+  ["skipped", "skipped"],
+  ["calling", "calling now"],
+  ["waiting", "to call"],
+];
+const STAGE_LABELS = {
+  waiting: "To call",
+  calling: "Calling",
+  answered: "Answered",
+  voicemail: "Voicemail",
+  no_answer: "No answer",
+  busy: "Busy",
+  failed: "Failed",
+  skipped: "Skipped",
+};
+const CALL_AGAIN_STAGES = ["voicemail", "no_answer", "busy", "failed"];
+const LIST_PREVIEW_DELAY_MS = 400;
+const DROP_NOTE = "or drop one here: a row for each person, with a column of phone numbers";
+
+const lists = {
+  byId: new Map(),
+  people: new Map(), // list id -> its numbers, for the lists showing them
+  open: new Set(), // lists showing their numbers
+  confirming: null, // the list asking "Delete?"
+  csv: "", // the file chosen (or rows pasted) for a new list
+  fileName: "",
+  previewTimer: null,
+  previewAsked: 0, // previews asked for: an older one that answers late is not shown
+  peopleTimers: new Map(),
+  doNotCall: [],
+};
+
+async function loadLists() {
+  const data = await api("/api/campaigns");
+  lists.byId = new Map(data.campaigns.map((campaign) => [campaign.id, campaign]));
+  lists.doNotCall = data.do_not_call;
+  renderLists();
+  renderDoNotCall();
+  for (const id of lists.open) loadPeople(id);
+}
+
+function showListsAvailability() {
+  const phone = Boolean(state.status && state.status.phone.enabled);
+  $("lists-off").hidden = phone;
+  $("list-start").disabled = !phone;
+}
+
+function clockRange(campaign) {
+  const from = typeof campaign.calling_from === "number" ? minutesToClock(campaign.calling_from) : campaign.calling_from;
+  const until = typeof campaign.calling_until === "number" ? minutesToClock(campaign.calling_until) : campaign.calling_until;
+  return `${from}–${until}`;
+}
+
+function minutesToClock(minutes) {
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function listState(campaign) {
+  if (campaign.status === "running") {
+    if ((campaign.status_detail || "").startsWith("Waiting")) return ["waiting", "Waiting for its hours"];
+    return ["running", (campaign.counts.calling || 0) > 0 ? "Calling" : "Running"];
+  }
+  return {
+    paused: ["paused", "Paused"],
+    done: ["done", "Done"],
+    stopped: ["stopped", "Stopped"],
+  }[campaign.status] || ["stopped", campaign.status];
+}
+
+function renderLists() {
+  const container = $("lists-cards");
+  const campaigns = [...lists.byId.values()].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  keepFocus(container, () => {
+    container.replaceChildren();
+    if (!campaigns.length) {
+      const empty = document.createElement("div");
+      empty.className = "lists-empty panel panel-outline";
+      const title = document.createElement("p");
+      title.className = "panel-title";
+      title.textContent = "No call lists yet";
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent =
+        "A list you start shows here as Oscar works through it: who answered, who got a voicemail, and a link to every call.";
+      empty.append(title, hint);
+      container.append(empty);
+      return;
+    }
+    for (const campaign of campaigns) container.append(listCard(campaign));
+  });
+}
+
+function listCard(campaign) {
+  const card = document.createElement("article");
+  card.className = "list-card panel panel-outline";
+  card.dataset.listId = campaign.id;
+  const counts = campaign.counts || {};
+  const total = campaign.total || 0;
+
+  const head = document.createElement("header");
+  head.className = "list-head";
+  const titles = document.createElement("div");
+  const name = document.createElement("h4");
+  name.className = "list-name";
+  name.textContent = campaign.name;
+  const meta = document.createElement("p");
+  meta.className = "list-meta";
+  const people = `${total} ${total === 1 ? "person" : "people"}`;
+  meta.textContent = `${people} · ${clockRange(campaign)} ${campaign.timezone.replace(/_/g, " ")} · ${campaign.at_once} at once`;
+  titles.append(name, meta);
+  const [stateKey, stateLabel] = listState(campaign);
+  const badge = document.createElement("span");
+  badge.className = `list-state state-${stateKey}`;
+  badge.textContent = stateLabel;
+  head.append(titles, badge);
+
+  // How far through the list Oscar is, a segment for each stage.
+  const done = total - (counts.waiting || 0) - (counts.calling || 0);
+  const bar = document.createElement("div");
+  bar.className = "list-bar";
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", String(total));
+  bar.setAttribute("aria-valuenow", String(done));
+  bar.setAttribute("aria-label", `${campaign.name}: ${done} of ${total} called`);
+  for (const [stage] of PERSON_STAGES) {
+    if (!counts[stage]) continue;
+    const segment = document.createElement("span");
+    segment.className = `seg stage-${stage}`;
+    segment.style.flexGrow = String(counts[stage]);
+    bar.append(segment);
+  }
+
+  const tally = document.createElement("ul");
+  tally.className = "list-tally";
+  for (const [stage, label] of PERSON_STAGES) {
+    if (!counts[stage]) continue;
+    const item = document.createElement("li");
+    const dot = document.createElement("i");
+    dot.className = `dot stage-${stage}`;
+    dot.setAttribute("aria-hidden", "true");
+    const figure = document.createElement("strong");
+    figure.textContent = String(counts[stage]);
+    item.append(dot, figure, document.createTextNode(` ${label}`));
+    tally.append(item);
+  }
+
+  card.append(head, bar, tally);
+  if (campaign.status_detail) {
+    const detail = document.createElement("p");
+    detail.className = "list-detail";
+    detail.textContent = campaign.status_detail;
+    card.append(detail);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "list-actions";
+  const button = (label, key, handler, className = "link") => {
+    const element = document.createElement("button");
+    element.type = "button";
+    element.className = className;
+    element.textContent = label;
+    element.dataset.key = `${key}-${campaign.id}`;
+    element.addEventListener("click", handler);
+    actions.append(element);
+    return element;
+  };
+  if (campaign.status === "running") {
+    button("Pause", "pause", () => listAction(campaign.id, "pause"), "secondary");
+  } else if (campaign.status === "paused") {
+    const resume = button("Resume", "resume", () => listAction(campaign.id, "resume"), "secondary");
+    resume.disabled = !(state.status && state.status.phone.enabled);
+  }
+  const again = CALL_AGAIN_STAGES.reduce((sum, stage) => sum + (counts[stage] || 0), 0);
+  if (again && campaign.status !== "stopped") {
+    button(`Call ${again} again`, "again", () => listAction(campaign.id, "call-again"));
+  }
+  const showing = lists.open.has(campaign.id);
+  const toggle = button(showing ? "Hide people" : "Show people", "people", () => togglePeople(campaign.id));
+  toggle.setAttribute("aria-expanded", String(showing));
+  if (campaign.status === "running" || campaign.status === "paused") {
+    button("Stop", "stop", () => listAction(campaign.id, "stop"));
+  }
+  if (!counts.calling) {
+    const remove = button("Delete", "delete", () => {
+      lists.confirming = campaign.id;
+      renderLists();
+      const yes = document.querySelector(`[data-key="delete-yes-${CSS.escape(campaign.id)}"]`);
+      if (yes) yes.focus();
+    });
+    remove.classList.add("danger");
+  }
+  card.append(actions);
+
+  if (lists.confirming === campaign.id) card.append(deleteListConfirm(campaign));
+  const error = document.createElement("p");
+  error.className = "error";
+  error.id = `list-error-${campaign.id}`;
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  card.append(error);
+  if (showing) card.append(peopleTable(campaign));
+  return card;
+}
+
+function deleteListConfirm(campaign) {
+  const box = document.createElement("div");
+  box.className = "detail-confirm";
+  box.setAttribute("role", "alertdialog");
+  const text = document.createElement("p");
+  text.textContent = `Delete "${campaign.name}" and its numbers? The calls it made stay in Call history.`;
+  const row = document.createElement("div");
+  row.className = "actions";
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = "danger-button";
+  yes.textContent = "Delete list";
+  yes.dataset.key = `delete-yes-${campaign.id}`;
+  yes.addEventListener("click", () => deleteList(campaign.id));
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "link";
+  no.textContent = "Keep it";
+  no.addEventListener("click", () => {
+    lists.confirming = null;
+    renderLists();
+  });
+  row.append(yes, no);
+  box.append(text, row);
+  return box;
+}
+
+function peopleTable(campaign) {
+  const wrap = document.createElement("div");
+  wrap.className = "list-people table-wrap";
+  const people = lists.people.get(campaign.id);
+  if (!people) {
+    const loading = document.createElement("p");
+    loading.className = "hint";
+    loading.textContent = "Loading…";
+    wrap.append(loading);
+    return wrap;
+  }
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  head.innerHTML = '<tr><th scope="col">Person</th><th scope="col">Number</th><th scope="col">Result</th><th scope="col"><span class="visually-hidden">Call</span></th></tr>';
+  const body = document.createElement("tbody");
+  for (const person of people) {
+    const row = document.createElement("tr");
+    const who = document.createElement("td");
+    who.dataset.label = "Person";
+    const values = Object.values(person.fields || {});
+    who.textContent = values[0] || "—";
+    const number = document.createElement("td");
+    number.dataset.label = "Number";
+    number.className = "number";
+    number.textContent = person.number;
+    const result = document.createElement("td");
+    result.dataset.label = "Result";
+    result.className = "wrap";
+    const chip = document.createElement("span");
+    chip.className = `stage-chip stage-${person.status}`;
+    chip.textContent = STAGE_LABELS[person.status] || person.status;
+    result.append(chip);
+    if (person.detail) {
+      const detail = document.createElement("span");
+      detail.className = "stage-detail";
+      detail.textContent = person.detail;
+      result.append(detail);
+    }
+    const open = document.createElement("td");
+    open.dataset.label = "";
+    if (person.call_id) {
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "link";
+      link.textContent = "Open call";
+      link.dataset.key = `open-${person.id}`;
+      link.setAttribute("aria-label", `Open the call to ${values[0] || person.number}`);
+      link.addEventListener("click", () => openDetail(person.call_id));
+      open.append(link);
+    }
+    row.append(who, number, result, open);
+    body.append(row);
+  }
+  table.append(head, body);
+  wrap.append(table);
+  return wrap;
+}
+
+async function loadPeople(id) {
+  try {
+    const { campaign, contacts } = await api(`/api/campaigns/${id}`);
+    lists.people.set(id, contacts);
+    lists.byId.set(id, campaign);
+    renderLists();
+  } catch (error) {
+    showError(`list-error-${id}`, error.message);
+  }
+}
+
+// A list's numbers change with each call: read them again, at most once a second.
+function refreshPeopleSoon(id) {
+  if (!lists.open.has(id) || lists.peopleTimers.has(id)) return;
+  lists.peopleTimers.set(
+    id,
+    setTimeout(() => {
+      lists.peopleTimers.delete(id);
+      loadPeople(id);
+    }, 1000),
+  );
+}
+
+function togglePeople(id) {
+  if (lists.open.has(id)) {
+    lists.open.delete(id);
+    renderLists();
+    return;
+  }
+  lists.open.add(id);
+  renderLists();
+  loadPeople(id);
+}
+
+async function listAction(id, action) {
+  try {
+    const { campaign } = await api(`/api/campaigns/${id}/${action}`, { method: "POST" });
+    lists.byId.set(id, campaign);
+    renderLists();
+    refreshPeopleSoon(id);
+  } catch (error) {
+    showError(`list-error-${id}`, error.message);
+  }
+}
+
+async function deleteList(id) {
+  try {
+    await api(`/api/campaigns/${id}`, { method: "DELETE" });
+    onListDeleted(id);
+  } catch (error) {
+    lists.confirming = null;
+    renderLists();
+    showError(`list-error-${id}`, error.message);
+  }
+}
+
+function onListChanged(campaign) {
+  const known = lists.byId.get(campaign.id);
+  lists.byId.set(campaign.id, { ...known, ...campaign });
+  renderLists();
+  refreshPeopleSoon(campaign.id);
+}
+
+function onListDeleted(id) {
+  lists.byId.delete(id);
+  lists.people.delete(id);
+  lists.open.delete(id);
+  if (lists.confirming === id) lists.confirming = null;
+  renderLists();
+}
+
+// ----- a new list -----
+
+function fillTimeZones() {
+  const select = $("list-timezone");
+  const own = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  let zones = [];
+  try {
+    zones = Intl.supportedValuesOf("timeZone");
+  } catch {
+    zones = [];
+  }
+  if (!zones.includes(own)) zones.unshift(own);
+  if (!zones.includes("UTC")) zones.push("UTC");
+  for (const zone of zones) {
+    const option = document.createElement("option");
+    option.value = zone;
+    option.textContent = zone.replace(/_/g, " ");
+    select.append(option);
+  }
+  select.value = own;
+}
+
+function listTemplates() {
+  return [$("list-instructions").value, $("list-greeting").value, $("list-voicemail").value];
+}
+
+function previewListSoon() {
+  clearTimeout(lists.previewTimer);
+  lists.previewTimer = setTimeout(previewList, LIST_PREVIEW_DELAY_MS);
+}
+
+async function previewList() {
+  const box = $("list-preview");
+  const asked = ++lists.previewAsked;
+  if (!lists.csv.trim()) {
+    box.hidden = true;
+    return;
+  }
+  try {
+    const preview = await api("/api/campaigns/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        contacts_csv: lists.csv,
+        country_code: $("list-country").value,
+        templates: listTemplates(),
+      }),
+    });
+    if (asked !== lists.previewAsked) return;
+    renderPreview(preview);
+  } catch (error) {
+    if (asked !== lists.previewAsked) return;
+    box.hidden = false;
+    box.className = "list-preview bad";
+    box.textContent = error.message;
+  }
+}
+
+function renderPreview(preview) {
+  const box = $("list-preview");
+  box.replaceChildren();
+  box.hidden = false;
+  box.className = `list-preview ${preview.count ? "good" : "bad"}`;
+  const headline = document.createElement("p");
+  headline.className = "preview-headline";
+  headline.textContent = preview.count
+    ? `${preview.count} ${preview.count === 1 ? "person" : "people"} to call`
+    : "No one Oscar can call yet";
+  box.append(headline);
+  const columns = preview.headings.filter((heading) => preview.sample.some((person) => heading in person.fields));
+  if (columns.length) {
+    const known = document.createElement("p");
+    known.className = "hint";
+    known.textContent = `Oscar is told each person's ${columns.join(", ")}. Use them as ${columns
+      .slice(0, 2)
+      .map((heading) => `{{${heading.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}}}`)
+      .join(" or ")}.`;
+    box.append(known);
+  }
+  if (preview.unknown_placeholders.length) {
+    const unknown = document.createElement("p");
+    unknown.className = "preview-warning";
+    const names = preview.unknown_placeholders.map((name) => `{{${name}}}`).join(", ");
+    unknown.textContent = `${names} ${preview.unknown_placeholders.length === 1 ? "is not a column" : "are not columns"} in the file, so ${preview.unknown_placeholders.length === 1 ? "it" : "they"} would be left blank.`;
+    box.append(unknown);
+  }
+  if (preview.problems.length) {
+    const list = document.createElement("ul");
+    list.className = "preview-problems";
+    for (const problem of preview.problems.slice(0, 5)) {
+      const item = document.createElement("li");
+      item.textContent = problem;
+      list.append(item);
+    }
+    const more = preview.problems.length - 5 + preview.more_problems;
+    if (more > 0) {
+      const item = document.createElement("li");
+      item.textContent = `And ${more} more row${more === 1 ? "" : "s"} left out.`;
+      list.append(item);
+    }
+    box.append(list);
+  }
+}
+
+async function chooseListFile(file) {
+  if (!file) return;
+  if (file.size > 2_000_000) {
+    showError("list-error", "That file is over 2 MB. Split it into smaller lists.");
+    return;
+  }
+  showError("list-error", "");
+  lists.csv = await file.text();
+  lists.fileName = file.name;
+  $("list-file-name").textContent = file.name;
+  $("list-drop-note").textContent = "Choose another file, or drop one here";
+  $("list-drop").classList.add("chosen");
+  if (!$("list-name").value.trim()) {
+    const name = file.name.replace(/\.(csv|txt)$/i, "").replace(/[_-]+/g, " ").trim();
+    $("list-name").value = name.charAt(0).toUpperCase() + name.slice(1);
+  }
+  $("list-paste").value = lists.csv;
+  await previewList();
+}
+
+function setUpListForm() {
+  fillTimeZones();
+  const drop = $("list-drop");
+  $("list-file").addEventListener("change", (event) => chooseListFile(event.target.files[0]));
+  for (const type of ["dragenter", "dragover"]) {
+    drop.addEventListener(type, (event) => {
+      event.preventDefault();
+      drop.classList.add("over");
+    });
+  }
+  for (const type of ["dragleave", "drop"]) {
+    drop.addEventListener(type, () => drop.classList.remove("over"));
+  }
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault();
+    chooseListFile(event.dataTransfer.files[0]);
+  });
+  $("list-paste-toggle").addEventListener("click", () => {
+    const paste = $("list-paste");
+    paste.hidden = !paste.hidden;
+    $("list-paste-toggle").setAttribute("aria-expanded", String(!paste.hidden));
+    $("list-paste-toggle").textContent = paste.hidden ? "Paste the rows instead" : "Hide the rows";
+    if (!paste.hidden) paste.focus();
+  });
+  $("list-paste").addEventListener("input", () => {
+    lists.csv = $("list-paste").value;
+    if (lists.fileName) {
+      lists.fileName = "";
+      $("list-file-name").textContent = "Rows pasted below";
+    }
+    previewListSoon();
+  });
+  for (const id of ["list-country", "list-instructions", "list-greeting", "list-voicemail"]) {
+    $(id).addEventListener("input", previewListSoon);
+  }
+  $("list-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    createList(true);
+  });
+  $("list-save").addEventListener("click", () => createList(false));
+  $("dnc-form").addEventListener("submit", addDoNotCall);
+}
+
+async function createList(start) {
+  showError("list-error", "");
+  if (!$("list-name").value.trim()) {
+    showError("list-error", "Give the list a name.");
+    $("list-name").focus();
+    return;
+  }
+  if (!lists.csv.trim()) {
+    showError("list-error", "Choose a CSV file of people to call, or paste the rows.");
+    return;
+  }
+  const button = start ? $("list-start") : $("list-save");
+  button.disabled = true;
+  try {
+    const { campaign } = await api("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("list-name").value,
+        contacts_csv: lists.csv,
+        country_code: $("list-country").value,
+        instructions: $("list-instructions").value,
+        greeting: $("list-greeting").value,
+        voicemail_message: $("list-voicemail").value,
+        calling_from: $("list-from").value,
+        calling_until: $("list-until").value,
+        timezone: $("list-timezone").value,
+        at_once: Number($("list-at-once").value),
+        start,
+      }),
+    });
+    lists.byId.set(campaign.id, campaign);
+    renderLists();
+    resetListForm();
+    const card = document.querySelector(`[data-list-id="${CSS.escape(campaign.id)}"]`);
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (error) {
+    showError("list-error", error.message);
+  } finally {
+    button.disabled = false;
+    showListsAvailability();
+  }
+}
+
+function resetListForm() {
+  for (const id of ["list-name", "list-paste", "list-instructions", "list-greeting", "list-voicemail"]) $(id).value = "";
+  $("list-file").value = "";
+  lists.csv = "";
+  lists.fileName = "";
+  $("list-file-name").textContent = "Choose a CSV file";
+  $("list-drop-note").textContent = DROP_NOTE;
+  $("list-drop").classList.remove("chosen");
+  $("list-preview").hidden = true;
+}
+
+// ----- do not call -----
+
+function formatNumberDigits(digits) {
+  return `+${digits}`;
+}
+
+function renderDoNotCall() {
+  const list = $("dnc-list");
+  keepFocus(list, () => {
+    list.replaceChildren();
+    if (!lists.doNotCall.length) {
+      const empty = document.createElement("li");
+      empty.className = "dnc-empty";
+      empty.textContent = "No one yet.";
+      list.append(empty);
+      return;
+    }
+    for (const entry of lists.doNotCall) {
+      const item = document.createElement("li");
+      const number = document.createElement("span");
+      number.className = "number";
+      number.textContent = formatNumberDigits(entry.number);
+      const since = document.createElement("span");
+      since.className = "dnc-since";
+      since.textContent = entry.call_id ? `asked on a call, ${formatTime(entry.added_at)}` : `added ${formatTime(entry.added_at)}`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "link";
+      remove.textContent = "Remove";
+      remove.dataset.key = `dnc-${entry.number}`;
+      remove.setAttribute("aria-label", `Remove ${formatNumberDigits(entry.number)} from Do not call`);
+      remove.addEventListener("click", () => removeDoNotCall(entry.number));
+      item.append(number, since, remove);
+      list.append(item);
+    }
+  });
+}
+
+async function addDoNotCall(event) {
+  event.preventDefault();
+  showError("dnc-error", "");
+  const field = $("dnc-number");
+  if (!field.value.trim()) return;
+  try {
+    const { do_not_call } = await api("/api/do-not-call", { method: "POST", body: JSON.stringify({ number: field.value }) });
+    lists.doNotCall = do_not_call;
+    field.value = "";
+    renderDoNotCall();
+  } catch (error) {
+    showError("dnc-error", error.message);
+  }
+}
+
+async function removeDoNotCall(digits) {
+  try {
+    const { do_not_call } = await api(`/api/do-not-call/${encodeURIComponent(digits)}`, { method: "DELETE" });
+    lists.doNotCall = do_not_call;
+    renderDoNotCall();
+  } catch (error) {
+    showError("dnc-error", error.message);
+  }
+}
+
+// ---------- a call's recording, and how it ended ----------
+
+function renderDetailRecording(call) {
+  const box = $("detail-recording");
+  const audio = $("detail-audio");
+  if (!call || !(call.recording_seconds > 0)) {
+    box.hidden = true;
+    if (audio.getAttribute("src")) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    return;
+  }
+  const source = `/api/calls/${call.id}/recording`;
+  // Not set again on each update of the call: that would stop it playing.
+  if (audio.getAttribute("src") !== source) {
+    audio.setAttribute("src", source);
+    audio.setAttribute("aria-label", `Recording of the ${callLabel(call)}`);
+  }
+  $("detail-recording-length").textContent = formatDuration(Math.floor(call.recording_seconds));
+  $("detail-download").href = `${source}?download=1`;
+  box.hidden = false;
+}
+
+function callOutcome(call) {
+  if (!call) return "";
+  if (call.answered_by === "voicemail") return "A voicemail answered this call.";
+  if (call.answered_by === "fax") return "A fax machine answered this call.";
+  if (call.transferred_to) {
+    const how = call.transfer_result === "answered" ? "and they answered" : call.transfer_result ? `but ${call.transfer_result}` : "";
+    return `Put through to ${call.transferred_to}${how ? `, ${how}` : ""}.`;
+  }
+  return "";
+}
+
+function renderDetailOutcome(call) {
+  const text = callOutcome(call);
+  $("detail-outcome").textContent = text;
+  $("detail-outcome").hidden = !text;
+}
+
+function outcomeTags(call) {
+  const tags = [];
+  if (call.answered_by === "voicemail") tags.push("Voicemail");
+  if (call.transferred_to) tags.push(call.transfer_result && call.transfer_result !== "answered" ? "Not put through" : "Put through");
+  if (call.campaign_id) tags.push("Call list");
+  if (call.recording_seconds > 0) tags.push("Recorded");
+  return tags;
+}
+
 // ---------- start ----------
 
 async function init() {
@@ -2491,6 +3238,7 @@ async function init() {
   listMicrophones();
   setUpRing();
   setUpSpendChart();
+  setUpListForm();
   loadModelSuggestions();
   // Unsaved settings are not lost to a closed tab or a reload without a warning.
   window.addEventListener("beforeunload", (event) => {
@@ -2525,7 +3273,15 @@ async function init() {
   try {
     // Status first: it fills the voice and accent lists, which the agent form then selects from.
     await loadStatus();
-    await Promise.all([loadAgent(), loadCalls(), loadWhatsApp(), loadSpending(), loadNotify(), loadBlocked()]);
+    await Promise.all([
+      loadAgent(),
+      loadCalls(),
+      loadWhatsApp(),
+      loadSpending(),
+      loadNotify(),
+      loadBlocked(),
+      loadLists(),
+    ]);
     // A link to one call (?call=…) opens it.
     const linked = new URL(location.href).searchParams.get("call");
     if (linked) openDetail(linked);

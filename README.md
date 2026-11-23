@@ -6,7 +6,11 @@ has a simple dashboard for talking to the agent, changing how it behaves and
 reading past calls.
 
 - **Browser calls:** click *Start call* and talk through your microphone.
-- **Phone calls:** call your Twilio number, or have Oscar dial any number.
+- **Phone calls:** call your Twilio number, or have Oscar dial any number. A
+  caller who asks for a person is put through to you, and a call that reaches
+  a voicemail gets a message left on it.
+- **Call lists:** give Oscar a spreadsheet of people and it calls them all, a
+  few at a time in the hours you choose, and notes how each call went.
 - **Web search:** ask for the weather, the news or a price, on a call or in
   WhatsApp, and Oscar looks it up (with a Firecrawl key).
 - **WhatsApp:** add Oscar's number to a group and ask it things with *@oscar*.
@@ -16,6 +20,7 @@ reading past calls.
   caller's name and number if they left them, and what is left for you to do.
 - **Research notes:** what Oscar's web searches on the call found, written
   down with links to the pages.
+- **Recordings:** both sides of every call, to play back in Call history.
 - **Dashboard:** live transcript, agent settings, call history with summaries
   and transcripts.
 
@@ -437,6 +442,86 @@ call numbers you have verified in the Twilio console.
 If your tunnel address changes (for example after restarting ngrok), update
 `PUBLIC_URL`, restart Oscar, and update the Twilio webhook.
 
+### Putting callers through to you
+
+Put your own number in **Put callers through to** (Agent settings, with the
+country code). When a phone caller asks for a person ("can I speak to someone",
+"put me through to the manager", "is Sarah there?"), Oscar says "Of course.
+I'll put you through now, please hold.", and Twilio rings that number and joins
+the caller to whoever answers. Leave the box blank and Oscar handles every call
+itself.
+
+- If no one answers within 25 seconds (or the line is busy), the caller hears
+  that someone will call them back, the call's transcript says what happened,
+  and you get an alert (see Summaries sent to you).
+- The call's transcript notes when it was put through and how long the two of
+  you talked. Its recording and length cover Oscar's part only.
+- The same per-turn decision that sends a question to a web search or the fact
+  sheet (`app/search.py`) decides whether the caller asked for a person. Tried
+  on 2026-11-23 with eleven caller lines said by a real voice, under three
+  set-ups (putting through only, with web search, with search and a fact sheet):
+  33 of 33 decided as wanted. The six requests for a person were put through
+  every time. "What's the manager's name?", "Can you give me the owner's phone
+  number?", "Are you a real person?" and two other questions never were.
+- With a number set, Oscar is told it can put callers through and what to say.
+  On five real replies its Indian accent held every time (three listening
+  models each), and asked for a person it said "Of course, I'll put you through
+  now." each time. A reply like that is followed through even when the decision
+  missed it; one that only offers ("Would you like me to put you through?") is not.
+- A browser call cannot be put through: one that would be ends there, with a
+  note, so you can try how Oscar handles it with **Try in a call**.
+
+### When a voicemail answers
+
+On every call Oscar makes, Twilio listens for an answering machine. Oscar
+starts talking straight away as usual; if a voicemail answered, Twilio says so
+once its greeting has ended (at the beep), and Oscar then leaves the
+**Voicemail message** from Agent settings, in its own voice, and hangs up.
+With no message set it hangs up without one. A fax machine is hung up on.
+The call is marked as reaching a voicemail in Call history. Twilio charges a
+small amount a call for the detection (Answering Machine Detection, on
+Twilio's pricing page).
+
+## Call lists
+
+Under **Lists**, give Oscar a CSV file (a spreadsheet saved as CSV, or rows
+pasted in) with a column of phone numbers. The column is found by its heading
+("Phone", "Mobile", "Number"...), or without headings by what is in it. Every
+other column is about the person: a name, what they ordered, a date.
+
+- **What these calls are about** is added to Oscar's call instructions for the
+  list's calls. A column's heading in double braces, such as `{{name}}`, becomes
+  that person's value, here and in the list's own **Opening line** and
+  **Voicemail message** (left blank, Agent settings' own are used). Oscar is
+  also told each person's whole row.
+- Before you start, the dashboard says how many people it found, which rows it
+  left out and why (no number, not a number, the same number twice), and any
+  `{{column}}` that is not in the file.
+- **Country code:** numbers written without one (`0412 345 678`) get it, with
+  the leading 0 dropped. Without it, such numbers are left out.
+- **Calls at once** (1 to 5) and **Call between** hours in **Their time zone**:
+  Oscar only dials within those hours, and always leaves one line of
+  `MAX_CALLS` free for people calling in.
+- Each person is marked **answered**, **voicemail**, **no answer**, **busy**,
+  **failed** or **skipped**, with a link to the call. **Call N again** puts the
+  voicemails, no-answers, busy lines and failures back in line. **Pause**,
+  **Resume** and **Stop** do what they say; a call going on when you pause or
+  stop carries on to its end.
+- A list pauses itself, saying why, when the OpenRouter key runs low or the
+  Twilio settings are missing. It carries on where it was after a restart.
+- Numbers on **Blocked numbers**, and on **Do not call**, are skipped.
+
+**Do not call.** When someone tells Oscar on a call that they do not want to be
+called again ("stop calling me", "take me off your list"), the summary says so
+and their number goes on the Do not call list, with a note in the call's
+transcript. Asking to be called later does not count. Call lists skip these
+numbers; they can still call Oscar, and you can call them from the dashboard.
+You can add and remove numbers by hand under Lists.
+
+Each list call is an ordinary call in Call history (tagged **Call list**), with
+its transcript, summary, recording and cost. Trial Twilio accounts can only
+call numbers you have verified.
+
 ## WhatsApp (optional)
 
 Oscar can be a member of your WhatsApp groups. It answers when someone:
@@ -648,6 +733,14 @@ Two things to know:
   **Call a number**, so you can check it (and add the country code) before
   Oscar dials. Each line of the transcript shows how far into the call it was
   said (hover for the time of day).
+- **Recordings:** with **Record calls** on (Agent settings, on unless you turn
+  it off), each call's audio, both sides mixed, plays in the call's panel, with
+  **Download** for an `.m4a` file. They are kept in `data/call-recordings/`
+  (readable by you only) for 90 days, and go when you delete the call. They
+  are about a quarter of a megabyte a minute. In some places everyone on a call
+  has to be told it is recorded: if so, say it in the opening line.
+- **Tags** under a call's summary say when it reached a voicemail, was put
+  through to you (or could not be), came from a call list, or was recorded.
 - **Copy link** copies the dashboard's address with that call open
   (`/?call=…`): opening it, or reloading, opens the call again.
 - **Delete** removes a call for good, with its transcript, summary and what its
@@ -694,6 +787,9 @@ call when measured on 2026-11-12.
   **Write a summary** button when you open them. **Write the summary again**
   replaces one you are not happy with.
 - **A call where only Oscar spoke** is noted as that, without asking a model.
+- **Asked not to be called again:** the summary also says whether the other
+  person asked not to be called again, and if so their number goes on the Do
+  not call list (see Call lists).
 - A summary is a model's reading of the call. The transcript below it is the
   record.
 
@@ -833,6 +929,12 @@ Edit these on the dashboard. They apply from the next call.
   section above.
 - **Note from each call:** what else each call's summary should note, one on
   each line. See Call summaries.
+- **Put callers through to:** your number, for phone callers who ask for a
+  person. See Putting callers through to you.
+- **Voicemail message:** what Oscar leaves when a voicemail answers a call it
+  makes. Blank hangs up without one. See When a voicemail answers.
+- **Record calls:** keep each call's audio to play back in Call history (on by
+  default).
 - **Longest call:** the most minutes a call runs (30 by default, 1 to 120). At
   the limit Oscar says "I'm sorry, we've reached the time limit for this call.
   Please call back if there's anything else. Goodbye.", hangs up once that has
@@ -927,6 +1029,11 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   `data/recordings/`), Firecrawl searches, a text model writes a one or two sentence answer
   from what was found, and the speech model says that answer word for word. A
   question for the fact sheet goes the same way, without the search.
+- With a number to put callers through to, that same decision can also be
+  "put the caller through". Oscar's own reply is then dropped (or, if it has
+  already played and said so, kept), the caller hears that they are being put
+  through, and Twilio is handed the call with a `<Dial>` (`put_call_through` in
+  `app/phone.py`). Oscar's side of the call stops without hanging up.
 - What each search found is kept for the call (`WebLookup` in `app/search.py`).
   The text model that writes the answer is given the call so far, the earlier
   findings and the new results, and says first whether the results hold the
@@ -954,6 +1061,11 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   which is less than a turn and its reply take.
 - Each finished turn is saved to SQLite (`data/oscar.db`) and pushed to the
   dashboard live over Server-Sent Events (`/api/events`).
+- The recording is taken after the audio output, so it is what the caller
+  heard, mixed with what they said (Pipecat's `AudioBufferProcessor`). It goes
+  to a raw file every two seconds during the call and is encoded as AAC when
+  the call ends (`app/recording.py`), so a long call never sits in memory. A
+  recording cut off by the server stopping is finished the next time it starts.
 - With a script, a text model is asked after each reply which step Oscar is on
   (`app/script.py`), and the next step is put in the note the speech model
   reads before the caller's next turn, after the accent reminder.
@@ -998,6 +1110,9 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/summary.py` | The note written when a call ends: summary, name, number to call back, what to do |
 | `app/research.py` | The research notes written when a call ends: what its web searches found, checked against the pages |
 | `app/calls.py` | Call bookkeeping and live updates |
+| `app/campaigns.py` | Call lists: reading the CSV, each call's instructions, and the dialer |
+| `app/recording.py` | Call recordings: taken during the call, encoded when it ends, kept 90 days |
+| `app/backup.py` | The daily copy of the database |
 | `app/store.py` | SQLite storage and agent settings |
 | `app/config.py` | Settings from `.env` |
 | `app/static/` | The dashboard (plain HTML, CSS, JavaScript) |
@@ -1016,7 +1131,9 @@ Once a day Oscar copies its database (calls, transcripts, summaries, settings)
 to `data/backups/oscar-YYYY-MM-DD.db`, first a few minutes after it starts and
 then each day, and keeps the last 14. Only you can read them, like the database
 itself. They hold everything the database holds, so copy them somewhere else
-too if the computer itself could be lost.
+too if the computer itself could be lost. Call recordings are files beside the
+database (`data/call-recordings/`), not in it: copy that folder too if you want
+them kept.
 
 To go back to one: stop Oscar (and its WhatsApp copy, which uses the same
 database), delete `data/oscar.db-wal` and `data/oscar.db-shm` (what the old

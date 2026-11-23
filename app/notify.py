@@ -150,6 +150,16 @@ def missed_call_payload(call: dict, *, agent_name: str) -> dict:
     return {"text": text, "content": text, "event": "missed_call", "call": {field: call.get(field) for field in CALL_FIELDS}}
 
 
+def not_put_through_payload(call: dict, *, agent_name: str, number: str, result: str) -> dict:
+    """A caller asked for a person, and no one there took the call."""
+    who = call.get("from_number") if call.get("kind") == "phone_inbound" else call.get("to_number")
+    text = (
+        f"{agent_name} tried to put {who or 'a caller'} through to {number}, but {result}. "
+        "They were told someone would call them back."
+    )
+    return {"text": text, "content": text, "event": "missed_call", "call": {field: call.get(field) for field in CALL_FIELDS}}
+
+
 def low_credit_payload(credit: dict, *, agent_name: str) -> dict:
     """The OpenRouter key has less than LOW_CREDIT_DOLLARS left of its limit."""
     resets = f" It resets {credit['resets']}." if credit.get("resets") else ""

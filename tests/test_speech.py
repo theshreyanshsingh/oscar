@@ -38,7 +38,7 @@ from pipecat.tests.utils import SleepFrame, run_test
 
 from app import speech
 from app.script import ScriptLost
-from app.search import FactsRequest, LookupFailed, SearchRequest, Source
+from app.search import FactsRequest, LookupFailed, SearchRequest, Source, TransferRequest
 from app.speech import (
     ANSWER_ATTEMPTS,
     FACTS_FAILED_LINE,
@@ -46,6 +46,7 @@ from app.speech import (
     SEARCH_FAILED_LINE,
     SPOKEN_CHARS_PER_SECOND,
     STILL_LOOKING_LINE,
+    TRANSFER_LINE,
     TRANSCRIPT_LANGUAGE,
     TRANSCRIPT_MODEL,
     VOICE_MODEL,
@@ -139,8 +140,12 @@ class Lookup:
         cannot_decide: str = "",
         has_facts: bool = False,
         further: str = "",
+        can_search: bool = True,
+        can_transfer: bool = False,
     ):
         self.has_facts = has_facts
+        self.can_search = can_search
+        self.can_transfer = can_transfer
         self._further = further  # what a second search in the same turn is for, if there is one
         self.earlier: list[list] = []  # the call so far, as each lookup was given it
         self.facts_asked: list[tuple[str, list]] = []  # (question, earlier turns) of each
@@ -312,6 +317,12 @@ async def run_voice(
     async def on_script_lost(_, problem):
         script_losses.append(problem)
 
+    closed: list[str] = []  # each closing line heard, by kind ("goodbye", "transfer", "voicemail")
+
+    @service.event_handler("on_farewell_said")
+    async def on_farewell_said(_, kind):
+        closed.append(kind)
+
     down, up = await run_test(
         service,
         frames_to_send=frames,
@@ -341,6 +352,7 @@ async def run_voice(
         pages=pages,
         facts_failures=facts_failures,
         script_losses=script_losses,
+        closed=closed,
         searching=[frame.active for frame in up if isinstance(frame, SearchingFrame)],
     )
 
@@ -1935,3 +1947,119 @@ async def test_a_goodbye_said_otherwise_is_not_kept(tmp_path):
     )
     assert call.text == "Bye now!"
     assert list(tmp_path.iterdir()) == []
+
+
+# Closing lines: heard in full, and only then reported
+
+HEARD_PLAYING = [BotStartedSpeakingFrame(), SleepFrame(0.3), BotStoppedSpeakingFrame()]
+
+
+async def test_a_closing_line_is_reported_heard_only_after_its_own_audio_has_played():
+    call = await run_voice(
+        [
+            BotStartedSpeakingFrame(),  # a reply playing when the time ran out
+            FarewellFrame(FAREWELL),
+            BotStoppedSpeakingFrame(),  # ...stops: the goodbye has not been heard yet
+            SleepFrame(0.5),
+            *HEARD_PLAYING,  # the goodbye itself
+            SleepFrame(0.2),
+        ],
+        chat=spoken(FAREWELL),
+    )
+    assert call.text == FAREWELL
+    assert call.closed == ["goodbye"]
+
+
+async def test_the_caller_cannot_cut_a_closing_line_short():
+    call = await run_voice(
+        [FarewellFrame(FAREWELL, kind="voicemail"), SleepFrame(0.2), InterruptionFrame(), SleepFrame(2.5)],
+        chat=slowly(FAREWELL, gap=0.05),
+    )
+    assert call.text == FAREWELL  # all of it, though the caller (or a beep) spoke over it
+    assert call.of(InterruptionFrame) == []  # held back: passed on, it would silence the line
+
+
+async def test_a_message_made_for_one_person_is_not_kept(tmp_path):
+    await run_voice(
+        [FarewellFrame("Hi Sam, call us back.", kind="voicemail", keep=False), SleepFrame(0.5)],
+        chat=spoken("Hi Sam, call us back."),
+        recordings=Recordings(tmp_path),
+    )
+    assert list(tmp_path.iterdir()) == []
+    await run_voice(
+        [FarewellFrame("Please call us back.", kind="voicemail"), SleepFrame(0.5)],
+        chat=spoken("Please call us back."),
+        recordings=Recordings(tmp_path),
+    )
+    assert len(list(tmp_path.glob("voicemail-*.pcm"))) == 1
+
+
+# Putting a caller through to a person
+
+TRANSFER = TransferRequest()
+
+
+async def test_a_caller_who_asks_for_a_person_is_told_and_put_through():
+    lookup = Lookup(TRANSFER, can_search=False, can_transfer=True)
+    call = await run_voice(
+        [*caller_turn(), SleepFrame(0.8), *HEARD_PLAYING, SleepFrame(0.1), *caller_turn(), SleepFrame(0.6)],
+        chat=saying_lines(),
+        lookup=lookup,
+    )
+    assert call.errors == []
+    # The model's own reply was dropped for the line, and nothing after it was answered.
+    assert call.text == TRANSFER_LINE
+    # The reply asked for alongside the decision (dropped), then the line. No "one
+    # moment" line was recorded: this lookup never searches.
+    reply_request, line_request = call.chat
+    assert line_request["messages"][-1] == {"role": "user", "content": say_request(TRANSFER_LINE)}
+    assert all(say_request(HOLD_LINE) not in json.dumps(body) for body in call.chat)
+    assert call.closed == ["transfer"]
+
+
+async def test_a_reply_that_says_it_is_putting_the_caller_through_is_followed_through():
+    said = "Of course, I'll put you through now."
+    lookup = Lookup(None, can_search=False, can_transfer=True)  # the decision missed it
+    call = await run_voice([*caller_turn(), SleepFrame(0.8)], chat=saying_lines(said), lookup=lookup)
+    assert call.text == said  # not said twice over
+    assert call.closed == ["transfer"]
+
+
+async def test_a_reply_that_only_offers_to_put_the_caller_through_is_not_followed_through():
+    lookup = Lookup(None, can_search=False, can_transfer=True)
+    call = await run_voice(
+        [*caller_turn(), SleepFrame(0.8)], chat=saying_lines("Would you like me to put you through?"), lookup=lookup
+    )
+    assert call.closed == []
+
+
+async def test_a_decision_to_put_through_that_comes_after_the_reply_still_counts():
+    lookup = Lookup(TRANSFER, decide_after=1.2, can_search=False, can_transfer=True)
+    call = await run_voice(
+        [*caller_turn(), SleepFrame(2.0), *HEARD_PLAYING, SleepFrame(0.2)], chat=saying_lines("Sure."), lookup=lookup
+    )
+    assert call.text.startswith("Sure.") and call.text.endswith(TRANSFER_LINE)
+    assert call.closed == ["transfer"]
+
+
+async def test_without_a_number_to_put_through_to_nobody_is_put_through():
+    lookup = Lookup(None, can_transfer=False)
+    call = await run_voice(
+        [*caller_turn(), SleepFrame(0.8)], chat=saying_lines("Of course, I'll put you through now."), lookup=lookup
+    )
+    assert call.closed == []
+
+
+@pytest.mark.parametrize(
+    "said, putting_through",
+    [
+        ("Of course, I'll put you through now.", True),
+        ("Sure, let me transfer you.", True),
+        ("I'm connecting you with Sarah now.", True),
+        ("I'll put you on hold for a second.", False),
+        ("Would you like me to put you through?", False),
+        ("I can't put you through right now.", False),
+    ],
+)
+def test_what_counts_as_oscar_saying_it_is_putting_the_caller_through(said, putting_through):
+    assert bool(speech._PUTTING_THROUGH.search(said)) is putting_through

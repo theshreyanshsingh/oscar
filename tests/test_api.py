@@ -62,6 +62,9 @@ def test_agent_settings_default_then_save(client):
         "script": "\n1. Ask who is calling.\n2. Say goodbye.\n",
         "summary_fields": [" Budget ", "", "Preferred  time", "budget"],
         "max_call_minutes": 12,
+        "record_calls": False,
+        "transfer_number": "+61 412 345 678",
+        "voicemail_message": "Hi, it's Ava. Please call us back.",
     }
     saved = client.put("/api/agent", json=new)
     assert saved.status_code == 200
@@ -73,8 +76,17 @@ def test_agent_settings_default_then_save(client):
         "script": "1. Ask who is calling.\n2. Say goodbye.",
         # Tidied: no blank names, and the same thing (whatever its capitals) once.
         "summary_fields": ["Budget", "Preferred time"],
+        "transfer_number": "+61412345678",
     }
     assert client.get("/api/agent").json() == kept
+
+
+@pytest.mark.parametrize("number", ["0412 345 678", "+0412345678", "+61 412", "+61 412 CALL ME"])
+def test_a_number_to_put_callers_through_to_needs_its_country_code(client, number):
+    agent = {**client.get("/api/agent").json(), "transfer_number": number}
+    refused = client.put("/api/agent", json=agent)
+    assert refused.status_code == 422
+    assert client.get("/api/agent").json()["transfer_number"] == ""
 
 
 @pytest.mark.parametrize("minutes", [0, 121, "soon"])
