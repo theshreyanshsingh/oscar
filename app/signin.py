@@ -37,7 +37,6 @@ import json
 import math
 import re
 import secrets
-import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -73,10 +72,8 @@ SIGN_IN_FILES = ("/static/style.css", "/static/signin.js")
 SET_PASSWORD = ".venv/bin/python -m scripts.set_keys --password"
 
 SIGN_IN_FIRST = "Sign in to Oscar first."
-LOCKED = (
-    "Oscar is locked: other computers can reach it and its dashboard has no password. "
-    f"In Oscar's folder, run {SET_PASSWORD}, then restart Oscar."
-)
+# Said to anyone, so it names no command or file on the server: deploy.sh and the server log say how to set one.
+LOCKED = "Oscar is locked until its dashboard has a password. Whoever runs this Oscar sets one on its server."
 WRONG_PASSWORD = "That password is not right."
 NO_PASSWORD_TYPED = "Type the password."
 NOT_FROM_HERE = "This form has to be sent from Oscar's own page. Open Oscar's address and try again."
@@ -323,27 +320,12 @@ class FailedSignIns:
 # Pages
 
 
-def _restart_command() -> str:
-    return ".venv/bin/python -m scripts.autostart --restart" if sys.platform == "darwin" else "pm2 restart oscar"
-
-
 def _page(title: str, card: str, *, status: int, headers: dict | None = None) -> HTMLResponse:
     body = PAGE.substitute(title=html.escape(title), card=card)
     return HTMLResponse(
         body,
         status_code=status,
         headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "same-origin", **(headers or {})},
-    )
-
-
-def _command(command: str) -> str:
-    # Each word kept whole on a narrow screen (a browser would break "--password" after its dashes).
-    words = " ".join(f"<span>{html.escape(word)}</span>" for word in command.split(" "))
-    return (
-        '<div class="signin-command">'
-        f"<code>{words}</code>"
-        f'<button type="button" class="signin-copy" data-copy="{html.escape(command)}" hidden>Copy</button>'
-        "</div>"
     )
 
 
@@ -372,9 +354,7 @@ def sign_in_page(*, next_path: str = "/", message: str = "", note: str = "", sta
       </form>
       <details class="signin-help signin-rise">
         <summary>Forgot the password?</summary>
-        <p>Set a new one on the computer Oscar runs on, in Oscar's folder:</p>
-        {_command(SET_PASSWORD)}
-        <p>Then restart Oscar. Everyone signed in is signed out.</p>
+        <p>Ask whoever runs this Oscar to set a new one. Everyone signed in is then signed out.</p>
       </details>
     """
     return _page("Sign in", card, status=status, headers=headers)
@@ -388,16 +368,9 @@ def locked_page() -> HTMLResponse:
       <p class="signin-lead signin-rise">
         Other computers can reach this Oscar, so its dashboard stays locked until it has a password.
       </p>
-      <ol class="signin-steps signin-rise">
-        <li>
-          <p>In Oscar's folder on the computer it runs on, run this and type a password:</p>
-          {_command(SET_PASSWORD)}
-        </li>
-        <li>
-          <p>Restart Oscar, then reload this page:</p>
-          {_command(_restart_command())}
-        </li>
-      </ol>
+      <p class="signin-lead signin-rise">
+        Whoever runs this Oscar sets one on its server. Then reload this page to sign in.
+      </p>
       <p class="signin-foot signin-rise">Phone calls carry on while it is locked.</p>
     """
     return _page("Set a password", card, status=503)

@@ -454,7 +454,8 @@ def test_without_a_password_a_reachable_oscar_starts_but_is_locked(tmp_path, whe
             page = client.get(path)
             assert page.status_code == 503, path
             assert "Set a password first" in page.text
-            assert ".venv/bin/python -m scripts.set_keys --password" in page.text
+            # QA, 2026-11-23: the public is never shown a command or file on the server.
+            assert "set_keys" not in page.text and ".venv" not in page.text and "pm2" not in page.text
         for method, path in [("GET", "/api/calls"), ("GET", "/api/calls.csv"), ("GET", "/api/spending"),
                              ("PUT", "/api/agent"), ("POST", "/api/calls/browser")]:
             refused = client.request(method, path, json={})
@@ -556,3 +557,15 @@ def test_the_sign_in_page_is_not_cached_or_framed(tmp_path):
     assert page.headers["x-frame-options"] == "DENY"
     assert page.headers["content-type"].startswith("text/html")
     assert Path(ROOT_DIR / "app" / "pages" / "signin.html").exists()
+
+
+def test_forgot_the_password_is_generic_help_with_no_server_command(tmp_path):
+    cfg = make_config(tmp_path)
+    with TestClient(create_app(cfg), base_url="http://localhost", follow_redirects=False) as client:
+        page = client.get("/login")
+        assert page.status_code == 200
+        assert "Forgot the password?" in page.text
+        assert "Ask whoever runs this Oscar to set a new one." in page.text
+        for server_detail in ("set_keys", ".venv", "pm2", "autostart", "--password"):
+            assert server_detail not in page.text
+        assert "set_keys" not in LOCKED and ".venv" not in LOCKED
