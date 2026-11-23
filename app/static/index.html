@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=21" />
+    <link rel="stylesheet" href="/static/style.css?v=22" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -45,6 +45,15 @@
           <span class="pill" id="search-pill">Web search: checking…</span>
           <span class="pill" id="credit-pill" hidden>Key: checking…</span>
         </div>
+        <form class="sign-out" id="sign-out" method="post" action="/logout" hidden>
+          <button type="submit" class="sign-out-button" title="Sign out">
+            <svg class="sign-out-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M6 2.75H3.75a1 1 0 0 0-1 1v8.5a1 1 0 0 0 1 1H6" />
+              <path d="M10.25 5 13.25 8l-3 3M13 8H6.5" />
+            </svg>
+            <span class="sign-out-label">Sign out</span>
+          </button>
+        </form>
       </nav>
     </header>
 
@@ -954,6 +963,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=39"></script>
+    <script src="/static/app.js?v=40"></script>
   </body>
 </html>

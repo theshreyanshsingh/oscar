@@ -1,20 +1,31 @@
 """Save your keys and settings into .env without secrets showing on screen.
 
-    .venv/bin/python -m scripts.set_keys            # OpenRouter, and Firecrawl for web search
-    .venv/bin/python -m scripts.set_keys --phone    # Twilio, for phone calls
+    .venv/bin/python -m scripts.set_keys              # OpenRouter, and Firecrawl for web search
+    .venv/bin/python -m scripts.set_keys --phone      # Twilio, for phone calls
+    .venv/bin/python -m scripts.set_keys --password   # the dashboard's password
 
 OpenRouter's key is needed. Everything else is optional. Press Enter at a
-prompt to keep the value already saved.
+prompt to keep the value already saved. A new password takes effect when
+Oscar restarts, and signs everyone out.
 """
 
 import argparse
 import getpass
+import io
 import re
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
-from app.config import ROOT_DIR
+from dotenv import dotenv_values
+
+# Oscar's folder. (Not taken from app.config: this has to work straight after a
+# git pull, before deploy.sh has installed the new code's packages.)
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+# The dashboard's password is at least this long: anyone who finds the address can try it.
+PASSWORD_LEAST = 10
 
 
 def no_spaces(value: str) -> str:
@@ -33,12 +44,27 @@ def phone_number(value: str) -> str:
     return "Write the number in international format, such as +14155550123."
 
 
+def password_problem(value: str) -> str:
+    if len(value) < PASSWORD_LEAST:
+        return f"Use at least {PASSWORD_LEAST} characters."
+    if "${" in value:
+        return "Leave out ${ (the .env file reads it as the name of another setting)."
+    return ""
+
+
+def env_quoted(value: str) -> str:
+    """A value as .env keeps it whatever it holds (spaces, #, quotes): in single quotes."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 @dataclass(frozen=True)
 class Setting:
     name: str
     label: str
     secret: bool = True  # typed without showing on screen
     problem: Callable[[str], str] = no_spaces  # why a value will not do, or ""
+    twice: bool = False  # typed a second time, to catch a slip nobody could see
+    quoted: bool = False  # saved in quotes, so any character is kept as typed
 
 
 KEYS = [
@@ -56,6 +82,17 @@ PHONE = [
         "The number Oscar calls from, like +14155550123 (optional, and a number chosen on the dashboard comes first)",
         secret=False,
         problem=phone_number,
+    ),
+]
+
+# The dashboard's password (app/signin.py).
+PASSWORD = [
+    Setting(
+        "DASHBOARD_PASSWORD",
+        f"A password for the dashboard (at least {PASSWORD_LEAST} characters)",
+        problem=password_problem,
+        twice=True,
+        quoted=True,
     ),
 ]
 
@@ -89,6 +126,10 @@ def ask(setting: Setting) -> str:
         else:
             value = input(f"{setting.label}, then Enter: ").strip()
         problem = setting.problem(value) if value else ""
+        if not problem and value and setting.twice:
+            again = getpass.getpass("The same again, to check it, then Enter: ").strip()
+            if again != value:
+                problem = "The two were not the same."
         if not problem:
             return value
         print(f"  {problem} Try again, or press Enter to skip.")
@@ -106,7 +147,12 @@ def main(settings: list[Setting]) -> None:
         if not value:
             print(f"  {setting.name}: kept as it was")
             continue
-        text = with_value(text, setting.name, value)
+        saved = with_value(text, setting.name, env_quoted(value) if setting.quoted else value)
+        if dotenv_values(stream=io.StringIO(saved)).get(setting.name) != value:
+            # Never save a value Oscar would read back as something else.
+            print(f"  {setting.name}: not saved (the .env file would not keep it as typed)")
+            continue
+        text = saved
         shown = f"{len(value)} characters" if setting.secret else value
         print(f"  {setting.name}: saved ({shown})")
 
@@ -114,7 +160,21 @@ def main(settings: list[Setting]) -> None:
     print(f"Saved to {env_file}")
 
 
+def restart_note(settings: list[Setting]) -> str:
+    if settings is PASSWORD:
+        return (
+            "Restart Oscar so it asks for this password (everyone signed in is signed out): "
+            "pm2 restart oscar on a server, or .venv/bin/python -m scripts.autostart --restart on a Mac."
+        )
+    return "Restart Oscar so it reads them."
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--phone", action="store_true", help="the settings phone calls need")
-    main(PHONE if parser.parse_args().phone else KEYS)
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument("--phone", action="store_true", help="the settings phone calls need")
+    which.add_argument("--password", action="store_true", help="the dashboard's password")
+    args = parser.parse_args()
+    chosen = PHONE if args.phone else PASSWORD if args.password else KEYS
+    main(chosen)
+    print(restart_note(chosen))

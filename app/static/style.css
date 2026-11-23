@@ -3147,3 +3147,401 @@ button.secondary.small {
 #phone-ready .demo-grid {
   align-items: start;
 }
+
+/* ---------- sign out, in the bar (app/signin.py) ---------- */
+
+.sign-out {
+  flex: none;
+  /* Nearer the status pills than the bar's other gaps. */
+  margin: 0 0 0 -16px;
+}
+
+.sign-out-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--navy);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  white-space: nowrap;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.sign-out-button:hover {
+  border-color: var(--lavender-deep);
+  background: var(--lavender);
+}
+
+.sign-out-icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Where the bar is tight beside four status pills, the icon alone (its name stays for screen readers and as a tooltip). */
+@media (min-width: 961px) and (max-width: 1199px) {
+  .sign-out-button {
+    justify-content: center;
+    width: 34px;
+    padding: 0;
+  }
+
+  .sign-out-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 960px) {
+  /* After the status pills, before the menu button. */
+  .sign-out {
+    order: 2;
+  }
+}
+
+/* On phones it moves into the menu, under the status pills. */
+@media (max-width: 860px) {
+  .sign-out {
+    order: 6;
+    flex-basis: 100%;
+    margin-left: 0;
+    padding: 0 0 6px;
+  }
+
+  .nav:not(.open) .sign-out {
+    display: none;
+  }
+
+  .sign-out-button {
+    justify-content: center;
+    width: 100%;
+    height: 44px;
+    font-size: 15px;
+  }
+}
+
+/* ---------- the sign-in page (app/signin.py) ---------- */
+
+.signin-body {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.signin {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: var(--gutter);
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: var(--gutter);
+}
+
+.signin-art {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 28px 28px;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: #1c0b45;
+  color: var(--white);
+  isolation: isolate;
+}
+
+.signin-art-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.signin-art-brand .brand-name {
+  color: var(--white);
+}
+
+.signin-art-foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.signin-art-title {
+  max-width: 11ch;
+  margin: 0;
+  font-family: var(--serif);
+  font-size: clamp(40px, 5vw, 76px);
+  line-height: 0.98;
+  letter-spacing: -0.02em;
+}
+
+.signin-orb {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 6px;
+  animation-delay: 0.3s;
+}
+
+.signin-main {
+  display: grid;
+  place-items: center;
+  padding: 48px 24px;
+}
+
+.signin-card {
+  width: 100%;
+  max-width: 380px;
+}
+
+.signin-card .eyebrow {
+  margin-bottom: 12px;
+}
+
+.signin-title {
+  margin: 0;
+  color: var(--navy);
+  font-family: var(--serif);
+  font-size: clamp(48px, 5.2vw, 64px);
+  font-weight: 400;
+  line-height: 0.98;
+  letter-spacing: -0.02em;
+}
+
+.signin-lead {
+  margin: 14px 0 36px;
+  color: var(--text-soft);
+  font-size: 15px;
+}
+
+.signin-rise {
+  animation: blur-in 0.9s var(--ease) both;
+}
+
+.signin-card .signin-rise:nth-child(2) {
+  animation-delay: 0.06s;
+}
+
+.signin-card .signin-rise:nth-child(3) {
+  animation-delay: 0.12s;
+}
+
+.signin-card .signin-rise:nth-child(n + 4) {
+  animation-delay: 0.18s;
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 64px;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  border: none;
+  background: none;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 500;
+  transform: translateY(-50%);
+  transition: opacity 0.15s;
+}
+
+.password-toggle:hover {
+  opacity: 0.65;
+}
+
+.password-field input[aria-invalid="true"] {
+  border-bottom-color: var(--red);
+  background-image: linear-gradient(var(--red), var(--red));
+}
+
+.signin-message,
+.signin-note {
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.signin-message {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.signin-note {
+  background: var(--blue-soft);
+  color: var(--navy);
+}
+
+.signin-submit {
+  width: 100%;
+  height: 48px;
+  margin-top: 28px;
+  font-size: 15px;
+}
+
+.signin-help {
+  margin-top: 28px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.signin-help summary {
+  width: max-content;
+  color: var(--blue);
+  font-weight: 500;
+  cursor: pointer;
+  list-style: none;
+  transition: opacity 0.15s;
+}
+
+.signin-help summary::-webkit-details-marker {
+  display: none;
+}
+
+.signin-help summary:hover {
+  opacity: 0.65;
+}
+
+.signin-help p {
+  margin: 10px 0 0;
+}
+
+.signin-command {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 10px 10px 10px 14px;
+  border-radius: var(--radius);
+  background: var(--navy);
+  color: #dfe6ff;
+}
+
+.signin-command code {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  /* Lines break between the command's words, not inside them. */
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.signin-command code span {
+  white-space: nowrap;
+}
+
+.signin-copy {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--white);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background-color 0.2s;
+}
+
+.signin-copy:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.signin-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.signin-steps li {
+  position: relative;
+  padding-left: 36px;
+  counter-increment: step;
+}
+
+.signin-steps li + li {
+  margin-top: 22px;
+}
+
+.signin-steps li::before {
+  content: counter(step);
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.signin-steps p {
+  margin: 2px 0 0;
+  font-size: 14px;
+}
+
+.signin-foot {
+  margin: 28px 0 0;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+@media (max-width: 860px) {
+  .signin {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+  }
+
+  .signin-art {
+    min-height: 188px;
+    padding: 18px 20px 20px;
+  }
+
+  .signin-art-title {
+    font-size: clamp(30px, 8vw, 40px);
+  }
+
+  .signin-orb {
+    width: 48px;
+    height: 48px;
+  }
+
+  .signin-main {
+    place-items: start center;
+    padding: 36px 8px 40px;
+  }
+
+  .signin-lead {
+    margin-bottom: 28px;
+  }
+}

@@ -1,7 +1,8 @@
 """Lets in only people who signed in through Cloudflare Access, when it guards the dashboard.
 
-Oscar has no password of its own. On a server, put Cloudflare Access in front
-of its web address (README.md, "Protect the dashboard") and set
+An optional extra layer on top of the dashboard's own password (app/signin.py):
+when it is set up, a visitor needs both. On a server, put Cloudflare Access in
+front of its web address (README.md, "Protect the dashboard") and set
 CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD in .env. Cloudflare then asks each
 visitor to sign in, and adds to every request it lets through a token it has
 signed: the Cf-Access-Jwt-Assertion header.

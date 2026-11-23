@@ -103,3 +103,52 @@ def test_phone_setup_saves_what_phone_calls_need_and_never_shows_secrets(tmp_pat
     assert "the-auth-token-value" not in printed
     assert "TWILIO_AUTH_TOKEN: saved (20 characters)" in printed
     assert "TWILIO_PHONE_NUMBER: saved (+14155550123)" in printed
+
+
+# The dashboard's password (--password)
+
+
+def test_the_password_is_typed_hidden_twice_and_saved_so_oscar_reads_it_back(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=keep-me\nDASHBOARD_PASSWORD=\nHOST=0.0.0.0\n")
+    monkeypatch.setattr(set_keys, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("the password was asked for in the open"))
+    chosen = "it's a #long pass\\word"
+    typed = iter(["short", chosen, "a slip", chosen, chosen])
+    monkeypatch.setattr(set_keys.getpass, "getpass", lambda prompt: next(typed))
+
+    set_keys.main(set_keys.PASSWORD)
+
+    saved = (tmp_path / ".env").read_text()
+    assert dotenv_values(stream=io.StringIO(saved)) == {
+        "OPENROUTER_API_KEY": "keep-me",
+        "DASHBOARD_PASSWORD": chosen,
+        "HOST": "0.0.0.0",
+    }
+    printed = capsys.readouterr().out
+    assert "Use at least 10 characters." in printed
+    assert "The two were not the same." in printed
+    assert "DASHBOARD_PASSWORD: saved (22 characters)" in printed
+    assert chosen not in printed and "#long" not in saved.split("DASHBOARD_PASSWORD=")[0]
+    assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+
+
+def test_enter_keeps_the_password_already_saved(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("DASHBOARD_PASSWORD='kept-password-1'\n")
+    monkeypatch.setattr(set_keys, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(set_keys.getpass, "getpass", lambda prompt: "")
+    set_keys.main(set_keys.PASSWORD)
+    assert (tmp_path / ".env").read_text() == "DASHBOARD_PASSWORD='kept-password-1'\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "fine"),
+    [("ten-chars!", True), ("nine-char", False), ("has ${HOME} in it", False), ("spaces are fine here", True)],
+)
+def test_passwords_are_checked_before_they_are_saved(value, fine):
+    assert (set_keys.password_problem(value) == "") is fine
+
+
+@pytest.mark.parametrize("value", ["plain-password", "with 'quotes' and \"more\"", "a # not a comment", "back\\slash\\\\", "dollar$sign"])
+def test_any_password_is_read_back_exactly_as_typed(value):
+    saved = with_value("PORT=7860\n", "DASHBOARD_PASSWORD", set_keys.env_quoted(value))
+    assert dotenv_values(stream=io.StringIO(saved))["DASHBOARD_PASSWORD"] == value

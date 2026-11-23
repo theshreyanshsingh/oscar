@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
+from app.signin import SET_PASSWORD, HttpsOnly, RequireSignIn, SignIn, create_sign_in_router
 from app.calls import CallManager, lines_busy
 from app.backup import back_up
 from app.campaigns import (
@@ -54,6 +55,7 @@ from app.config import (
     Config,
     browser_call_udp_ports,
     call_audio_unreachable,
+    call_audio_unreachable_detail,
     load_config,
 )
 from app.events import EventBus
@@ -147,6 +149,8 @@ BACKUP_FIRST_SECONDS = 5 * 60
 # How often the key's credit is checked for the low-credit alert, and the first time after starting.
 CREDIT_WATCH_SECONDS = 10 * 60
 CREDIT_WATCH_FIRST_SECONDS = 60
+# A browser call that could not be set up: the error itself goes to the log.
+CALL_SETUP_FAILED = "The call could not be set up. Try again."
 # Written at the top of a call made with settings that were not saved yet.
 TRYING_SETTINGS_NOTE = "Made with Agent settings that were not saved yet."
 # How many searches of the call history (and CSV downloads) run at once.
@@ -218,6 +222,8 @@ def create_app(
     if access is None and cfg.access_required:
         access = CloudflareAccess(cfg.access_team_domain, cfg.access_audience)
     store = Store(cfg.db_path)
+    # The dashboard's password, or the lock while it has none (app/signin.py).
+    gate = SignIn(cfg, store)
     bus = EventBus()
     calls = CallManager(store, bus)
     webrtc = SmallWebRTCRequestHandler(ice_servers=[IceServer(urls=STUN_SERVER)])
@@ -228,15 +234,17 @@ def create_app(
         if stale:
             logger.info(f"Closed {stale} call(s) left open by a previous run")
         store.forget_unfinished_summaries()
+        if gate.mode == "password":
+            logger.info("The dashboard asks for its password (DASHBOARD_PASSWORD). /healthz and Twilio's webhooks stay open.")
+        elif gate.mode == "locked":
+            logger.warning(
+                "The dashboard is LOCKED: other computers can reach Oscar and it has no password. "
+                f"Set one in Oscar's folder with: {SET_PASSWORD} and restart Oscar. "
+                "Until then only /healthz and Twilio's webhooks answer."
+            )
         if access is not None:
             logger.info(
-                f"Only people signed in through Cloudflare Access ({access.team_domain}) can use the "
-                "dashboard. /healthz and Twilio's webhooks stay open."
-            )
-        elif not cfg.local_only:
-            logger.warning(
-                "Anyone who can reach this port can use the dashboard: it has no password. "
-                "Put Cloudflare Access in front of it (README.md, Protect the dashboard)."
+                f"Visitors also have to sign in through Cloudflare Access ({access.team_domain})."
             )
         if not cfg.local_only:
             low, high = browser_call_udp_ports()
@@ -264,6 +272,16 @@ def create_app(
     app.state.store = store
     app.state.calls = calls
 
+    # Each middleware added wraps those added before it, so a request meets them
+    # in the opposite order: http sent to https, the Host check, Cloudflare
+    # Access, then the dashboard's password.
+    if gate.mode != "open":
+        # Every page, API route and WebSocket needs a session, or answers nobody
+        # while Oscar is locked (app/signin.py).
+        app.add_middleware(RequireSignIn, gate=gate)
+    if access is not None:
+        # An extra layer when it is set up: a visitor needs its sign-in too.
+        app.add_middleware(RequireAccess, access=access)
     if cfg.local_only:
         # Only this computer can open it: refusing other Host names stops web
         # pages from reaching this server through DNS rebinding. The address in
@@ -275,12 +293,13 @@ def create_app(
         if public_host:
             allowed.append(public_host)
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)
-    # Otherwise (HOST=0.0.0.0 on a server) it answers at any address. There is no
-    # password: Cloudflare Access decides who gets in when it is set up, and
-    # otherwise the firewall does.
-    if access is not None:
-        app.add_middleware(RequireAccess, access=access)
+    # Otherwise (HOST=0.0.0.0 on a server) it answers at any address, and the
+    # password decides who gets in.
 
+    # A visit Cloudflare took over plain http goes to the same address over https.
+    app.add_middleware(HttpsOnly)
+
+    app.include_router(create_sign_in_router(gate))
     app.include_router(create_phone_router(cfg, calls, store, credit))
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -381,6 +400,8 @@ def create_app(
                 "voice_webhook": f"{cfg.public_url}/twilio/voice" if cfg.public_url else "",
             },
             "search": {"enabled": cfg.search_enabled},
+            # How the dashboard is guarded: the dashboard shows Sign out when it asks for a password.
+            "dashboard": {"password": gate.mode == "password", "cloudflare_access": access is not None},
             "voices": VOICES,
             "accents": ACCENTS,
             "active_call_ids": calls.active_call_ids,
@@ -600,19 +621,20 @@ def create_app(
                     )
                 )
             except Exception as exc:
-                # Pipecat swallows errors raised here, so record them ourselves.
+                # Pipecat swallows errors raised here, so record them ourselves: the
+                # error itself in the log, a plain line on the call.
                 logger.exception("Could not start the browser call pipeline")
                 started["error"] = str(exc)
-                calls.finish(call["id"], f"Call setup failed: {exc}")
+                calls.finish(call["id"], CALL_SETUP_FAILED)
 
         try:
             answer = await webrtc.handle_web_request(
                 SmallWebRTCRequest(sdp=offer.sdp, type=offer.type), on_connection
             )
-        except Exception as exc:
+        except Exception:
             logger.exception("Browser call setup failed")
             if "call_id" in started:
-                calls.finish(started["call_id"], f"Call setup failed: {exc}")
+                calls.finish(started["call_id"], CALL_SETUP_FAILED)
             raise HTTPException(status_code=400, detail="Could not set up the audio connection.")
         if not answer or "call_id" not in started or "error" in started:
             raise HTTPException(status_code=500, detail="Could not start the call.")
@@ -645,8 +667,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="Call not found.")
         reason = request.reason if request else None
         if reason == "audio_failed" and call["kind"] == "browser" and call["status"] == "connecting":
-            # Say why before stopping it, so the call is not put down as merely
-            # never connected: on a server this is almost always the firewall.
+            # Recorded before stopping it, so the call is not put down as merely
+            # never connected. On a server this is almost always the firewall:
+            # that is said in the log, not to whoever is looking at the dashboard.
+            logger.warning(call_audio_unreachable_detail(cfg))
             calls.finish(call_id, call_audio_unreachable(cfg))
         if await calls.hang_up(call_id):
             return {"ended": True}

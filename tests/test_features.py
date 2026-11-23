@@ -6,16 +6,15 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app.catalog import ModelCatalog
-from app.main import create_app, spreadsheet_safe
-from tests.conftest import make_config
+from app.main import spreadsheet_safe
+from tests.conftest import local_client, make_config
 
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(make_config(tmp_path)), base_url="http://localhost") as test_client:
+    with local_client(make_config(tmp_path)) as test_client:
         yield test_client
 
 
@@ -159,7 +158,7 @@ async def test_a_list_that_cannot_be_had_is_empty_and_not_asked_for_on_every_loa
 
 def test_the_dashboard_gets_the_models(tmp_path):
     catalog = ModelCatalog(base_url="https://or.test/api/v1", client=listing(HAIKU))
-    with TestClient(create_app(make_config(tmp_path), catalog=catalog), base_url="http://localhost") as client:
+    with local_client(make_config(tmp_path), catalog=catalog) as client:
         assert client.get("/api/models").json() == {"models": [{"id": HAIKU["id"], "name": HAIKU["name"]}]}
 
 

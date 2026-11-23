@@ -4,14 +4,12 @@ import json
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app import notify, summary
-from app.main import create_app
 from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_message, summary_payload, webhook_url
 from app.store import DEFAULT_AGENT
 from app.summary import CallSummary, start_summary
-from tests.conftest import make_config
+from tests.conftest import local_client, make_config
 from tests.test_summary import OPENROUTER, SAMS_CALL, SAMS_NOTE, calls, ended_call, finished, writing_with  # noqa: F401
 
 HOOK = "https://hooks.example.test/services/T000/B000/xyz"
@@ -204,7 +202,7 @@ async def test_a_summary_that_could_not_be_sent_says_why_on_the_dashboard(calls,
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(make_config(tmp_path)), base_url="http://localhost") as test_client:
+    with local_client(make_config(tmp_path)) as test_client:
         yield test_client
 
 

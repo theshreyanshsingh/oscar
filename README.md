@@ -268,11 +268,11 @@ Then get Oscar and start it:
 git clone https://github.com/theshreyanshsingh/oscar.git ~/oscar && cd ~/oscar && ./deploy.sh
 ```
 
-Add your keys, then restart Oscar so it reads them (and its WhatsApp
-connection, if it runs here: it uses the same key):
+Add your keys and the dashboard's password, then restart Oscar so it reads
+them (and its WhatsApp connection, if it runs here: it uses the same key):
 
 ```bash
-.venv/bin/python -m scripts.set_keys && pm2 restart ecosystem.config.cjs
+.venv/bin/python -m scripts.set_keys && .venv/bin/python -m scripts.set_keys --password && pm2 restart ecosystem.config.cjs
 ```
 
 For WhatsApp too, run `./deploy.sh --whatsapp` once. Then link Oscar's phone
@@ -319,19 +319,20 @@ throughout.
   ```
 
 - **Or open it at the server's own address,** `http://<server address>:7860`:
-  set `HOST=0.0.0.0` in `.env`, run `pm2 restart oscar`, and allow TCP 7860
-  in the firewall. There is no password, so put Cloudflare Access in front
-  (below), or allow the port from your own IP only. Browsers only let a page
-  use the microphone over https or on localhost, so for **Start call** use the
-  SSH address above, or put https in front.
+  set `HOST=0.0.0.0` in `.env`, set the dashboard's password (below), run
+  `pm2 restart oscar`, and allow TCP 7860 in the firewall. Browsers only let a
+  page use the microphone over https or on localhost, so for **Start call** use
+  the SSH address above, or put https in front (such as Cloudflare).
 - **Browser calls send their audio straight to the server over UDP,** not
   through SSH or the web address (a proxy in front, such as Cloudflare, does
   not carry it). Let in **UDP 32768-60999** in the firewall from wherever you
   call from: on EC2, an inbound Custom UDP rule in the security group. Those
   are the ports Linux hands out for each call's audio; `deploy.sh` and Oscar's
   log say the server's own range. Without it a call fails with "The call's
-  audio could not reach Oscar's server". Phone calls don't need this.
-- **Protect the dashboard** before anyone else can reach it. See below.
+  audio couldn't connect", and Oscar's log names the ports. Phone calls don't
+  need this.
+- **Set the dashboard's password** before anyone else can reach it. See
+  [Protect the dashboard](#protect-the-dashboard).
 - **Phone calls** need `PUBLIC_URL` to be a public https address that reaches
   the server, such as a domain behind Caddy or nginx. See below.
 - **Run WhatsApp in one place only.** If Oscar is linked on your Mac and on the
@@ -343,15 +344,46 @@ throughout.
 - On a Mac, `deploy.sh` refuses to run where Oscar already starts at login. Use
   `scripts.autostart --restart` there.
 
-### Protect the dashboard (Cloudflare Access)
+### Protect the dashboard
 
-Oscar has no password. Once its web address is public, anyone who finds it can
-talk to Oscar on your OpenRouter credit, read every call's transcript (callers'
-names and numbers too) and change the agent. If the address is on Cloudflare,
-let Cloudflare Access decide who gets in: it asks for your email and sends a
-one-time code to it, and Oscar then refuses every request that did not come
-through that sign-in, including requests made straight to the server's own
-address and port. Nothing in the firewall has to change.
+The dashboard has a password, `DASHBOARD_PASSWORD` in `.env`. Set it (it is
+asked for twice, and never shown), then restart Oscar:
+
+```bash
+.venv/bin/python -m scripts.set_keys --password && pm2 restart oscar
+```
+
+Then every page, every `/api/` route (call history and its CSV download,
+spending, the agent's settings and Save, starting calls) and every
+connection for live updates and browser calls needs you to sign in at
+`/login` first. Signing in lasts 30 days on that browser; **Sign out** at the
+top of the dashboard ends it there. Changing the password signs everyone out.
+After 10 wrong passwords from one connection in 15 minutes, sign-in waits.
+
+- **No password, and other computers can reach Oscar** (`HOST=0.0.0.0`, or
+  `PUBLIC_URL` set): Oscar still starts, but stays **locked**. Every page
+  says how to set a password, and nothing else answers. `deploy.sh` warns
+  about it in its last lines, and so does Oscar's log.
+- **No password on a Mac where only you reach Oscar** (`HOST=127.0.0.1` and
+  no `PUBLIC_URL`): the dashboard opens without one, as before. Set one there
+  too and it asks for it.
+- **Always open:** `/healthz` (it says only that Oscar is up and how many calls
+  it is on; `deploy.sh` asks it) and Twilio's webhooks under `/twilio/`, each
+  checked by Twilio's signature.
+- **https:** behind Cloudflare, a visit over plain `http://` is sent to the same
+  address over `https://`. The sign-in cookie is marked secure whenever you
+  came over https. Opening `http://<server address>:7860` directly sends the
+  password unencrypted, so use Oscar's https address.
+
+The sign-in is the default protection. **Cloudflare Access** can be added in
+front of it as an extra layer; when it is set up, visitors need both.
+
+#### Optional: Cloudflare Access as well
+
+If the address is on Cloudflare, Cloudflare Access can ask for your email and
+send a one-time code to it before anyone even sees Oscar's sign-in page. Oscar
+then also refuses every request that did not come through that sign-in,
+including requests made straight to the server's own address and port.
 
 1. **In Cloudflare:** open **Zero Trust**. The first time, pick a team name
    (your sign-in page becomes `<team name>.cloudflareaccess.com`) and the free
@@ -374,27 +406,26 @@ address and port. Nothing in the firewall has to change.
    ```
 
 5. Then run `./deploy.sh` (or `pm2 restart oscar`). Its last lines say that
-   the dashboard only opens for people signed in through Cloudflare Access.
+   visitors also have to sign in through Cloudflare Access.
 
 Do steps 1 to 3 first. With the two lines in `.env` and no application in
 Cloudflare yet, the dashboard turns everyone away, you too.
 
 Then check:
 
-- Oscar's web address asks for your email and a code, then opens the dashboard.
+- Oscar's web address asks for your email and a code, then Oscar's own
+  password, then opens the dashboard.
 - `http://<server address>:7860` answers "This Oscar only opens through
   Cloudflare Access."
 
-What stays open: `/healthz`, which only says Oscar is up and how many calls it
-is on (`deploy.sh` asks it), and Twilio's webhooks under `/twilio/`, each
-checked by Twilio's signature. **If you set up phone calls on this server,**
-Twilio cannot sign in, so add a second application in Cloudflare for the same
-domain with the path `twilio`, and a policy whose action is **Bypass** for
-**Everyone**. Browser call audio does not go through Cloudflare at all, so it
-needs nothing more.
+**If you set up phone calls on this server,** Twilio cannot sign in, so add a
+second application in Cloudflare for the same domain with the path `twilio`,
+and a policy whose action is **Bypass** for **Everyone**. Browser call audio
+does not go through Cloudflare at all, so it needs nothing more.
 
-`scripts.live_call_check` cannot sign in either, so run it on a computer where
-Oscar is not behind Cloudflare Access.
+`scripts.live_call_check` signs in with the password in `.env`, but cannot
+sign in to Cloudflare Access, so with Access set up run it on a computer where
+Oscar is not behind it.
 
 ## Phone calls (optional)
 
@@ -421,9 +452,10 @@ public https address.
    PUBLIC_URL=https://your-tunnel.ngrok-free.app
    ```
 
-   The dashboard has no password. Once `PUBLIC_URL` is set, anyone who has
-   the tunnel's address can open it, so keep the address to yourself and stop
-   the tunnel when you are done.
+   Once `PUBLIC_URL` is set, anyone who has the tunnel's address can reach
+   the dashboard, so it needs a password: set one with
+   `.venv/bin/python -m scripts.set_keys --password`. Without one Oscar stays
+   locked until you do ([Protect the dashboard](#protect-the-dashboard)).
 
 3. Restart Oscar. **Your numbers** (under Phone) lists the numbers on your
    Twilio account. Press **Connect to Oscar** on the one people should call:
@@ -1130,16 +1162,29 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 - Each audio stream must present a one-time token created for that call. The
   token stops working when the call ends, and a call whose audio has not
   connected within 3 minutes is marked failed.
-- The dashboard has no password. With `HOST=127.0.0.1` (the default) only
-  this computer can open it, and it only answers requests addressed to
-  `localhost` or `127.0.0.1`. With `HOST=0.0.0.0`, anyone who can reach the
-  port can use it, including your OpenRouter key, your call history and calls
-  through Twilio, unless Cloudflare Access is set up (`app/access.py`, see
-  "Protect the dashboard"). Then every request but `/healthz` and Twilio's
-  webhooks needs the token Cloudflare signs for a visitor it let through:
-  signed with one of the team's keys, made for this application and not
-  expired. Oscar fetches the keys from Cloudflare, and fetches them again when
-  Cloudflare changes them.
+- The dashboard's password (`DASHBOARD_PASSWORD`, `app/signin.py`): signing
+  in at `/login` gives a session cookie for 30 days (HttpOnly, SameSite=Lax,
+  Secure when the browser came over https, directly, through Cloudflare's
+  `cf-visitor` header or at `PUBLIC_URL`'s address). The cookie is signed with
+  a key made from a random secret kept in the database and from the password,
+  so changing the password ends every session; **Sign out** ends its own. The
+  password is compared in constant time. Ten wrong passwords from one address
+  in 15 minutes make it wait (the address is Cloudflare's `CF-Connecting-IP`
+  only when the request came from one of Cloudflare's own addresses).
+  Without a session, pages go to `/login`, `/api/` routes answer 401 and
+  WebSockets are closed with 1008. When other computers can reach Oscar and
+  there is no password, everything but `/healthz` and `/twilio/` is refused.
+- With `HOST=127.0.0.1` (the default) only this computer can open it, and it
+  only answers requests addressed to `localhost`, `127.0.0.1` or `PUBLIC_URL`'s
+  address. A request Cloudflare received over plain http is sent to https.
+- Cloudflare Access, when it is set up (`app/access.py`), is checked as well:
+  every request but `/healthz` and Twilio's webhooks needs the token Cloudflare
+  signs for a visitor it let through: signed with one of the team's keys, made
+  for this application and not expired. Oscar fetches the keys from Cloudflare,
+  and fetches them again when Cloudflare changes them.
+- Nothing the dashboard shows names the server's ports or firewall: when a
+  browser call's audio cannot connect, the dashboard says so plainly, and the
+  ports to let in are written to Oscar's log (and `deploy.sh` says them).
 - A call runs at most **Longest call** minutes (30 unless you change it in Agent
   settings, 1 to 120). Oscar then says the time is up, says goodbye and hangs up
   once that has been heard; the transcript notes it.
@@ -1164,12 +1209,15 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/backup.py` | The daily copy of the database |
 | `app/store.py` | SQLite storage and agent settings |
 | `app/config.py` | Settings from `.env` |
+| `app/signin.py` | The dashboard's password: sign-in page, session cookie, the lock without a password, http to https |
+| `app/access.py` | Cloudflare Access, when it is set up as an extra layer |
+| `app/pages/` | The sign-in page's HTML |
 | `app/static/` | The dashboard (plain HTML, CSS, JavaScript) |
 | `app/whatsapp/` | The WhatsApp process: `bridge.py` (connection), `chat.py` (when to answer, what Oscar reads), `brain.py` (asking the model) |
 | `tests/` | Automated tests, including whole browser and phone calls |
 | `tests_whatsapp/` | Tests for the WhatsApp connection (run with `.venv-whatsapp`) |
 | `scripts/live_call_check.py` | One real call with your keys (`--search` to test web search) |
-| `scripts/set_keys.py` | Saves your keys into `.env` without showing them (`--phone` for the Twilio details) |
+| `scripts/set_keys.py` | Saves your keys into `.env` without showing them (`--phone` for the Twilio details, `--password` for the dashboard's password) |
 | `scripts/autostart.py` | Has macOS start Oscar at login and keep it running (`--status`, `--restart`, `--remove`) |
 | `deploy.sh` | Sets Oscar up on a Linux server, or brings it up to date, under pm2 (`--whatsapp`, `--force`) |
 | `ecosystem.config.cjs` | How pm2 runs Oscar and its WhatsApp connection on a server |
@@ -1233,9 +1281,15 @@ pm2 start oscar oscar-whatsapp
 - **Phone call fails right away:** check the Twilio number, that `PUBLIC_URL`
   matches the running tunnel, and (for trial accounts) that the number you
   dial is verified.
-- **Browser call fails with "The call's audio could not reach Oscar's
-  server":** the server's firewall does not let the call's audio in. Allow the
-  UDP ports the message names, as in [Run it on a server](#run-it-on-a-server-pm2).
+- **Browser call fails with "The call's audio couldn't connect":** on a server,
+  its firewall most likely does not let the call's audio in. Oscar's log
+  (`pm2 logs oscar`) names the UDP ports to allow, as in
+  [Run it on a server](#run-it-on-a-server-pm2).
+- **The dashboard says "Set a password first":** other computers can reach
+  Oscar and it has no password. Run
+  `.venv/bin/python -m scripts.set_keys --password`, then restart Oscar.
+- **Forgot the dashboard's password:** set a new one the same way, then
+  restart Oscar. Everyone is signed out.
 - **Browser call from another device over the tunnel doesn't connect:** browser
   call audio travels directly between the two devices, not through the tunnel,
   and many networks block that. Make browser calls on the computer running

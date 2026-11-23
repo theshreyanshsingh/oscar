@@ -7,14 +7,12 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app import main as main_module
-from app.main import create_app
 from app.preview import PreviewFailed, sample_text, voice_sample
 from app.speech import Recordings
 from app.store import DEFAULT_AGENT, Store
-from tests.conftest import make_config
+from tests.conftest import local_client, make_config
 from tests.fake_openrouter import answer_stream
 
 START = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
@@ -116,7 +114,7 @@ def test_search_and_filter_go_together(store):
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(make_config(tmp_path)), base_url="http://localhost") as test_client:
+    with local_client(make_config(tmp_path)) as test_client:
         yield test_client
 
 

@@ -14,13 +14,12 @@ from app.calls import CallManager
 from app import costs
 from app.costs import CALL_MINIMUM_DOLLARS, CostMeter, KeyCredit, cost_of
 from app.events import EventBus
-from app.main import create_app
 from app.research import write_research
 from app.script import ScriptKeeper
 from app.search import WebLookup
 from app.store import Store
 from app.summary import write_summary
-from tests.conftest import PUBLIC_URL, TWILIO_AUTH_TOKEN, make_config
+from tests.conftest import PUBLIC_URL, TWILIO_AUTH_TOKEN, local_client, make_config
 from tests.fake_openrouter import answer_stream
 from tests.test_phone import signed_post
 from tests.test_speech import GreetingFrame, caller_turn, run_voice, slowly, spoken
@@ -364,10 +363,8 @@ async def test_what_was_known_is_kept_when_openrouter_stops_answering(monkeypatc
 
 
 def app_with(tmp_path, credit: KeyCredit, **config):
-    from fastapi.testclient import TestClient
-
     cfg = make_config(tmp_path, **config)
-    return TestClient(create_app(cfg, credit=credit), base_url="http://localhost")
+    return local_client(cfg, credit=credit)
 
 
 def test_the_dashboard_is_told_what_calls_and_the_key_cost(tmp_path):

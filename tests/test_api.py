@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from loguru import logger
 
 from app.config import ConfigError, load_config
 import sqlite3
@@ -310,19 +311,29 @@ def test_end_call_that_is_not_running_marks_it_ended(client, cfg):
     assert client.post(f"/api/calls/{call['id']}/end").json() == {"ended": False}
 
 
-def test_a_browser_call_whose_audio_never_connected_says_which_ports_to_open(tmp_path, monkeypatch):
+def test_a_browser_call_whose_audio_never_connected_says_so_plainly_and_logs_the_ports(tmp_path, monkeypatch):
+    # The dashboard (and anyone who can see it) is not told the server's ports or
+    # firewall: those go to the server's log, where the owner looks.
     port_range = tmp_path / "ip_local_port_range"
     port_range.write_text("32768\t60999\n")
     monkeypatch.setattr(config, "LINUX_PORT_RANGE", port_range)
+    logged: list[str] = []
+    watching = logger.add(lambda m: logged.append(m.record["message"]), level="WARNING")
     cfg = make_config(tmp_path, host="0.0.0.0")
-    with local_client(cfg) as client:
-        call = client.app.state.store.create_call("browser", status="connecting")
-        ended = client.post(f"/api/calls/{call['id']}/end", json={"reason": "audio_failed"})
-        assert ended.json() == {"ended": True}
-        call = client.get(f"/api/calls/{call['id']}").json()["call"]
+    try:
+        with local_client(cfg) as client:
+            call = client.app.state.store.create_call("browser", status="connecting")
+            ended = client.post(f"/api/calls/{call['id']}/end", json={"reason": "audio_failed"})
+            assert ended.json() == {"ended": True}
+            detail = client.get(f"/api/calls/{call['id']}")
+    finally:
+        logger.remove(watching)
+    call = detail.json()["call"]
     assert call["status"] == "failed"
-    assert "UDP ports 32768-60999" in call["error"]
-    assert "security group" in call["error"]
+    assert call["error"] == "The call's audio couldn't connect. Try again, or call from another network."
+    for internal in ("UDP", "32768", "firewall", "security group", "port"):
+        assert internal.lower() not in detail.text.lower(), internal
+    assert any("UDP ports 32768-60999" in line and "security group" in line for line in logged)
 
 
 def test_on_this_computer_an_audio_failure_says_where_to_call_from(client):
@@ -330,7 +341,7 @@ def test_on_this_computer_an_audio_failure_says_where_to_call_from(client):
     client.post(f"/api/calls/{call['id']}/end", json={"reason": "audio_failed"})
     call = client.get(f"/api/calls/{call['id']}").json()["call"]
     assert call["status"] == "failed"
-    assert "make browser calls on that computer" in call["error"]
+    assert call["error"] == "The call's audio couldn't connect. Make browser calls on the computer Oscar runs on."
 
 
 @pytest.mark.parametrize(("kind", "status"), [("browser", "live"), ("phone_outbound", "connecting")])
@@ -552,16 +563,18 @@ def test_calls_logged_before_summaries_existed_still_open(tmp_path):
         again.close()
 
 
-# Who can open Oscar: no password; on this computer only local Host names (blocks
-# DNS rebinding), on a server (HOST=0.0.0.0) anyone who reaches the port.
+# Who can open Oscar: whoever signed in with the dashboard's password
+# (tests/test_signin.py); on this computer only local Host names too (blocks DNS
+# rebinding), on a server (HOST=0.0.0.0) any address that reaches the port.
 
 
-def test_nothing_asks_for_a_password(tmp_path):
+def test_signed_in_everything_answers_without_a_browser_password_box(tmp_path):
     cfg = make_config(tmp_path, host="0.0.0.0")
     with local_client(cfg) as client:
         for path in ["/", "/api/status", "/api/calls", "/static/app.js", "/healthz"]:
             response = client.get(path)
             assert response.status_code == 200, path
+            # The sign-in is Oscar's own page, never the browser's Basic-auth box.
             assert "WWW-Authenticate" not in response.headers
         # Twilio webhooks are still checked by their signature.
         assert client.post("/twilio/voice", data={}).status_code == 403
@@ -608,6 +621,7 @@ def env(monkeypatch):
         "CF_ACCESS_TEAM_DOMAIN",
         "CF_ACCESS_AUD",
         "MAX_CALLS",
+        "DASHBOARD_PASSWORD",
     ]:
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
@@ -618,12 +632,25 @@ def test_defaults_are_local_only(env):
     assert (cfg.host, cfg.port, cfg.public_url, cfg.local_only) == ("127.0.0.1", 7860, "", True)
 
 
-def test_a_server_host_or_public_url_needs_no_password(env):
-    env.setenv("DASHBOARD_PASSWORD", "left over in an old .env")
+def test_a_server_host_and_public_url_are_read_with_the_dashboard_password(env):
+    env.setenv("DASHBOARD_PASSWORD", " correct horse battery ")
     env.setenv("HOST", "0.0.0.0")
     env.setenv("PUBLIC_URL", "https://abc.ngrok-free.app")
     cfg = load_config()
     assert (cfg.host, cfg.local_only, cfg.public_url) == ("0.0.0.0", False, "https://abc.ngrok-free.app")
+    assert (cfg.dashboard_password, cfg.dashboard_mode) == ("correct horse battery", "password")
+
+
+def test_without_a_password_a_reachable_oscar_still_loads_its_settings_but_is_locked(env):
+    # deploy.sh checks that the new code starts with load_config(): it must not
+    # refuse, or deploy.sh would put back an older, open version.
+    env.setenv("HOST", "0.0.0.0")
+    assert load_config().dashboard_mode == "locked"
+    env.setenv("HOST", "127.0.0.1")
+    env.setenv("PUBLIC_URL", "https://abc.ngrok-free.app")
+    assert load_config().dashboard_mode == "locked"
+    env.delenv("PUBLIC_URL")
+    assert load_config().dashboard_mode == "open"  # the Mac set-up, as before
 
 
 def test_public_url_must_be_https(env):

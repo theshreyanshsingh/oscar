@@ -51,7 +51,7 @@ from app.speech import (
 from app.store import DEFAULT_AGENT
 from app.summary import SUMMARY_INSTRUCTIONS, SUMMARY_MODEL, transcript_text
 from tests.audio_client import CALLER_CLIP, LOUD, make_caller, read_wav
-from tests.conftest import PUBLIC_URL, TWILIO_AUTH_TOKEN, make_config
+from tests.conftest import PUBLIC_URL, TWILIO_AUTH_TOKEN, dashboard_http, make_config
 from tests.fake_openrouter import NO_FOLLOW_UP, create_fake_firecrawl, create_fake_openrouter
 from tests.test_phone import INBOUND, stream_parameters
 
@@ -198,7 +198,7 @@ async def start_browser_call(http: httpx.AsyncClient, peer, **options) -> str:
 async def test_browser_call_listens_and_speaks(server):
     peer, _, ear = make_caller(lead_silence=3.5)
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         recorder = EventRecorder(http)
         await asyncio.sleep(0.3)  # let the event stream connect
         call_id = await start_browser_call(http, peer)
@@ -294,7 +294,7 @@ async def test_oscar_finishes_speaking_before_it_listens(server):
     peer, _, _ = make_caller(lead_silence=1.7)
     greeting = DEFAULT_AGENT.greeting
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         call_id = await start_browser_call(http, peer)
 
         async def exchange_done():
@@ -320,7 +320,7 @@ async def test_caller_on_headphones_can_interrupt_the_agent(server):
     peer, _, _ = make_caller(lead_silence=0.5)
     greeting = DEFAULT_AGENT.greeting
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         call_id = await start_browser_call(http, peer, interruptible=True)
 
         async def exchange_done():
@@ -356,7 +356,7 @@ async def test_caller_on_headphones_can_interrupt_the_agent(server):
 async def test_browser_caller_hanging_up_ends_the_call(server):
     peer, _, _ = make_caller(lead_silence=1.0)
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         call_id = await start_browser_call(http, peer)
 
         async def status_is(wanted):
@@ -381,7 +381,7 @@ async def test_a_call_is_summed_up_when_it_ends(server, monkeypatch):
     monkeypatch.setattr("app.summary.send_summary", deliver)
     server.app.state.store.save_summary_webhook_url("https://hooks.example.test/oscar")
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         recorder = EventRecorder(http)
         await asyncio.sleep(0.3)  # let the event stream connect
         call_id = await start_browser_call(http, peer)
@@ -463,7 +463,7 @@ async def test_browser_call_works_through_the_owners_script(server):
     steps = script_steps(script)
     peer, _, _ = make_caller(lead_silence=3.5)
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         told = await http.put("/api/agent", json={**DEFAULT_AGENT.model_dump(), "script": script})
         assert told.status_code == 200
         call_id = await start_browser_call(http, peer)
@@ -522,7 +522,7 @@ async def test_browser_call_works_through_the_owners_script(server):
 async def test_a_place_in_the_script_that_cannot_be_worked_out_is_explained_on_the_call(server):
     peer, _, _ = make_caller(lead_silence=3.5)
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         script = "Ask who is calling.\nSay goodbye."
         await http.put("/api/agent", json={**DEFAULT_AGENT.model_dump(), "script": script})
         call_id = await start_browser_call(http, peer)
@@ -551,7 +551,7 @@ async def test_phone_call_listens_and_speaks(server, monkeypatch):
 
     monkeypatch.setattr(TwilioFrameSerializer, "_hang_up_call", record_hang_up)
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         signature = RequestValidator(TWILIO_AUTH_TOKEN).compute_signature(
             PUBLIC_URL + "/twilio/voice", INBOUND
         )
@@ -665,7 +665,7 @@ async def test_a_wrong_key_shows_up_on_the_call(tmp_path):
     peer, _, _ = make_caller(lead_silence=1.0)
     try:
         base = f"http://127.0.0.1:{oscar_server[0]}"
-        async with httpx.AsyncClient(base_url=base, timeout=30) as http:
+        async with dashboard_http(base) as http:
             call_id = await start_browser_call(http, peer)
 
             async def has_error():
@@ -753,7 +753,7 @@ async def test_browser_call_looks_things_up_on_the_web(search_server):
     server = search_server
     peer, _, ear = make_caller(lead_silence=3.5)
     try:
-        async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        async with dashboard_http(server.base) as http:
             assert (await http.get("/api/status")).json()["search"] == {"enabled": True}
             detail = await searched_call(http, peer)
         await wait_until(lambda: asyncio.sleep(0, ear.loud_frames > 50), 10, "agent audio")
@@ -826,7 +826,7 @@ async def test_a_searchs_answer_the_provider_refuses_is_asked_for_again_and_said
     server.openrouter.state.refuse_once.add(FOUND)
     peer, _, ear = make_caller(lead_silence=3.5)
     try:
-        async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        async with dashboard_http(server.base) as http:
             detail = await searched_call(http, peer)
         await wait_until(lambda: asyncio.sleep(0, ear.loud_frames > 50), 10, "agent audio")
     finally:
@@ -852,7 +852,7 @@ async def test_what_a_search_found_is_kept_and_written_up_when_the_call_ends(sea
     peer, _, _ = make_caller(lead_silence=3.5)
     page = {"title": "Bondi Bikes", "url": "https://bondibikes.example/hours", "news": False, "date": ""}
     try:
-        async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        async with dashboard_http(server.base) as http:
             recorder = EventRecorder(http)
             await asyncio.sleep(0.3)  # let the event stream connect
             detail = await searched_call(http, peer)
@@ -909,7 +909,7 @@ async def test_a_search_that_cannot_run_is_explained_on_the_call(search_server):
     server = search_server
     peer, _, _ = make_caller(lead_silence=3.5)
     try:
-        async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        async with dashboard_http(server.base) as http:
             detail = await searched_call(http, peer)
     finally:
         await peer.close()
@@ -930,7 +930,7 @@ async def test_a_search_that_cannot_run_is_explained_on_the_call(search_server):
 async def test_without_a_firecrawl_key_calls_do_not_search(server):
     peer, _, _ = make_caller(lead_silence=3.5)
     try:
-        async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        async with dashboard_http(server.base) as http:
             assert (await http.get("/api/status")).json()["search"] == {"enabled": False}
             call_id = await start_browser_call(http, peer)
 
@@ -1012,7 +1012,7 @@ async def test_browser_call_answers_from_what_oscar_knows(facts_server):
     server = facts_server
     peer, _, ear = make_caller(lead_silence=3.5)
     try:
-        async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        async with dashboard_http(server.base) as http:
             # A fact sheet needs no Firecrawl key.
             assert (await http.get("/api/status")).json()["search"] == {"enabled": False}
             detail = await call_about_the_owner(http, peer, KNOWN)
@@ -1078,7 +1078,7 @@ async def test_an_answer_the_fact_sheet_cannot_give_is_explained_on_the_call(fac
     server = facts_server
     peer, _, _ = make_caller(lead_silence=3.5)
     try:
-        async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+        async with dashboard_http(server.base) as http:
             detail = await call_about_the_owner(http, peer, FACTS_FAILED_LINE)
     finally:
         await peer.close()
@@ -1100,7 +1100,7 @@ async def test_at_its_time_limit_a_call_says_goodbye_and_hangs_up(server, monkey
 
     monkeypatch.setattr(voice_agent, "SECONDS_IN_A_MINUTE", 4)  # "1 minute" is 4 seconds here
     peer, _, ear = make_caller(lead_silence=60)  # a caller who says nothing
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         settings = {**DEFAULT_AGENT.model_dump(), "max_call_minutes": 1}
         assert (await http.put("/api/agent", json=settings)).status_code == 200
         started = time.monotonic()
@@ -1128,7 +1128,7 @@ async def test_settings_can_be_tried_on_a_call_before_they_are_saved(server):
 
     peer, _, ear = make_caller(lead_silence=60)
     trying = {**DEFAULT_AGENT.model_dump(), "name": "Ava", "greeting": "Hello, Ava here."}
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         await peer.setLocalDescription(await peer.createOffer())
         response = await http.post(
             "/api/calls/browser", json={"sdp": peer.localDescription.sdp, "type": "offer", "agent": trying}
@@ -1192,7 +1192,7 @@ async def test_a_phone_caller_who_asks_for_a_person_is_put_through(transfer_serv
     server = transfer_server
     store = server.app.state.store
 
-    async with httpx.AsyncClient(base_url=server.base, timeout=30) as http:
+    async with dashboard_http(server.base) as http:
         signature = RequestValidator(TWILIO_AUTH_TOKEN).compute_signature(PUBLIC_URL + "/twilio/voice", INBOUND)
         voice = await http.post("/twilio/voice", data=INBOUND, headers={"X-Twilio-Signature": signature})
         _, params = stream_parameters(voice.text)

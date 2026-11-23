@@ -1,4 +1,8 @@
-"""Cloudflare Access in front of the dashboard: only signed-in visitors get in."""
+"""Cloudflare Access in front of the dashboard: only signed-in visitors get in.
+
+Access is an extra layer on top of the dashboard's password (app/signin.py): a
+visitor needs both, so these clients sign in with the password too.
+"""
 
 import json
 import time
@@ -14,7 +18,7 @@ from app import access as access_module
 from app.access import REFUSED, UNAVAILABLE, CloudflareAccess
 from app.config import ConfigError, access_team_domain, load_config
 from app.main import create_app
-from tests.conftest import make_config
+from tests.conftest import make_config, sign_in
 
 TEAM = "yourteam.cloudflareaccess.com"
 AUD = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2"
@@ -70,12 +74,17 @@ class Cloudflare:
         return httpx.Response(200, json=self.certs)
 
 
-def guarded(tmp_path, cloudflare: Cloudflare | None = None, **config) -> TestClient:
+def guarded(tmp_path, cloudflare: Cloudflare | None = None, *, password_too: bool = True, **config) -> TestClient:
+    """A client of an Oscar behind Cloudflare Access, signed in with the dashboard's password
+    too (through Access) unless `password_too` is False."""
     cfg = make_config(tmp_path, host="0.0.0.0", access_team_domain=TEAM, access_audience=AUD, **config)
     checker = CloudflareAccess(
         TEAM, AUD, client=httpx.AsyncClient(transport=httpx.MockTransport(cloudflare or Cloudflare()))
     )
-    return TestClient(create_app(cfg, access=checker), base_url="https://oscar.example.test")
+    client = TestClient(create_app(cfg, access=checker), base_url="https://oscar.example.test")
+    if password_too:
+        sign_in(client, headers=signed(token()))
+    return client
 
 
 def signed(value: str) -> dict:
@@ -89,6 +98,23 @@ def test_a_visitor_cloudflare_let_through_gets_in(tmp_path):
     with guarded(tmp_path) as client:
         for path in ["/", "/api/agent", "/api/calls", "/api/status", "/static/app.js"]:
             assert client.get(path, headers=signed(token())).status_code == 200, path
+        assert client.get("/api/status", headers=signed(token())).json()["dashboard"] == {
+            "password": True,
+            "cloudflare_access": True,
+        }
+
+
+def test_access_is_an_extra_layer_the_password_is_still_needed(tmp_path):
+    # Let through by Cloudflare, but not signed in to Oscar.
+    with guarded(tmp_path, password_too=False) as client:
+        assert client.get("/api/agent", headers=signed(token())).status_code == 401
+        page = client.get("/", headers=signed(token()), follow_redirects=False)
+        assert (page.status_code, page.headers["location"]) == (303, "/login")
+        assert client.get("/login", headers=signed(token())).status_code == 200
+        # The sign-in page itself is behind Cloudflare Access too.
+        assert client.get("/login").status_code == 403
+        sign_in(client, headers=signed(token()))
+        assert client.get("/api/agent", headers=signed(token())).status_code == 200
 
 
 def test_without_a_sign_in_nothing_but_the_open_paths_answers(tmp_path):
@@ -179,26 +205,30 @@ def test_made_up_key_ids_do_not_have_oscar_asking_cloudflare_all_the_time(tmp_pa
 
 def test_when_the_keys_cannot_be_had_nobody_gets_in_and_it_says_why(tmp_path):
     cloudflare = Cloudflare(down=True)
-    with guarded(tmp_path, cloudflare) as client:
+    with guarded(tmp_path, cloudflare, password_too=False) as client:
         response = client.get("/api/agent", headers=signed(token()))
         assert (response.status_code, response.text) == (503, UNAVAILABLE)
         cloudflare.down = False  # back: the next request tries again
+        sign_in(client, headers=signed(token()))
         assert client.get("/api/agent", headers=signed(token())).status_code == 200
 
 
 # Settings
 
 
-def test_without_access_settings_the_dashboard_is_as_before(tmp_path):
+def test_without_access_settings_the_password_alone_decides(tmp_path):
     cfg = make_config(tmp_path, host="0.0.0.0")
     assert not cfg.access_required
     with TestClient(create_app(cfg)) as client:
+        assert client.get("/api/agent", headers={"host": "203.0.113.10:7860"}).status_code == 401
+        sign_in(client, headers={"host": "203.0.113.10:7860"})
         assert client.get("/api/agent", headers={"host": "203.0.113.10:7860"}).status_code == 200
+        assert client.get("/api/status").json()["dashboard"] == {"password": True, "cloudflare_access": False}
 
 
 @pytest.fixture
 def env(monkeypatch):
-    for name in ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "PUBLIC_URL", "HOST", "PORT"]:
+    for name in ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "PUBLIC_URL", "HOST", "PORT", "DASHBOARD_PASSWORD"]:
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
 

@@ -171,7 +171,9 @@ async def place_outbound_call(
         if isinstance(exc, TwilioRestException):
             message = f"Twilio refused the call: {twilio_message(exc)}."
         else:
-            message = f"Could not reach Twilio: {exc}"
+            # What went wrong on this server's side goes to the log, not the dashboard.
+            logger.warning(f"Could not reach Twilio to place a call: {exc!r}")
+            message = "Could not reach Twilio. Try again in a moment."
         calls.finish(call["id"], message)
         raise PhoneCallError(message) from exc
 

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import uuid
@@ -436,6 +437,16 @@ class Store:
                     reply TEXT NOT NULL,
                     error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
+                );
+                -- The random secret dashboard sessions are signed with, with the password (app/signin.py).
+                CREATE TABLE IF NOT EXISTS dashboard_secret (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    secret TEXT NOT NULL
+                );
+                -- Sessions ended with Sign out, kept until they would have expired (unix time).
+                CREATE TABLE IF NOT EXISTS signed_out_sessions (
+                    id TEXT PRIMARY KEY,
+                    expires INTEGER NOT NULL
                 );
                 """
             )
@@ -931,6 +942,30 @@ class Store:
                 raise
             self._db.execute("COMMIT")
         return self.get_blocked_numbers()
+
+    # Dashboard sessions (app/signin.py)
+
+    def dashboard_secret(self) -> str:
+        """The secret dashboard sessions are signed with: made once, at random, then kept."""
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO dashboard_secret (id, secret) VALUES (1, ?)", (secrets.token_hex(32),)
+            )
+            return self._db.execute("SELECT secret FROM dashboard_secret WHERE id = 1").fetchone()["secret"]
+
+    def signed_out_sessions(self, now: int) -> set[str]:
+        """Sessions signed out that have not expired yet. Those that have are forgotten."""
+        with self._lock:
+            self._db.execute("DELETE FROM signed_out_sessions WHERE expires <= ?", (now,))
+            rows = self._db.execute("SELECT id FROM signed_out_sessions").fetchall()
+        return {row["id"] for row in rows}
+
+    def sign_out_session(self, session_id: str, expires: int, now: int) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM signed_out_sessions WHERE expires <= ?", (now,))
+            self._db.execute(
+                "INSERT OR REPLACE INTO signed_out_sessions (id, expires) VALUES (?, ?)", (session_id, expires)
+            )
 
     # Twilio numbers (app/numbers.py)
 

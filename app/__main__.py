@@ -21,6 +21,11 @@ def main() -> None:
             "Note: calls stay off until your OpenRouter key is saved. "
             "Run: .venv/bin/python -m scripts.set_keys"
         )
+    if cfg.dashboard_mode == "locked":
+        print(
+            "The dashboard is locked: other computers can reach Oscar and it has no password. "
+            "Set one with: .venv/bin/python -m scripts.set_keys --password, then restart Oscar."
+        )
     if cfg.host in ("0.0.0.0", "::"):
         print(f"Oscar dashboard: port {cfg.port}, at every address of this machine")
     else:

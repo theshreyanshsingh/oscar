@@ -225,18 +225,27 @@ fi
 step "Done: commit $(git log -1 --format='%h') is live"
 # Both processes read the keys from .env when they start (the WhatsApp connection answers with the same key).
 [ -f .env ] || echo "Oscar has no keys yet: run .venv/bin/python -m scripts.set_keys, then pm2 restart ecosystem.config.cjs."
-# Reachable from other machines (HOST=0.0.0.0): browser calls also need their UDP ports let in, and without
-# Cloudflare Access anyone who reaches the port can use Oscar.
+# Whether the dashboard asks for its password (app/signin.py), and, when other machines can reach Oscar, that browser
+# calls need their UDP ports let in. Without a password Oscar is locked: it answers nobody but /healthz and Twilio.
 .venv/bin/python -c '
 from app.config import browser_call_udp_ports, load_config
 cfg = load_config()
+if cfg.dashboard_mode == "password":
+    print("The dashboard is password-protected: it asks for DASHBOARD_PASSWORD.")
+elif cfg.dashboard_mode == "locked":
+    line = "!" * 78
+    print(line)
+    print("WARNING: the dashboard has NO PASSWORD, so Oscar is LOCKED: nobody can open it, you included.")
+    print("Set a password now, then restart Oscar:")
+    print("    .venv/bin/python -m scripts.set_keys --password && pm2 restart oscar")
+    print(line)
+else:
+    print("The dashboard has no password: only this computer can reach it (HOST=%s)." % cfg.host)
+if cfg.access_required:
+    print("Visitors also have to sign in through Cloudflare Access (%s)." % cfg.access_team_domain)
 if not cfg.local_only:
     print("Browser calls send their audio straight to this server, not through its web address: let in UDP %d-%d in the firewall (on EC2, the security group)." % browser_call_udp_ports())
-    if cfg.access_required:
-        print("The dashboard only opens for people signed in through Cloudflare Access (%s)." % cfg.access_team_domain)
-    else:
-        print("WARNING: anyone who can reach this server on port %d can use Oscar, your OpenRouter credit and its call history. Put Cloudflare Access in front of it: README.md, Protect the dashboard." % cfg.port)
-' 2>/dev/null || true
+' 2>/dev/null || echo "WARNING: could not tell whether the dashboard is password-protected. Check DASHBOARD_PASSWORD in .env."
 if [ -x .venv-whatsapp/bin/python ] && [ ! -f data/whatsapp-session.sqlite3 ]; then
   echo "WhatsApp is not linked yet: link it from the dashboard's WhatsApp card (README.md, Set up WhatsApp)."
 fi

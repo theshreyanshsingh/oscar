@@ -604,8 +604,9 @@ async def run_call(
         await runner.add_workers(worker)
         await runner.run()
     except Exception as exc:
-        logger.exception(f"Call {call_id} crashed")
-        error = f"The call stopped unexpectedly: {exc}"
+        # The error itself is in the log; the call says it plainly.
+        logger.exception(f"Call {call_id} crashed: {exc!r}")
+        error = "The call stopped unexpectedly."
     finally:
         if watchdog:
             watchdog.cancel()

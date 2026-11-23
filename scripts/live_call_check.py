@@ -13,6 +13,9 @@ the check also needs Oscar to have looked it up on the web. That costs about
 three cents on OpenRouter and two Firecrawl credits.
 
     .venv/bin/python -m scripts.live_call_check --search
+
+When the dashboard asks for its password, the check signs in with
+DASHBOARD_PASSWORD from .env (or from the environment).
 """
 
 import argparse
@@ -23,6 +26,7 @@ import time
 import httpx
 from aiortc import RTCSessionDescription
 
+from app.config import ConfigError, load_config
 from tests.audio_client import CALLER_CLIP, WEATHER_CLIP, make_caller
 
 
@@ -41,9 +45,33 @@ async def wait_for(check, timeout: float):
     return None
 
 
+def dashboard_password() -> str:
+    try:
+        return load_config().dashboard_password
+    except ConfigError:
+        return ""
+
+
+async def sign_in_if_asked(http: httpx.AsyncClient, url: str) -> None:
+    """Signs in when the dashboard asks for its password, as the browser does."""
+    response = await http.get("/api/status")
+    if response.status_code == 503 and "application/json" in response.headers.get("content-type", ""):
+        if response.json().get("locked"):
+            fail(response.json()["detail"])
+    if response.status_code != 401:
+        return
+    password = dashboard_password()
+    if not password:
+        fail(f"The server at {url} asks for a password, and DASHBOARD_PASSWORD is not in .env here.")
+    signed_in = await http.post("/login", data={"password": password})
+    if signed_in.status_code != 303:
+        fail(f"Could not sign in to the dashboard (error {signed_in.status_code}): is DASHBOARD_PASSWORD the server's?")
+
+
 async def main(url: str, search: bool) -> None:
     async with httpx.AsyncClient(base_url=url, timeout=30) as http:
         try:
+            await sign_in_if_asked(http, url)
             status = (await http.get("/api/status")).raise_for_status().json()
         except httpx.HTTPError as exc:
             fail(f"Could not reach the server at {url} ({exc}). Start it with: .venv/bin/python -m app")

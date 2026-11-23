@@ -74,6 +74,21 @@ let audioConnectTimer = null;
 
 // ---------- helpers ----------
 
+// Signed out (the session ended, or the password changed), or Oscar is locked
+// until it has a password: the sign-in page says which, and brings this page back.
+let goingToSignIn = false;
+
+function needsSignIn(status, body) {
+  return status === 401 || (status === 503 && Boolean(body && body.locked));
+}
+
+function goToSignIn() {
+  if (goingToSignIn) return;
+  goingToSignIn = true;
+  const here = location.pathname + location.search + location.hash;
+  location.assign(here === "/" ? "/login" : `/login?next=${encodeURIComponent(here)}`);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -87,6 +102,10 @@ async function api(path, options = {}) {
     } catch {
       body = null;
     }
+  }
+  if (needsSignIn(response.status, body)) {
+    goToSignIn();
+    throw new Error("Sign in to Oscar again.");
   }
   if (!response.ok) {
     throw new Error(describeError(body, response.status));
@@ -507,6 +526,9 @@ async function loadStatus() {
   phonePill.textContent = status.phone.enabled ? "Phone: ready" : "Phone: not set up";
   phonePill.classList.toggle("off", !status.phone.enabled);
 
+  // Sign out, when the dashboard asks for a password (app/signin.py).
+  $("sign-out").hidden = !(status.dashboard && status.dashboard.password);
+
   const searchPill = $("search-pill");
   searchPill.textContent = status.search.enabled ? "Web search: on" : "Web search: off";
   searchPill.classList.toggle("off", !status.search.enabled);
@@ -812,6 +834,10 @@ async function previewVoice() {
         body = await response.json();
       } catch {
         body = null;
+      }
+      if (needsSignIn(response.status, body)) {
+        goToSignIn();
+        throw new Error("Sign in to Oscar again.");
       }
       throw new Error(describeError(body, response.status));
     }
@@ -1544,8 +1570,10 @@ function connectEvents() {
   };
   source.onerror = () => {
     if (source.readyState === EventSource.CLOSED) {
-      // The browser gave up (for example, a sign-in in front of Oscar expired).
+      // The browser gave up: Oscar refused the stream (signed out: loadStatus then
+      // goes to the sign-in page), or a sign-in in front of Oscar expired.
       showConnectionNotice("Lost the connection to Oscar.", { reload: true });
+      loadStatus().catch(() => {});
       return;
     }
     // It tries again by itself: only say so if that takes more than a moment.
@@ -1773,11 +1801,11 @@ async function startBrowserCall({ agent = null } = {}) {
 }
 
 // The call's audio could not get between this browser and Oscar. The server
-// records why (on a server, the firewall's UDP ports), and that reason replaces
-// this message as soon as it arrives.
+// records it on the call (the technical reason goes to its log only), and that
+// line replaces this message as soon as it arrives.
 function audioNeverConnected() {
   if (!peer || !state.browserCallId) return; // that call is over already
-  showError("call-error", "The call's audio could not connect to Oscar.");
+  showError("call-error", "The call's audio couldn't connect. Try again, or call from another network.");
   endBrowserCall("audio_failed");
 }
 
@@ -1815,6 +1843,18 @@ async function endBrowserCall(reason) {
   } catch {
     // Closing the connection also ends the call on the server.
   }
+}
+
+// Signing out ends this tab's browser call first (the call would lose the
+// dashboard anyway). Unsaved settings still ask before the page goes.
+function setUpSignOut() {
+  const form = $("sign-out");
+  form.addEventListener("submit", async (event) => {
+    if (!state.browserCallId) return;
+    event.preventDefault();
+    await endBrowserCall();
+    form.submit();
+  });
 }
 
 function onCallButton() {
@@ -3746,6 +3786,7 @@ async function init() {
   setUpSpendChart();
   setUpListForm();
   setUpNumbers();
+  setUpSignOut();
   loadModelSuggestions();
   // Unsaved settings are not lost to a closed tab or a reload without a warning.
   window.addEventListener("beforeunload", (event) => {
@@ -3793,6 +3834,7 @@ async function init() {
     const linked = new URL(location.href).searchParams.get("call");
     if (linked) openDetail(linked);
   } catch (error) {
+    if (goingToSignIn) return;
     const notice = $("setup-notice");
     notice.textContent = `Could not reach the server: ${error.message}`;
     notice.hidden = false;

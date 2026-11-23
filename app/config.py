@@ -50,16 +50,35 @@ class Config:
     # audience (AUD) tag. Both or neither.
     access_team_domain: str = ""
     access_audience: str = ""
+    # The dashboard's password (DASHBOARD_PASSWORD; app/signin.py).
+    dashboard_password: str = ""
 
     @property
     def local_only(self) -> bool:
-        """Whether only this computer can open Oscar (HOST=127.0.0.1 or localhost).
+        """Whether Oscar listens only on this computer (HOST=127.0.0.1 or localhost).
 
-        Otherwise, such as with HOST=0.0.0.0 on a server, anyone who can reach the
-        port can use the dashboard: there is no password, so the server's firewall
-        decides who can.
+        Otherwise, such as with HOST=0.0.0.0 on a server, other computers that can
+        reach the port reach the dashboard.
         """
         return self.host in LOCAL_ONLY_HOSTS
+
+    @property
+    def reachable_from_elsewhere(self) -> bool:
+        """Whether other computers can reach Oscar: it listens beyond this computer, or a public address (PUBLIC_URL, such as a tunnel) leads to it."""
+        return not self.local_only or bool(self.public_url)
+
+    @property
+    def dashboard_mode(self) -> str:
+        """How the dashboard is guarded (app/signin.py).
+
+        "password": DASHBOARD_PASSWORD is set, so everyone signs in. "locked": no
+        password, but other computers can reach Oscar, so the dashboard opens for
+        nobody until one is set. "open": no password, and only this computer can
+        reach Oscar.
+        """
+        if self.dashboard_password:
+            return "password"
+        return "locked" if self.reachable_from_elsewhere else "open"
 
     @property
     def access_required(self) -> bool:
@@ -128,18 +147,32 @@ def browser_call_udp_ports() -> tuple[int, int]:
         return (32768, 60999) if sys.platform == "linux" else (49152, 65535)
 
 
+# What the dashboard says when a browser call's audio never connected. Nothing about
+# the server (its ports or firewall) is said where a visitor can see it: that goes
+# to the server's log (call_audio_unreachable_detail) and deploy.sh's output.
+CALL_AUDIO_UNREACHABLE = "The call's audio couldn't connect. Try again, or call from another network."
+CALL_AUDIO_UNREACHABLE_HERE = (
+    "The call's audio couldn't connect. Make browser calls on the computer Oscar runs on."
+)
+
+
 def call_audio_unreachable(cfg: Config) -> str:
-    """What to tell the owner when a browser call's audio never connected."""
+    """What the dashboard says when a browser call's audio never connected."""
+    return CALL_AUDIO_UNREACHABLE_HERE if cfg.local_only else CALL_AUDIO_UNREACHABLE
+
+
+def call_audio_unreachable_detail(cfg: Config) -> str:
+    """Why, for the server's log only: what to let in through the firewall."""
     if cfg.local_only:
         return (
-            "The call's audio could not connect. It goes straight between the browser and "
-            "the computer running Oscar, so make browser calls on that computer."
+            "A browser call's audio never connected. It goes straight between the browser and "
+            "this computer, so browser calls work from this computer only."
         )
     low, high = browser_call_udp_ports()
     return (
-        "The call's audio could not reach Oscar's server. It goes straight to the server "
-        f"over UDP, not through the web address: let in UDP ports {low}-{high} in the "
-        "server's firewall (on EC2, its security group), then call again."
+        "A browser call's audio never connected. It goes straight to this server over UDP, not "
+        f"through the web address: let in UDP ports {low}-{high} in the server's firewall "
+        "(on EC2, its security group)."
     )
 
 
@@ -189,6 +222,7 @@ def load_config() -> Config:
         access_team_domain=team_domain,
         access_audience=audience,
         max_calls=max_calls,
+        dashboard_password=_env("DASHBOARD_PASSWORD"),
     )
 
 

@@ -1,6 +1,8 @@
 import dataclasses
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,6 +11,8 @@ from app.main import create_app
 
 PUBLIC_URL = "https://oscar.example.test"
 TWILIO_AUTH_TOKEN = "test-twilio-auth-token"
+# The dashboard's password in tests (DASHBOARD_PASSWORD): test clients sign in with it.
+DASHBOARD_PASSWORD = "test-dashboard-password"
 
 
 def make_config(tmp_path: Path, **overrides) -> Config:
@@ -21,13 +25,34 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         host="127.0.0.1",
         port=0,
         db_path=tmp_path / "oscar-test.db",
+        dashboard_password=DASHBOARD_PASSWORD,
     )
     return dataclasses.replace(base, **overrides)
 
 
-def local_client(cfg: Config) -> TestClient:
-    """A test client that talks to the app the way a local browser does (Host: localhost)."""
-    return TestClient(create_app(cfg), base_url="http://localhost")
+def sign_in(client: TestClient, password: str = DASHBOARD_PASSWORD, **request) -> TestClient:
+    """Signs a test client in at /login, as the owner does in the browser."""
+    response = client.post("/login", data={"password": password}, follow_redirects=False, **request)
+    assert response.status_code == 303, response.text
+    return client
+
+
+def local_client(cfg: Config, **options) -> TestClient:
+    """A test client that talks to the app the way a local browser does (Host: localhost),
+    signed in when the dashboard asks for its password. `options` go to create_app."""
+    client = TestClient(create_app(cfg, **options), base_url="http://localhost")
+    if cfg.dashboard_mode == "password":
+        sign_in(client)
+    return client
+
+
+@asynccontextmanager
+async def dashboard_http(base: str, password: str = DASHBOARD_PASSWORD):
+    """An HTTP client signed in to an Oscar running at `base`."""
+    async with httpx.AsyncClient(base_url=base, timeout=30) as http:
+        response = await http.post("/login", data={"password": password})
+        assert response.status_code == 303, response.text
+        yield http
 
 
 @pytest.fixture
