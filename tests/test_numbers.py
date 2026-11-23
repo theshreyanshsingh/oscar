@@ -603,3 +603,49 @@ def test_the_dashboard_says_what_oscar_did_on_starting(tmp_path, twilio):
         assert overview["at_start"] == ["+61255550104 sent its calls to an older address of Oscar: they now come to this one."]
         states = {n["phone_number"]: n["state"] for n in overview["numbers"]}
         assert states["+61255550104"] == "connected"
+
+
+# A number disconnected in the dashboard stays as the owner left it
+
+
+def test_a_number_disconnected_in_the_dashboard_is_not_connected_again_on_starting(numbers, twilio, store):
+    twilio.numbers["PN" + "7" * 32] = number("7", "+61255550107")
+    store.set_calls_from("+61255550107")
+    numbers.connect("PN" + "7" * 32)
+    numbers.disconnect("PN" + "7" * 32)  # the owner's choice: it answers nothing again
+    assert twilio.numbers["PN" + "7" * 32]["voice_url"] == ""
+
+    said = numbers.connect_by_itself()
+    assert twilio.numbers["PN" + "7" * 32]["voice_url"] == ""
+    assert (
+        "+61255550107, the number Oscar calls from, was disconnected in Your numbers, so Oscar left it as it is. "
+        "Connect it there for Oscar to answer its calls."
+    ) in said
+
+    # Connected again in the dashboard, it is looked after again.
+    numbers.connect("PN" + "7" * 32)
+    twilio.numbers["PN" + "7" * 32]["voice_url"] = ""  # emptied in Twilio's console since
+    numbers.connect_by_itself()
+    assert twilio.numbers["PN" + "7" * 32]["voice_url"] == WEBHOOK
+
+
+def test_choosing_a_number_that_answers_nothing_to_call_from_connects_it(numbers, twilio, store):
+    twilio.numbers["PN" + "7" * 32] = number("7", "+61255550107")
+    numbers.choose_calls_from("+61255550107")
+    assert store.get_calls_from() == "+61255550107"
+    assert twilio.numbers["PN" + "7" * 32]["voice_url"] == WEBHOOK
+
+
+@pytest.mark.parametrize("chosen", ["+61255550102", "+61412345678"])
+def test_choosing_a_number_another_app_answers_or_a_caller_id_changes_nothing_in_twilio(numbers, twilio, chosen):
+    # +61255550102 is answered by a CRM; +61412345678 is a verified caller ID.
+    numbers.choose_calls_from(chosen)
+    assert twilio.posted() == []
+
+
+def test_choosing_a_number_disconnected_in_the_dashboard_leaves_it_disconnected(numbers, twilio):
+    twilio.numbers["PN" + "7" * 32] = number("7", "+61255550107")
+    numbers.connect("PN" + "7" * 32)
+    numbers.disconnect("PN" + "7" * 32)
+    numbers.choose_calls_from("+61255550107")
+    assert twilio.numbers["PN" + "7" * 32]["voice_url"] == ""

@@ -21,13 +21,13 @@ Every request to Twilio is made here, on a worker thread (they block), with a
 timeout. Releasing a number is left to Twilio's console: it cannot be undone.
 """
 
+import json
 import re
 import threading
 import time
 from urllib.parse import urlsplit
 
-import json
-
+from loguru import logger
 from twilio.base.exceptions import TwilioException, TwilioRestException, TwilioServiceException
 from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
@@ -268,9 +268,11 @@ class TwilioNumbers:
           that one becomes it (and is connected the same way).
 
         A number another app answers (a webhook, a TwiML app, a SIP trunk) is never taken:
-        that is asked in the dashboard first."""
+        that is asked in the dashboard first. Nor is one disconnected in the dashboard:
+        it stays as it is until it is connected there again."""
         client = self._client()
         known = self._known()
+        left_alone = self._store.numbers_left_alone()
         try:
             numbers = self._owned(client)
         except Exception as exc:
@@ -286,10 +288,15 @@ class TwilioNumbers:
             state, detail = number_state(self._cfg, number, known)
             if state == "old_address":
                 done = f"{number.phone_number} sent its calls to an older address of Oscar: they now come to this one."
-            elif state == "unset" and number.phone_number == here:
+            elif state == "unset" and number.phone_number == here and number.sid not in left_alone:
                 done = f"{number.phone_number}, the number Oscar calls from, answered nothing: its calls now come to Oscar."
             else:
-                if number.phone_number == here and state != "connected":
+                if number.phone_number == here and number.sid in left_alone and state == "unset":
+                    said.append(
+                        f"{number.phone_number}, the number Oscar calls from, was disconnected in Your numbers, "
+                        "so Oscar left it as it is. Connect it there for Oscar to answer its calls."
+                    )
+                elif number.phone_number == here and state != "connected":
                     said.append(
                         f"{number.phone_number}, the number Oscar calls from, does not bring its calls to Oscar. "
                         f"{detail} Connect it in Phone, Your numbers."
@@ -337,6 +344,8 @@ class TwilioNumbers:
             raise
         except Exception as exc:
             raise describe(exc) from None
+        # Connected by the owner (or by Oscar): no longer one to leave alone.
+        self._store.stop_leaving_number_alone(number.sid)
         return self._view(updated)
 
     def disconnect(self, sid: str) -> dict:
@@ -363,6 +372,8 @@ class TwilioNumbers:
         except Exception as exc:
             raise describe(exc) from None
         self._store.forget_number_connection(number.sid)
+        # The owner's choice: Oscar does not connect it again by itself.
+        self._store.leave_number_alone(number.sid, number.phone_number)
         return self._view(updated)
 
     def countries(self) -> list[dict]:
@@ -502,4 +513,14 @@ class TwilioNumbers:
                 status=400,
             )
         self._store.set_calls_from(phone_number)
+        # A number of the account that answers nothing is connected too, so whoever calls
+        # it back reaches Oscar (one disconnected in the dashboard, or that another app
+        # answers, is left as it is).
+        for number in owned:
+            state, _ = number_state(self._cfg, number, self._known())
+            if state == "unset" and number.sid not in self._store.numbers_left_alone():
+                try:
+                    self.connect(number.sid)
+                except NumbersError as exc:
+                    logger.warning(f"{phone_number} is the number Oscar calls from, but could not be connected: {exc}")
         return phone_number

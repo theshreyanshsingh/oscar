@@ -502,7 +502,9 @@ reach Oscar:
 **Call from this** chooses the number Oscar's own calls (and call lists) come
 from. A number chosen here comes before `TWILIO_PHONE_NUMBER` in `.env`, which
 is used only until one is chosen (the dashboard says which it is). With
-neither, Oscar says so instead of calling.
+neither, Oscar says so instead of calling. A number of the account chosen here
+that answers nothing is connected to Oscar too, so whoever calls it back
+reaches the agent.
 
 **Get a new number** searches Twilio for numbers that take calls: by country,
 local, mobile or toll-free (whichever Twilio has there), an area code (US and
@@ -532,6 +534,9 @@ number works without a visit to the dashboard:
   calls, that one becomes it, and is connected the same way.
 - A number another app answers is never taken: Oscar notes it, and you connect
   it under Your numbers (which asks first).
+- A number you **Disconnect** stays disconnected: Oscar does not connect it
+  again by itself (on starting, or when it is chosen to call from) until you
+  connect it in Your numbers again.
 
 What it did is listed under Your numbers ("When Oscar started") and in its log.
 

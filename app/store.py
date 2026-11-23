@@ -395,6 +395,14 @@ class Store:
                     status_callback_method TEXT NOT NULL DEFAULT '',
                     connected_at TEXT NOT NULL
                 );
+                -- Numbers disconnected from Oscar in the dashboard: Oscar does not connect them
+                -- again by itself (when it starts, or on choosing one to call from) until
+                -- they are connected in the dashboard again (app/numbers.py).
+                CREATE TABLE IF NOT EXISTS numbers_left_alone (
+                    sid TEXT PRIMARY KEY,
+                    phone_number TEXT NOT NULL,
+                    since TEXT NOT NULL
+                );
                 -- People who asked not to be called again: call lists skip them (app/campaigns.py).
                 CREATE TABLE IF NOT EXISTS do_not_call (
                     number TEXT PRIMARY KEY,
@@ -1028,6 +1036,23 @@ class Store:
     def forget_number_connection(self, sid: str) -> None:
         with self._lock:
             self._db.execute("DELETE FROM number_connections WHERE sid = ?", (sid,))
+
+    def leave_number_alone(self, sid: str, phone_number: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO numbers_left_alone (sid, phone_number, since) VALUES (?, ?, ?)",
+                (sid, phone_number, utc_now()),
+            )
+
+    def stop_leaving_number_alone(self, sid: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM numbers_left_alone WHERE sid = ?", (sid,))
+
+    def numbers_left_alone(self) -> set[str]:
+        """The SIDs of the numbers disconnected in the dashboard and not connected since."""
+        with self._lock:
+            rows = self._db.execute("SELECT sid FROM numbers_left_alone").fetchall()
+        return {row["sid"] for row in rows}
 
     # People who asked not to be called again (app/campaigns.py)
 
