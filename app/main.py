@@ -45,6 +45,7 @@ from app.campaigns import (
 )
 from app.catalog import ModelCatalog
 from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
+from app.numbers import NumbersError, TwilioNumbers, calls_from
 from app.preview import PreviewFailed, voice_sample
 from app.recording import finish_leftovers, prune, recording_path, recordings_folder
 from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
@@ -58,6 +59,7 @@ from app.config import (
 from app.events import EventBus
 from app.phone import (
     BLOCKED_NUMBERS_MOST,
+    NO_NUMBER_TO_CALL_FROM,
     PhoneCallError,
     blocked_entry,
     create_phone_router,
@@ -124,6 +126,14 @@ class ContactsPreview(BaseModel):
 
 class DoNotCallEntry(BaseModel):
     number: str = Field(min_length=1, max_length=40)
+
+
+class NumberToBuy(BaseModel):
+    phone_number: str = Field(pattern=r"^\+[1-9]\d{6,14}$")
+
+
+class CallsFrom(BaseModel):
+    phone_number: str = Field(pattern=r"^\+[1-9]\d{6,14}$")
 
 
 # The most problems with a CSV shown at once.
@@ -326,6 +336,7 @@ def create_app(
                 calls.update(call_id, recording_seconds=0)
 
     dialer = CampaignDialer(cfg, calls, credit)
+    numbers = TwilioNumbers(cfg, store)
 
     async def keep_dialing() -> None:
         """Make the calls of the call lists that are running (app/campaigns.py)."""
@@ -365,7 +376,8 @@ def create_app(
             "phone": {
                 "enabled": cfg.phone_enabled,
                 "missing": cfg.missing_phone_settings(),
-                "number": cfg.twilio_phone_number,
+                # The number Oscar's own calls come from (app/numbers.py).
+                "number": calls_from(cfg, store),
                 "voice_webhook": f"{cfg.public_url}/twilio/voice" if cfg.public_url else "",
             },
             "search": {"enabled": cfg.search_enabled},
@@ -617,8 +629,11 @@ def create_app(
                 status_code=400,
                 detail=f"Phone calls need {', '.join(missing)} in the .env file.",
             )
+        from_number = calls_from(cfg, store)
+        if not from_number:
+            raise HTTPException(status_code=400, detail=NO_NUMBER_TO_CALL_FROM)
         try:
-            call = await place_outbound_call(cfg, calls, request.to)
+            call = await place_outbound_call(cfg, calls, request.to, from_number=from_number)
         except PhoneCallError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"call": call}
@@ -671,6 +686,16 @@ def create_app(
 
     # Call lists (app/campaigns.py)
 
+    def require_phone_for_lists() -> None:
+        require_agent_keys()
+        missing = cfg.missing_phone_settings()
+        if missing:
+            raise HTTPException(
+                status_code=400, detail=f"Call lists need phone calls set up: add {', '.join(missing)} to the .env file."
+            )
+        if not calls_from(cfg, store):
+            raise HTTPException(status_code=400, detail=NO_NUMBER_TO_CALL_FROM)
+
     def campaign_or_404(campaign_id: str) -> dict:
         campaign = store.get_campaign(campaign_id)
         if campaign is None:
@@ -711,12 +736,7 @@ def create_app(
         if not contacts:
             raise HTTPException(status_code=400, detail="The CSV has no phone numbers Oscar can call.")
         if request.start:
-            require_agent_keys()
-            missing = cfg.missing_phone_settings()
-            if missing:
-                raise HTTPException(
-                    status_code=400, detail=f"Call lists need phone calls set up: add {', '.join(missing)} to the .env file."
-                )
+            require_phone_for_lists()
         campaign = store.create_campaign(
             {
                 "name": request.name,
@@ -757,12 +777,7 @@ def create_app(
     async def resume_campaign(campaign_id: str) -> dict:
         campaign = campaign_or_404(campaign_id)
         if campaign["status"] in ("paused", "done", "stopped"):
-            require_agent_keys()
-            missing = cfg.missing_phone_settings()
-            if missing:
-                raise HTTPException(
-                    status_code=400, detail=f"Call lists need phone calls set up: add {', '.join(missing)} to the .env file."
-                )
+            require_phone_for_lists()
             store.update_campaign(campaign_id, status="running", status_detail="")
         return {"campaign": publish_campaign(campaign_id)}
 
@@ -780,7 +795,7 @@ def create_app(
         again = store.call_again(campaign_id, CALL_AGAIN_STATUSES)
         if again and campaign["status"] == "done":
             # A finished list starts again; a paused one waits for Resume.
-            ready = not cfg.missing_phone_settings() and not cfg.missing_agent_keys()
+            ready = not cfg.missing_phone_settings() and not cfg.missing_agent_keys() and bool(calls_from(cfg, store))
             store.update_campaign(campaign_id, status="running" if ready else "paused", status_detail="")
         return {"again": again, "campaign": publish_campaign(campaign_id)}
 
@@ -808,6 +823,61 @@ def create_app(
         store.remove_do_not_call(number)
         bus.publish({"type": "do_not_call"})
         return {"do_not_call": store.get_do_not_call()}
+
+    # Twilio numbers (app/numbers.py)
+
+    async def on_twilio(method, *args):
+        """Run a TwilioNumbers method on a worker thread; its refusals become the dashboard's errors."""
+        missing = cfg.missing_phone_settings()
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Add {', '.join(missing)} to the .env file, then restart Oscar.")
+        try:
+            return await asyncio.to_thread(method, *args)
+        except NumbersError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+
+    @app.get("/api/numbers")
+    async def phone_numbers() -> dict:
+        """The Twilio account's numbers, whether each reaches Oscar, and the number Oscar calls from."""
+        return await on_twilio(numbers.overview)
+
+    @app.post("/api/numbers/{sid}/connect")
+    async def connect_number(sid: str) -> dict:
+        number = await on_twilio(numbers.connect, sid)
+        bus.publish({"type": "numbers"})
+        return {"number": number}
+
+    @app.post("/api/numbers/{sid}/disconnect")
+    async def disconnect_number(sid: str) -> dict:
+        number = await on_twilio(numbers.disconnect, sid)
+        bus.publish({"type": "numbers"})
+        return {"number": number}
+
+    @app.get("/api/numbers/countries")
+    async def number_countries() -> dict:
+        return {"countries": await on_twilio(numbers.countries)}
+
+    @app.get("/api/numbers/search")
+    async def search_numbers(
+        country: str = Query(min_length=2, max_length=2),
+        kind: Literal["local", "mobile", "toll_free"] = "local",
+        area_code: str = Query(default="", max_length=5),
+        contains: str = Query(default="", max_length=16),
+    ) -> dict:
+        return await on_twilio(numbers.search, country, kind, area_code, contains)
+
+    @app.post("/api/numbers/buy")
+    async def buy_number(request: NumberToBuy) -> dict:
+        """Buy a number from Twilio (it charges the account now and every month), connected to Oscar."""
+        number = await on_twilio(numbers.buy, request.phone_number)
+        bus.publish({"type": "numbers"})
+        return {"number": number, "calls_from": calls_from(cfg, store)}
+
+    @app.put("/api/numbers/calls-from")
+    async def choose_calls_from(request: CallsFrom) -> dict:
+        chosen = await on_twilio(numbers.choose_calls_from, request.phone_number)
+        bus.publish({"type": "numbers"})
+        return {"calls_from": chosen}
 
     @app.get("/api/whatsapp")
     async def whatsapp() -> dict:

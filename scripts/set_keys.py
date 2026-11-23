@@ -53,7 +53,7 @@ PHONE = [
     Setting("TWILIO_AUTH_TOKEN", "Twilio Auth Token"),
     Setting(
         "TWILIO_PHONE_NUMBER",
-        "Your Twilio phone number, like +14155550123",
+        "The number Oscar calls from, like +14155550123 (optional, and a number chosen on the dashboard comes first)",
         secret=False,
         problem=phone_number,
     ),

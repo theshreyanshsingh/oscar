@@ -26,7 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.calls import CallManager, lines_busy
 from app.config import Config
 from app.costs import KeyCredit
-from app.phone import PhoneCallError, is_blocked, place_outbound_call
+from app.numbers import calls_from
+from app.phone import NO_NUMBER_TO_CALL_FROM, PhoneCallError, is_blocked, place_outbound_call
 from app.store import VOICEMAIL_MESSAGE_CHARS, AgentSettings, Store
 
 # The most numbers one list takes, and how big its CSV can be.
@@ -337,6 +338,10 @@ class CampaignDialer:
         if missing:
             self._set_status(campaign, "paused", f"Paused: add {', '.join(missing)} to the .env file.")
             return
+        from_number = calls_from(self._cfg, self._store)
+        if not from_number:
+            self._set_status(campaign, "paused", f"Paused. {NO_NUMBER_TO_CALL_FROM}")
+            return
         if not in_calling_hours(campaign):
             hours = f"{clock_of(campaign['calling_from'])} to {clock_of(campaign['calling_until'])}"
             self._set_status(campaign, "running", f"Waiting for calling hours ({hours}, {campaign['timezone']}).")
@@ -377,6 +382,7 @@ class CampaignDialer:
                     contact["number"],
                     agent=agent_for_contact(agent, campaign, contact),
                     campaign_id=campaign["id"],
+                    from_number=from_number,
                 )
             except PhoneCallError as exc:
                 self._store.update_contact(contact["id"], status="failed", detail=str(exc))

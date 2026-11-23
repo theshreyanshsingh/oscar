@@ -408,7 +408,8 @@ public https address.
    ```
 
 2. Save your Twilio details. This asks for each one (the secret without
-   showing it) and writes them to `.env`:
+   showing it) and writes them to `.env`. The number is optional: you can
+   choose or buy numbers on the dashboard instead.
 
    ```bash
    .venv/bin/python -m scripts.set_keys --phone
@@ -424,11 +425,12 @@ public https address.
    the tunnel's address can open it, so keep the address to yourself and stop
    the tunnel when you are done.
 
-3. Restart Oscar. The dashboard's **Phone calls** card shows your incoming-calls webhook.
-
-4. In the Twilio console, open your phone number. Under **Voice → A call comes
-   in**, choose **Webhook**, paste the webhook URL (it ends in `/twilio/voice`)
-   and select **HTTP POST**. Save.
+3. Restart Oscar. **Your numbers** (under Phone) lists the numbers on your
+   Twilio account. Press **Connect to Oscar** on the one people should call:
+   Oscar sets its "A call comes in" webhook in Twilio for you. (To do it by
+   hand instead: in the Twilio console, open the number, and under **Voice → A
+   call comes in** choose **Webhook**, paste the address shown under Your
+   numbers (it ends in `/twilio/voice`) and select **HTTP POST**.)
 
 **Ring here when someone calls Oscar** (under **Call now**) plays a chime in
 the dashboard tab when a call comes in, and shows a notification while you are
@@ -440,7 +442,53 @@ Now call your Twilio number to talk to the agent, or type a number in
 call numbers you have verified in the Twilio console.
 
 If your tunnel address changes (for example after restarting ngrok), update
-`PUBLIC_URL`, restart Oscar, and update the Twilio webhook.
+`PUBLIC_URL` and restart Oscar. Your numbers then shows the numbers still
+pointing at the old address as **Old address**: press **Connect again**.
+
+### Your numbers
+
+The Phone section lists the Twilio account's numbers, read from Twilio each
+time the dashboard opens (and with **Refresh**). Each says whether its calls
+reach Oscar:
+
+- **Connected to Oscar:** calls to it are answered by Oscar. Any number of the
+  account that is connected is answered, so Oscar can have several (a call
+  in Call history shows which number was called).
+- **Connect to Oscar** sets the number's voice webhook to Oscar, and its status
+  callback too if nothing else uses it. What the number had before is kept, and
+  **Disconnect** puts it back as it was.
+- **Not Oscar:** another address or a TwiML app answers it. Connecting asks
+  first, then takes its calls over (Disconnect gives them back).
+- **SIP trunk:** a SIP trunk in Twilio answers it. Oscar leaves it alone: take
+  it off the trunk in Twilio's console first.
+- **Old address:** it points at an earlier address of Oscar (an old tunnel).
+  Oscar remembers each `PUBLIC_URL` it has had, and only those count: another
+  app with the same `/twilio/voice` path is shown as Not Oscar.
+- Numbers you have verified in Twilio (Verified caller IDs) are listed too:
+  Oscar can call from them, but calls to them do not reach Oscar.
+
+**Call from this** chooses the number Oscar's own calls (and call lists) come
+from. A number chosen here comes before `TWILIO_PHONE_NUMBER` in `.env`, which
+is used only until one is chosen (the dashboard says which it is). With
+neither, Oscar says so instead of calling.
+
+**Get a new number** searches Twilio for numbers that take calls: by country,
+local, mobile or toll-free (whichever Twilio has there), an area code (US and
+Canada) or digits the number should contain. Each result shows the place,
+whether Twilio needs an address on file for it, and Twilio's monthly price
+(from its pricing API). **Buy** asks you to confirm the price first. The number
+is bought on your Twilio account, connected to Oscar straight away, and, if
+Oscar had no number to call from, becomes that one. Twilio charges for it
+every month until you release it, which you do in Twilio's console (Oscar
+cannot release numbers, so a slip cannot throw one away). While a purchase is
+on its way nothing else can be pressed. If Twilio's answer never comes, Oscar
+looks for the number on the account before saying anything, so a number that
+was bought is never reported as failed and bought twice. Numbers in some
+countries need an address or other documents first: Twilio's refusal is shown
+in its own words, with where to add them.
+
+A trial Twilio account is marked as such: it can only call numbers verified in
+Twilio, and Twilio plays a short message at the start of each call.
 
 ### Putting callers through to you
 
@@ -1106,6 +1154,7 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/openrouter.py` | Shared OpenRouter helpers (error messages, headers) |
 | `app/main.py` | Web server: dashboard, JSON API, browser calls |
 | `app/phone.py` | Twilio: incoming/outgoing calls, signature checks, media stream |
+| `app/numbers.py` | Twilio numbers from the dashboard: listing, connecting, searching, buying, the number calls come from |
 | `app/script.py` | The owner's script: its steps, the note the speech model gets, and the model that keeps Oscar's place |
 | `app/summary.py` | The note written when a call ends: summary, name, number to call back, what to do |
 | `app/research.py` | The research notes written when a call ends: what its web searches found, checked against the pages |

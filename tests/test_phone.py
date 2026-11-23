@@ -59,10 +59,37 @@ def test_inbound_call_with_bad_signature_is_rejected(client):
     assert client.get("/api/calls").json()["calls"] == []
 
 
-def test_inbound_call_when_phone_not_configured(tmp_path):
-    cfg = make_config(tmp_path, twilio_phone_number="")
+@pytest.mark.parametrize("missing", ["twilio_account_sid", "twilio_auth_token", "public_url"])
+def test_inbound_call_when_phone_not_configured(tmp_path, missing):
+    cfg = make_config(tmp_path, **{missing: ""})
     with local_client(cfg) as client:
         assert signed_post(client, "/twilio/voice", INBOUND).status_code == 403
+
+
+def test_calls_come_in_without_a_number_in_the_env_file(tmp_path):
+    # Any number of the account that is connected to Oscar is answered (app/numbers.py).
+    with local_client(make_config(tmp_path, twilio_phone_number="")) as client:
+        response = signed_post(client, "/twilio/voice", {**INBOUND, "To": "+61255550199"})
+        _, params = stream_parameters(response.text)
+        call = client.get(f"/api/calls/{params['call_id']}").json()["call"]
+        assert call["to_number"] == "+61255550199"
+
+
+def test_calls_out_come_from_the_number_chosen_in_the_dashboard(client, twilio):
+    client.app.state.store.set_calls_from("+61255550199")
+    call = client.post("/api/calls/phone", json={"to": "+14155550123"}).json()["call"]
+    assert call["from_number"] == "+61255550199"
+    assert twilio.created[0]["from_"] == "+61255550199"
+
+
+def test_without_a_number_to_call_from_oscar_says_how_to_choose_one(tmp_path, monkeypatch):
+    fake = FakeTwilioCalls()
+    monkeypatch.setattr(phone, "_twilio_client", lambda cfg: FakeTwilioClient(fake))
+    with local_client(make_config(tmp_path, twilio_phone_number="")) as client:
+        response = client.post("/api/calls/phone", json={"to": "+14155550123"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == phone.NO_NUMBER_TO_CALL_FROM
+        assert fake.created == [] and client.get("/api/calls").json()["calls"] == []
 
 
 def test_inbound_call_without_agent_keys_says_sorry(tmp_path):

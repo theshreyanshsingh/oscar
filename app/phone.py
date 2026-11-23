@@ -33,6 +33,7 @@ from app.calls import AUDIO_NEVER_CONNECTED, CallManager, lines_busy
 from app.config import Config
 from app.costs import KeyCredit
 from app.notify import not_put_through_payload
+from app.numbers import twilio_message
 from app.store import OPEN_STATUSES, AgentSettings, Store
 from app.summary import alert_if_missed, alert_owner
 
@@ -99,6 +100,11 @@ class PhoneCallError(RuntimeError):
     """Twilio refused to place or change a call."""
 
 
+NO_NUMBER_TO_CALL_FROM = (
+    "Choose the number Oscar calls from first: Phone, Your numbers (or set TWILIO_PHONE_NUMBER in .env)."
+)
+
+
 def stream_twiml(cfg: Config, call_id: str, token: str) -> str:
     response = VoiceResponse()
     connect = Connect()
@@ -124,12 +130,18 @@ async def place_outbound_call(
     *,
     agent: AgentSettings | None = None,
     campaign_id: str = "",
+    from_number: str = "",
 ) -> dict:
-    """Dial a number. `agent`: settings for this call only (a call list's), instead of the saved ones."""
+    """Dial a number from `from_number` (TWILIO_PHONE_NUMBER when not given; see
+    app.numbers.calls_from). `agent`: settings for this call only (a call list's),
+    instead of the saved ones."""
+    from_number = from_number or cfg.twilio_phone_number
+    if not from_number:
+        raise PhoneCallError(NO_NUMBER_TO_CALL_FROM)
     call = calls.create(
         "phone_outbound",
         status="connecting",
-        from_number=cfg.twilio_phone_number,
+        from_number=from_number,
         to_number=to_number,
         campaign_id=campaign_id,
     )
@@ -140,7 +152,7 @@ async def place_outbound_call(
         twilio_call = await asyncio.to_thread(
             _twilio_client(cfg).calls.create,
             to=to_number,
-            from_=cfg.twilio_phone_number,
+            from_=from_number,
             twiml=stream_twiml(cfg, call["id"], token),
             # The call's id rides along (Twilio signs it with the rest), so an
             # update that arrives before Twilio has answered with the call's SID
@@ -157,7 +169,7 @@ async def place_outbound_call(
         )
     except Exception as exc:
         if isinstance(exc, TwilioRestException):
-            message = f"Twilio refused the call: {exc.msg}"
+            message = f"Twilio refused the call: {twilio_message(exc)}."
         else:
             message = f"Could not reach Twilio: {exc}"
         calls.finish(call["id"], message)
@@ -178,8 +190,8 @@ async def hang_up_phone_call(cfg: Config, twilio_sid: str) -> None:
     try:
         await asyncio.to_thread(_twilio_client(cfg).calls(twilio_sid).update, status="completed")
     except Exception as exc:
-        detail = exc.msg if isinstance(exc, TwilioRestException) else str(exc)
-        raise PhoneCallError(f"Twilio could not hang up the call: {detail}") from exc
+        detail = twilio_message(exc) if isinstance(exc, TwilioRestException) else str(exc)
+        raise PhoneCallError(f"Twilio could not hang up the call: {detail}.") from exc
 
 
 async def put_call_through(cfg: Config, call_id: str, twilio_sid: str, number: str) -> None:
@@ -195,8 +207,8 @@ async def put_call_through(cfg: Config, call_id: str, twilio_sid: str, number: s
     try:
         await asyncio.to_thread(_twilio_client(cfg).calls(twilio_sid).update, twiml=str(response))
     except Exception as exc:
-        detail = exc.msg if isinstance(exc, TwilioRestException) else str(exc)
-        raise PhoneCallError(f"Twilio could not put the call through: {detail}") from exc
+        detail = twilio_message(exc) if isinstance(exc, TwilioRestException) else str(exc)
+        raise PhoneCallError(f"Twilio could not put the call through: {detail}.") from exc
 
 
 async def _read_start_message(websocket: WebSocket) -> dict | None:

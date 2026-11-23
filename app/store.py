@@ -370,6 +370,30 @@ class Store:
                     number TEXT PRIMARY KEY,
                     added_at TEXT NOT NULL
                 );
+                -- Which Twilio number Oscar calls from, chosen in the dashboard (app/numbers.py).
+                CREATE TABLE IF NOT EXISTS phone_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    calls_from TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                -- The addresses Oscar has had (PUBLIC_URL's scheme and host): a number whose
+                -- webhook is at one of them is Oscar's, at an old address (app/numbers.py).
+                CREATE TABLE IF NOT EXISTS oscar_addresses (
+                    origin TEXT PRIMARY KEY,
+                    first_seen TEXT NOT NULL
+                );
+                -- How a Twilio number answered calls before Oscar was connected to it, so
+                -- disconnecting puts it back as it was (app/numbers.py).
+                CREATE TABLE IF NOT EXISTS number_connections (
+                    sid TEXT PRIMARY KEY,
+                    phone_number TEXT NOT NULL,
+                    voice_url TEXT NOT NULL DEFAULT '',
+                    voice_method TEXT NOT NULL DEFAULT '',
+                    voice_application_sid TEXT NOT NULL DEFAULT '',
+                    status_callback TEXT NOT NULL DEFAULT '',
+                    status_callback_method TEXT NOT NULL DEFAULT '',
+                    connected_at TEXT NOT NULL
+                );
                 -- People who asked not to be called again: call lists skip them (app/campaigns.py).
                 CREATE TABLE IF NOT EXISTS do_not_call (
                     number TEXT PRIMARY KEY,
@@ -907,6 +931,65 @@ class Store:
                 raise
             self._db.execute("COMMIT")
         return self.get_blocked_numbers()
+
+    # Twilio numbers (app/numbers.py)
+
+    def get_calls_from(self) -> str:
+        """The number chosen in the dashboard for calls Oscar makes; "" when none was."""
+        with self._lock:
+            row = self._db.execute("SELECT calls_from FROM phone_settings WHERE id = 1").fetchone()
+        return row["calls_from"] if row else ""
+
+    def set_calls_from(self, number: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO phone_settings (id, calls_from, updated_at) VALUES (1, ?, ?) "
+                "ON CONFLICT (id) DO UPDATE SET calls_from = excluded.calls_from, updated_at = excluded.updated_at",
+                (number, utc_now()),
+            )
+
+    def get_number_connection(self, sid: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM number_connections WHERE sid = ?", (sid,)).fetchone()
+        return dict(row) if row else None
+
+    def remember_oscar_address(self, origin: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO oscar_addresses (origin, first_seen) VALUES (?, ?)", (origin, utc_now())
+            )
+
+    def oscar_addresses(self) -> set[str]:
+        with self._lock:
+            rows = self._db.execute("SELECT origin FROM oscar_addresses").fetchall()
+        return {row["origin"] for row in rows}
+
+    def save_number_connection(self, sid: str, phone_number: str, before: dict) -> None:
+        """How the number answered calls before Oscar took them (replacing an older record:
+        what it had most recently is what disconnecting puts back)."""
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT OR REPLACE INTO number_connections
+                    (sid, phone_number, voice_url, voice_method, voice_application_sid,
+                     status_callback, status_callback_method, connected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sid,
+                    phone_number,
+                    before.get("voice_url") or "",
+                    before.get("voice_method") or "",
+                    before.get("voice_application_sid") or "",
+                    before.get("status_callback") or "",
+                    before.get("status_callback_method") or "",
+                    utc_now(),
+                ),
+            )
+
+    def forget_number_connection(self, sid: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM number_connections WHERE sid = ?", (sid,))
 
     # People who asked not to be called again (app/campaigns.py)
 

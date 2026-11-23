@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=18" />
+    <link rel="stylesheet" href="/static/style.css?v=21" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -185,18 +185,73 @@
               </p>
             </div>
 
-            <div class="panel panel-outline reveal" style="--delay: 0.12s">
-              <dl class="facts">
-                <dt>Oscar's number</dt>
-                <dd class="fact-big" id="phone-number"></dd>
-                <dt>Webhook for incoming calls</dt>
-                <dd><code id="phone-webhook"></code></dd>
-              </dl>
-              <p class="hint">
-                To let people call Oscar, paste this URL into your Twilio number's "A call comes
-                in" setting (Webhook, HTTP POST).
+            <div class="panel panel-outline numbers-panel reveal" style="--delay: 0.12s">
+              <div class="numbers-head">
+                <h3 class="panel-title">Your numbers</h3>
+                <button type="button" class="link" id="numbers-refresh">Refresh</button>
+              </div>
+              <p class="numbers-trial" id="numbers-trial" hidden>
+                Twilio trial account: Oscar can only call numbers you have verified in Twilio, and
+                Twilio plays a short message before each call.
               </p>
+              <ul class="numbers-list" id="numbers-list" aria-live="polite">
+                <li class="numbers-empty hint">Asking Twilio…</li>
+              </ul>
+              <p class="hint" id="numbers-more" hidden>
+                The account has more numbers than are listed here: see the rest in Twilio's console.
+              </p>
+              <p class="error" id="numbers-error" role="alert" hidden></p>
+              <div class="numbers-foot">
+                <button type="button" class="secondary" id="numbers-get" aria-expanded="false" aria-controls="buy-panel">
+                  Get a new number
+                </button>
+                <p class="hint">
+                  Oscar's calls come from <strong id="phone-number">—</strong><span id="phone-number-source"></span>.
+                  Connecting a number sets its "A call comes in" webhook in Twilio to
+                  <code id="phone-webhook"></code>
+                </p>
+              </div>
             </div>
+          </div>
+
+          <div class="panel panel-outline buy-panel" id="buy-panel" hidden>
+            <div class="buy-head">
+              <div>
+                <h3 class="panel-title">Get a new number</h3>
+                <p class="hint">
+                  Numbers come from your Twilio account, connected to Oscar as soon as they are
+                  bought. Twilio charges the price shown every month until you release the number
+                  in Twilio's console.
+                </p>
+              </div>
+              <button type="button" class="link" id="buy-close">Close</button>
+            </div>
+            <form class="buy-form" id="buy-form" novalidate>
+              <div class="field">
+                <label class="field-label" for="buy-country">Country</label>
+                <select id="buy-country" required>
+                  <option value="">Loading countries…</option>
+                </select>
+              </div>
+              <div class="field">
+                <span class="field-label" id="buy-kind-label">Kind of number</span>
+                <div class="chips buy-kinds" role="group" aria-labelledby="buy-kind-label" id="buy-kinds"></div>
+              </div>
+              <div class="field" id="buy-area-field">
+                <label class="field-label" for="buy-area">Area code <span class="optional">optional</span></label>
+                <input id="buy-area" inputmode="numeric" maxlength="5" placeholder="415" />
+              </div>
+              <div class="field">
+                <label class="field-label" for="buy-contains">With these digits <span class="optional">optional</span></label>
+                <input id="buy-contains" maxlength="16" spellcheck="false" placeholder="555" />
+              </div>
+              <div class="actions">
+                <button type="submit" class="primary" id="buy-search"><span class="btn-label">Search</span></button>
+              </div>
+            </form>
+            <p class="error" id="buy-error" role="alert" hidden></p>
+            <p class="hint buy-summary" id="buy-summary" aria-live="polite"></p>
+            <ul class="buy-results" id="buy-results"></ul>
           </div>
         </div>
 
@@ -227,7 +282,11 @@
           <p class="lead">Real phone calls need a Twilio number.</p>
           <p>Add these to your <code>.env</code> file, then restart Oscar:</p>
           <ul id="phone-missing" class="plain-list"></ul>
-          <p class="hint">The README walks you through Twilio and the ngrok tunnel.</p>
+          <p class="hint">
+            The README walks you through Twilio and the ngrok tunnel. Once these are set, your
+            Twilio numbers show here: connect them to Oscar, or get a new one, without leaving
+            the dashboard.
+          </p>
         </div>
       </section>
 
@@ -895,6 +954,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=36"></script>
+    <script src="/static/app.js?v=39"></script>
   </body>
 </html>

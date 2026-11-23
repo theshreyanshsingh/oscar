@@ -2869,3 +2869,281 @@ button.danger-button:disabled {
 #agent-voicemail {
   min-height: 76px;
 }
+
+/* ---------- Twilio numbers ---------- */
+
+.numbers-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.numbers-head,
+.buy-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.numbers-trial {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #fff6e6;
+  color: #7a4a00;
+  font-size: 13px;
+}
+
+.numbers-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.numbers-empty {
+  margin: 0;
+  padding: 12px 0;
+}
+
+.number-row {
+  display: grid;
+  gap: 6px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.number-row:last-child {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.number-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.number-phone {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.number-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  background: var(--lavender);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.number-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(0, 18, 46, 0.3);
+}
+
+.number-state.state-connected {
+  background: #e8f6ef;
+  color: #17734a;
+}
+
+.number-state.state-connected::before {
+  background: var(--green);
+}
+
+.number-state.state-old_address {
+  background: #fff6e6;
+  color: #7a4a00;
+}
+
+.number-state.state-old_address::before {
+  background: #d98a1c;
+}
+
+.number-state.state-verified {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.number-state.state-verified::before {
+  background: var(--blue);
+}
+
+.number-detail {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.number-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 2px;
+}
+
+button.secondary.small {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.calls-from-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.calls-from-chip::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14' fill='none' stroke='%23365fe0' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7.5l2.5 2.5L11 4.5'/%3E%3C/svg%3E")
+    no-repeat center / 14px 14px;
+}
+
+.numbers-foot {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+
+.numbers-foot .hint {
+  margin: 0;
+}
+
+.numbers-foot code {
+  font-size: 12px;
+}
+
+.numbers-panel .detail-confirm {
+  margin-top: 6px;
+}
+
+/* Getting a new number */
+
+.buy-panel {
+  margin-top: var(--gutter);
+}
+
+.buy-head .hint {
+  max-width: 620px;
+}
+
+.buy-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 18px 22px;
+  margin-top: 18px;
+}
+
+.buy-form .actions {
+  margin: 0;
+}
+
+.buy-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 48px;
+  align-items: center;
+}
+
+.buy-summary {
+  margin: 16px 0 0;
+}
+
+.buy-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  align-items: start;
+  gap: var(--gutter);
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.buy-result {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--white);
+  animation: line-in 0.45s var(--ease) both;
+}
+
+.buy-note {
+  margin: 0;
+  color: #9a5b00;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.buy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.buy-price {
+  font-size: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.buy-confirm {
+  margin-top: 6px;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--blue-soft);
+}
+
+.buy-confirm p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.buy-confirm .actions {
+  margin: 0;
+  gap: 12px;
+}
+
+@media (max-width: 960px) {
+  .buy-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .buy-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The call form keeps its own height beside a long list of numbers. */
+#phone-ready .demo-grid {
+  align-items: start;
+}

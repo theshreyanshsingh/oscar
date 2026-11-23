@@ -79,11 +79,15 @@ class Config:
         return [] if self.openrouter_api_key else ["OPENROUTER_API_KEY"]
 
     def missing_phone_settings(self) -> list[str]:
-        """Settings real phone calls need on top of the agent keys."""
+        """Settings real phone calls need on top of the agent keys.
+
+        The number is not one of them: TWILIO_PHONE_NUMBER is only the number Oscar
+        calls from until one is chosen in the dashboard (app/numbers.py), and calls
+        come in on any number of the account that is connected to Oscar.
+        """
         required = {
             "TWILIO_ACCOUNT_SID": self.twilio_account_sid,
             "TWILIO_AUTH_TOKEN": self.twilio_auth_token,
-            "TWILIO_PHONE_NUMBER": self.twilio_phone_number,
             "PUBLIC_URL": self.public_url,
         }
         return [name for name, value in required.items() if not value]

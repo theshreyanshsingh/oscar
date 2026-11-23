@@ -529,8 +529,13 @@ async function loadStatus() {
   $("blocked-panel").hidden = !status.phone.enabled;
   $("phone-setup").hidden = status.phone.enabled;
   if (status.phone.enabled) {
-    $("phone-number").textContent = status.phone.number;
+    $("phone-number").textContent = status.phone.number || "no number yet";
     $("phone-webhook").textContent = status.phone.voice_webhook;
+    // Twilio is asked once (and again on a change), not on every refresh of the status.
+    if (!phoneNumbers.loaded && !phoneNumbers.loading) {
+      phoneNumbers.loading = true;
+      loadNumbers().finally(() => (phoneNumbers.loading = false));
+    }
   } else {
     const list = $("phone-missing");
     list.replaceChildren(
@@ -1565,6 +1570,7 @@ function connectEvents() {
     else if (data.type === "campaign") onListChanged(data.campaign);
     else if (data.type === "campaign_deleted") onListDeleted(data.id);
     else if (data.type === "do_not_call") loadLists().catch(() => {});
+    else if (data.type === "numbers") loadNumbers().catch(() => {});
   };
 }
 
@@ -3202,6 +3208,506 @@ function outcomeTags(call) {
   return tags;
 }
 
+
+// ---------- Twilio numbers (app/numbers.py) ----------
+
+const NUMBER_STATES = {
+  connected: "Connected to Oscar",
+  old_address: "Old address",
+  elsewhere: "Not Oscar",
+  unset: "Not set up",
+  trunk: "SIP trunk",
+  fax: "Fax",
+};
+const NUMBER_KINDS = { local: "Local", mobile: "Mobile", toll_free: "Toll-free" };
+
+const phoneNumbers = {
+  loaded: false,
+  overview: null,
+  confirming: null, // { sid, action: "disconnect" | "take" }: the number asking first
+  busy: new Set(), // numbers with a request to Twilio on its way
+  countries: [],
+  kind: "local",
+  results: [],
+  price: null,
+  buying: null, // the number asking "Buy?"
+  purchasing: null, // the number being bought now: nothing else can be pressed meanwhile
+};
+
+async function loadNumbers({ keepError = false } = {}) {
+  if (!(state.status && state.status.phone.enabled)) return;
+  if (!keepError) showError("numbers-error", "");
+  try {
+    phoneNumbers.overview = await api("/api/numbers");
+    phoneNumbers.loaded = true;
+  } catch (error) {
+    // Not asked again by itself (wrong keys would only be refused again): Refresh asks.
+    phoneNumbers.loaded = true;
+    showError("numbers-error", error.message);
+    if (phoneNumbers.overview) renderNumbers();
+    else $("numbers-list").replaceChildren();
+    return;
+  }
+  renderNumbers();
+}
+
+function renderNumbers() {
+  const overview = phoneNumbers.overview;
+  if (!overview) return;
+  $("numbers-trial").hidden = !overview.trial;
+  $("phone-number").textContent = overview.calls_from || "no number yet";
+  $("phone-number-source").textContent = !overview.calls_from
+    ? " (choose one below)"
+    : overview.calls_from_chosen
+      ? " (chosen here)"
+      : " (TWILIO_PHONE_NUMBER in .env)";
+  $("numbers-more").hidden = !overview.more;
+  const list = $("numbers-list");
+  keepFocus(list, () => {
+    list.replaceChildren();
+    if (!overview.numbers.length && !overview.caller_ids.length) {
+      const empty = document.createElement("li");
+      empty.className = "numbers-empty hint";
+      empty.textContent = "This Twilio account has no numbers yet. Get one below.";
+      list.append(empty);
+      return;
+    }
+    for (const number of overview.numbers) list.append(numberRow(number, overview));
+    for (const verified of overview.caller_ids) list.append(callerIdRow(verified, overview));
+  });
+}
+
+function callsFromControl(phone, overview, canCall) {
+  if (overview.calls_from === phone) {
+    const chip = document.createElement("span");
+    chip.className = "calls-from-chip";
+    chip.textContent = "Oscar calls from this";
+    return chip;
+  }
+  if (!canCall) return null;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "link";
+  button.textContent = "Call from this";
+  button.dataset.key = `from-${phone}`;
+  button.setAttribute("aria-label", `Make Oscar's calls come from ${phone}`);
+  button.disabled = phoneNumbers.busy.has(phone);
+  button.addEventListener("click", () => chooseCallsFrom(phone));
+  return button;
+}
+
+function numberRow(number, overview) {
+  const item = document.createElement("li");
+  item.className = `number-row state-${number.state}`;
+  const top = document.createElement("div");
+  top.className = "number-top";
+  const phone = document.createElement("span");
+  phone.className = "number-phone";
+  phone.textContent = number.phone_number;
+  const takesCalls = number.capabilities.voice;
+  const chip = document.createElement("span");
+  chip.className = `number-state state-${takesCalls ? number.state : "unset"}`;
+  chip.textContent = takesCalls ? NUMBER_STATES[number.state] || number.state : "No calls";
+  top.append(phone, chip);
+  item.append(top);
+
+  const detail = document.createElement("p");
+  detail.className = "number-detail";
+  const name = number.friendly_name && number.friendly_name !== number.phone_number ? `${number.friendly_name}. ` : "";
+  detail.textContent = `${name}${takesCalls ? number.detail : "Twilio sells this number for texts only, so it cannot take or make calls."}`;
+  item.append(detail);
+
+  const actions = document.createElement("div");
+  actions.className = "number-actions";
+  const busy = phoneNumbers.busy.has(number.sid);
+  if (["unset", "elsewhere", "old_address"].includes(number.state) && number.capabilities.voice) {
+    const connect = document.createElement("button");
+    connect.type = "button";
+    connect.className = "secondary small";
+    connect.textContent = busy ? "Connecting…" : number.state === "old_address" ? "Connect again" : "Connect to Oscar";
+    connect.disabled = busy;
+    connect.dataset.key = `connect-${number.sid}`;
+    connect.setAttribute("aria-label", `Connect ${number.phone_number} to Oscar`);
+    connect.addEventListener("click", () => {
+      if (number.state === "elsewhere") askAbout(number.sid, "take");
+      else connectNumber(number.sid);
+    });
+    actions.append(connect);
+  }
+  if (number.state === "connected" || number.state === "old_address") {
+    const disconnect = document.createElement("button");
+    disconnect.type = "button";
+    disconnect.className = "link";
+    disconnect.textContent = "Disconnect";
+    disconnect.disabled = busy;
+    disconnect.dataset.key = `disconnect-${number.sid}`;
+    disconnect.setAttribute("aria-label", `Disconnect ${number.phone_number} from Oscar`);
+    disconnect.addEventListener("click", () => askAbout(number.sid, "disconnect"));
+    actions.append(disconnect);
+  }
+  const from = callsFromControl(number.phone_number, overview, number.capabilities.voice);
+  if (from) actions.append(from);
+  if (actions.children.length) item.append(actions);
+
+  const asking = phoneNumbers.confirming;
+  if (asking && asking.sid === number.sid) {
+    const taking = asking.action === "take";
+    item.append(
+      confirmBox({
+        id: `number-ask-${number.sid}`,
+        text: taking
+          ? `Take ${number.phone_number} over? ${number.detail} Its calls will reach Oscar instead, and Disconnect gives them back.`
+          : `Stop Oscar answering ${number.phone_number}? Twilio is set back to how the number answered calls before.`,
+        yesLabel: taking ? "Connect to Oscar" : "Disconnect",
+        yesClass: taking ? "primary" : "danger-button",
+        yesKey: `${asking.action}-yes-${number.sid}`,
+        noLabel: "Keep it as it is",
+        noKey: `${asking.action}-no-${number.sid}`,
+        onYes: () => (taking ? connectNumber(number.sid) : disconnectNumber(number.sid)),
+        onNo: () => {
+          phoneNumbers.confirming = null;
+          renderNumbers();
+          focusKey(`${taking ? "connect" : "disconnect"}-${number.sid}`);
+        },
+      }),
+    );
+  }
+  return item;
+}
+
+function focusKey(key) {
+  const element = document.querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (element) element.focus();
+}
+
+function askAbout(sid, action) {
+  phoneNumbers.confirming = { sid, action };
+  renderNumbers();
+  focusKey(`${action}-yes-${sid}`);
+}
+
+// A question asked in place before a change that matters: named by its text for
+// screen readers, and Escape answers no.
+function confirmBox({ id, text, yesLabel, yesClass, yesKey, noLabel, noKey, onYes, onNo, busy = false, className = "detail-confirm" }) {
+  const box = document.createElement("div");
+  box.className = className;
+  box.setAttribute("role", "alertdialog");
+  box.setAttribute("aria-labelledby", `${id}-text`);
+  const words = document.createElement("p");
+  words.id = `${id}-text`;
+  words.textContent = text;
+  const row = document.createElement("div");
+  row.className = "actions";
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = yesClass;
+  yes.dataset.key = yesKey;
+  if (yesClass === "primary") {
+    const label = document.createElement("span");
+    label.className = "btn-label";
+    label.textContent = yesLabel;
+    yes.append(label);
+  } else {
+    yes.textContent = yesLabel;
+  }
+  yes.disabled = busy;
+  yes.addEventListener("click", onYes);
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "link";
+  no.textContent = noLabel;
+  no.dataset.key = noKey;
+  no.disabled = busy;
+  no.addEventListener("click", onNo);
+  box.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !busy) {
+      event.stopPropagation();
+      onNo();
+    }
+  });
+  row.append(yes, no);
+  box.append(words, row);
+  return box;
+}
+
+function callerIdRow(verified, overview) {
+  const item = document.createElement("li");
+  item.className = "number-row verified";
+  const top = document.createElement("div");
+  top.className = "number-top";
+  const phone = document.createElement("span");
+  phone.className = "number-phone";
+  phone.textContent = verified.phone_number;
+  const chip = document.createElement("span");
+  chip.className = "number-state state-verified";
+  chip.textContent = "Verified caller ID";
+  top.append(phone, chip);
+  const detail = document.createElement("p");
+  detail.className = "number-detail";
+  const name = verified.friendly_name && verified.friendly_name !== verified.phone_number ? `${verified.friendly_name}. ` : "";
+  detail.textContent = `${name}Verified in Twilio: Oscar can call from it, but calls to it do not reach Oscar.`;
+  item.append(top, detail);
+  const from = callsFromControl(verified.phone_number, overview, true);
+  if (from) {
+    const actions = document.createElement("div");
+    actions.className = "number-actions";
+    actions.append(from);
+    item.append(actions);
+  }
+  return item;
+}
+
+async function numberAction(key, request) {
+  phoneNumbers.busy.add(key);
+  showError("numbers-error", "");
+  renderNumbers();
+  let problem = "";
+  try {
+    await request();
+  } catch (error) {
+    problem = error.message;
+  } finally {
+    phoneNumbers.busy.delete(key);
+    renderNumbers(); // never left showing "Connecting…"
+  }
+  // Read back from Twilio, so the list shows what is really set; a refusal stays on screen.
+  await loadNumbers({ keepError: Boolean(problem) });
+  if (problem) showError("numbers-error", problem);
+  loadStatus().catch(() => {});
+}
+
+function connectNumber(sid) {
+  return numberAction(sid, () => api(`/api/numbers/${sid}/connect`, { method: "POST" }));
+}
+
+function disconnectNumber(sid) {
+  phoneNumbers.confirming = null;
+  return numberAction(sid, () => api(`/api/numbers/${sid}/disconnect`, { method: "POST" }));
+}
+
+function chooseCallsFrom(phone) {
+  return numberAction(phone, () =>
+    api("/api/numbers/calls-from", { method: "PUT", body: JSON.stringify({ phone_number: phone }) }),
+  );
+}
+
+// ----- getting a new number -----
+
+async function openBuyPanel() {
+  const panel = $("buy-panel");
+  panel.hidden = false;
+  $("numbers-get").setAttribute("aria-expanded", "true");
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  if (phoneNumbers.countries.length) return;
+  try {
+    const { countries } = await api("/api/numbers/countries");
+    phoneNumbers.countries = countries;
+    fillBuyCountries();
+  } catch (error) {
+    $("buy-country").replaceChildren(new Option("Could not load countries", ""));
+    showError("buy-error", error.message);
+  }
+}
+
+function closeBuyPanel() {
+  $("buy-panel").hidden = true;
+  $("numbers-get").setAttribute("aria-expanded", "false");
+  $("numbers-get").focus();
+}
+
+// The country to offer first: the one of the number Oscar calls from, then the browser's.
+function likelyCountry() {
+  const codes = new Set(phoneNumbers.countries.map((country) => country.code));
+  const fromNumber = (phoneNumbers.overview && phoneNumbers.overview.calls_from) || "";
+  const prefixes = { "+1": "US", "+44": "GB", "+61": "AU", "+64": "NZ", "+65": "SG", "+91": "IN", "+353": "IE", "+27": "ZA" };
+  for (const [prefix, code] of Object.entries(prefixes).sort((a, b) => b[0].length - a[0].length)) {
+    if (fromNumber.startsWith(prefix) && codes.has(code)) return code;
+  }
+  const region = (navigator.language || "").split("-")[1];
+  if (region && codes.has(region.toUpperCase())) return region.toUpperCase();
+  return codes.has("US") ? "US" : (phoneNumbers.countries[0] || {}).code || "";
+}
+
+function fillBuyCountries() {
+  const select = $("buy-country");
+  select.replaceChildren(...phoneNumbers.countries.map((country) => new Option(country.name, country.code)));
+  select.value = likelyCountry();
+  showBuyKinds();
+}
+
+function showBuyKinds() {
+  const country = phoneNumbers.countries.find((each) => each.code === $("buy-country").value);
+  const kinds = country ? country.types : [];
+  if (!kinds.includes(phoneNumbers.kind)) phoneNumbers.kind = kinds[0] || "local";
+  const group = $("buy-kinds");
+  group.replaceChildren(
+    ...kinds.map((kind) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.textContent = NUMBER_KINDS[kind] || kind;
+      chip.setAttribute("aria-pressed", String(kind === phoneNumbers.kind));
+      chip.addEventListener("click", () => {
+        phoneNumbers.kind = kind;
+        showBuyKinds();
+      });
+      return chip;
+    }),
+  );
+  // Twilio searches by area code only in the US and Canada.
+  const areaCodes = ["US", "CA"].includes($("buy-country").value) && phoneNumbers.kind === "local";
+  $("buy-area-field").hidden = !areaCodes;
+  if (!areaCodes) $("buy-area").value = "";
+}
+
+async function searchNumbers(event) {
+  event.preventDefault();
+  showError("buy-error", "");
+  const country = $("buy-country").value;
+  if (!country) {
+    showError("buy-error", "Choose a country.");
+    return;
+  }
+  const button = $("buy-search");
+  button.disabled = true;
+  $("buy-summary").textContent = "Asking Twilio…";
+  phoneNumbers.buying = null;
+  try {
+    const params = new URLSearchParams({
+      country,
+      kind: phoneNumbers.kind,
+      area_code: $("buy-area").value.trim(),
+      contains: $("buy-contains").value.trim(),
+    });
+    const found = await api(`/api/numbers/search?${params}`);
+    phoneNumbers.results = found.numbers;
+    phoneNumbers.price = found.price;
+    const name = $("buy-country").selectedOptions[0].textContent;
+    const kind = (NUMBER_KINDS[phoneNumbers.kind] || "").toLowerCase();
+    const price = found.price ? ` Each costs ${formatPrice(found.price)} a month.` : " Twilio did not say what they cost: check its pricing page before buying.";
+    $("buy-summary").textContent = found.numbers.length
+      ? `${found.numbers.length} ${kind} number${found.numbers.length === 1 ? "" : "s"} in ${name} that take calls.${price}`
+      : `Twilio has no ${kind} numbers in ${name} like that right now. Try other digits, or another kind.`;
+  } catch (error) {
+    phoneNumbers.results = [];
+    $("buy-summary").textContent = "";
+    showError("buy-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+  renderBuyResults();
+}
+
+function formatPrice(price) {
+  const amount = Number(price.monthly);
+  const shown = Number.isFinite(amount) ? amount.toFixed(2) : price.monthly;
+  return price.unit === "USD" ? `$${shown}` : `${shown} ${price.unit}`;
+}
+
+function renderBuyResults() {
+  const list = $("buy-results");
+  keepFocus(list, () => {
+    list.replaceChildren();
+    for (const number of phoneNumbers.results) {
+      const item = document.createElement("li");
+      item.className = "buy-result";
+      const phone = document.createElement("p");
+      phone.className = "number-phone";
+      phone.textContent = number.phone_number;
+      const place = document.createElement("p");
+      place.className = "number-detail";
+      const can = ["Calls", number.capabilities.sms ? "texts" : "", number.capabilities.mms ? "picture messages" : ""].filter(Boolean);
+      place.textContent = `${number.place || "Anywhere in the country"} · ${can.join(", ")}`;
+      item.append(phone, place);
+      if (number.address_needed || number.beta) {
+        const note = document.createElement("p");
+        note.className = "buy-note";
+        note.textContent = [number.address_needed ? `${number.address_needed}.` : "", number.beta ? "Twilio lists it as beta." : ""]
+          .filter(Boolean)
+          .join(" ");
+        item.append(note);
+      }
+      const row = document.createElement("div");
+      row.className = "buy-row";
+      const price = document.createElement("span");
+      price.className = "buy-price";
+      price.textContent = phoneNumbers.price ? `${formatPrice(phoneNumbers.price)}/month` : "Price not given";
+      const buy = document.createElement("button");
+      buy.type = "button";
+      buy.className = "secondary small";
+      buy.textContent = "Buy";
+      buy.dataset.key = `buy-${number.phone_number}`;
+      buy.setAttribute("aria-label", `Buy ${number.phone_number}`);
+      buy.disabled = Boolean(phoneNumbers.purchasing);
+      buy.addEventListener("click", () => {
+        phoneNumbers.buying = number.phone_number;
+        renderBuyResults();
+        focusKey(`buy-yes-${number.phone_number}`);
+      });
+      row.append(price, buy);
+      item.append(row);
+      if (phoneNumbers.buying === number.phone_number) item.append(buyConfirm(number));
+      list.append(item);
+    }
+  });
+}
+
+function buyConfirm(number) {
+  const cost = phoneNumbers.price
+    ? `Twilio charges your account ${formatPrice(phoneNumbers.price)} now, and every month until you release it in Twilio's console.`
+    : "Twilio did not say what it costs: it charges your account now, and every month until you release it in Twilio's console.";
+  const purchasing = phoneNumbers.purchasing === number.phone_number;
+  return confirmBox({
+    id: `buy-ask-${number.phone_number.replace(/\D/g, "")}`,
+    className: "buy-confirm",
+    text: purchasing
+      ? `Buying ${number.phone_number} from Twilio…`
+      : `Buy ${number.phone_number}? ${cost} Calls to it reach Oscar straight away.`,
+    yesLabel: purchasing ? "Buying…" : "Buy number",
+    yesClass: "primary",
+    yesKey: `buy-yes-${number.phone_number}`,
+    noLabel: "Cancel",
+    noKey: `buy-no-${number.phone_number}`,
+    busy: Boolean(phoneNumbers.purchasing),
+    onYes: () => buyNumber(number.phone_number),
+    onNo: () => {
+      phoneNumbers.buying = null;
+      renderBuyResults();
+      focusKey(`buy-${number.phone_number}`);
+    },
+  });
+}
+
+async function buyNumber(phone) {
+  if (phoneNumbers.purchasing) return; // one purchase at a time
+  phoneNumbers.purchasing = phone;
+  $("buy-search").disabled = true;
+  showError("buy-error", "");
+  renderBuyResults();
+  try {
+    await api("/api/numbers/buy", { method: "POST", body: JSON.stringify({ phone_number: phone }) });
+    phoneNumbers.results = phoneNumbers.results.filter((number) => number.phone_number !== phone);
+    phoneNumbers.buying = null;
+    $("buy-summary").textContent = `Bought ${phone}. It is connected to Oscar: call it to try.`;
+  } catch (error) {
+    showError("buy-error", error.message);
+  } finally {
+    phoneNumbers.purchasing = null;
+    $("buy-search").disabled = false;
+    renderBuyResults();
+  }
+  await loadNumbers();
+  loadStatus().catch(() => {});
+}
+
+function setUpNumbers() {
+  $("numbers-refresh").addEventListener("click", loadNumbers);
+  $("numbers-get").addEventListener("click", () => ($("buy-panel").hidden ? openBuyPanel() : closeBuyPanel()));
+  $("buy-close").addEventListener("click", closeBuyPanel);
+  $("buy-country").addEventListener("change", showBuyKinds);
+  $("buy-form").addEventListener("submit", searchNumbers);
+}
+
 // ---------- start ----------
 
 async function init() {
@@ -3239,6 +3745,7 @@ async function init() {
   setUpRing();
   setUpSpendChart();
   setUpListForm();
+  setUpNumbers();
   loadModelSuggestions();
   // Unsaved settings are not lost to a closed tab or a reload without a warning.
   window.addEventListener("beforeunload", (event) => {

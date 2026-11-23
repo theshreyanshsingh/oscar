@@ -180,11 +180,13 @@ class Dialling:
         self.calls = calls
         self.refuse = refuse
         self.placed: list[tuple[str, object, str]] = []
+        self.from_numbers: list[str] = []
 
-    async def __call__(self, cfg, calls, number, *, agent=None, campaign_id=""):
+    async def __call__(self, cfg, calls, number, *, agent=None, campaign_id="", from_number=""):
         if self.refuse:
             raise PhoneCallError(self.refuse)
         self.placed.append((number, agent, campaign_id))
+        self.from_numbers.append(from_number)
         return calls.create("phone_outbound", status="ringing", to_number=number, campaign_id=campaign_id)
 
 
@@ -394,10 +396,44 @@ def test_a_list_without_numbers_is_refused(client):
 
 
 def test_a_list_cannot_start_without_phone_calls_set_up(tmp_path):
+    with local_client(make_config(tmp_path, public_url="")) as client:
+        response = client.post("/api/campaigns", json={"name": "Quotes", "contacts_csv": LIST_CSV, "country_code": "+61"})
+        assert response.status_code == 400
+        assert "PUBLIC_URL" in response.json()["detail"]
+
+
+def test_a_list_cannot_start_without_a_number_to_call_from(tmp_path):
+    from app.phone import NO_NUMBER_TO_CALL_FROM
+
     with local_client(make_config(tmp_path, twilio_phone_number="")) as client:
         response = client.post("/api/campaigns", json={"name": "Quotes", "contacts_csv": LIST_CSV, "country_code": "+61"})
         assert response.status_code == 400
-        assert "TWILIO_PHONE_NUMBER" in response.json()["detail"]
+        assert response.json()["detail"] == NO_NUMBER_TO_CALL_FROM
+
+
+def test_list_calls_come_from_the_number_chosen_in_the_dashboard(dialer):
+    dialer.store.set_calls_from("+61255550199")
+    dialer.make(NUMBERS[:1])
+    dialer.tick()
+    assert dialer.dialling.from_numbers == ["+61255550199"]
+
+
+def test_a_list_pauses_without_a_number_to_call_from(tmp_path, monkeypatch):
+    from app.phone import NO_NUMBER_TO_CALL_FROM
+
+    cfg = make_config(tmp_path, twilio_phone_number="")
+    store = Store(cfg.db_path)
+    calls = CallManager(store, EventBus())
+    dialling = Dialling(calls)
+    monkeypatch.setattr(campaigns, "place_outbound_call", dialling)
+    monkeypatch.setattr(campaigns, "in_calling_hours", lambda campaign, now=None: True)
+    harness = CampaignDialerHarness(cfg, calls, store, dialling)
+    campaign = harness.make(NUMBERS[:1])
+    harness.tick()
+    campaign = store.get_campaign(campaign["id"])
+    assert (campaign["status"], campaign["status_detail"]) == ("paused", f"Paused. {NO_NUMBER_TO_CALL_FROM}")
+    assert dialling.placed == []
+    store.close()
 
 
 def test_the_do_not_call_list_can_be_added_to_and_taken_from(client):
