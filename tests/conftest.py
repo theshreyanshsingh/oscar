@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Config
 from app.main import create_app
+from app.numbers import twilio_client as real_twilio_client  # before no_real_twilio replaces it
 
 PUBLIC_URL = "https://oscar.example.test"
 TWILIO_AUTH_TOKEN = "test-twilio-auth-token"
@@ -108,3 +109,34 @@ class NoModelCatalog:
 @pytest.fixture(autouse=True)
 def offline_model_catalog(monkeypatch):
     monkeypatch.setattr("app.main.ModelCatalog", NoModelCatalog)
+
+
+class _NoTwilio:
+    """An HTTP client for the Twilio library that never reaches Twilio."""
+
+    def __init__(self):
+        import logging
+
+        super().__init__(logging.getLogger("no-twilio"), is_async=False)
+
+    def request(self, *args, **kwargs):
+        raise ConnectionError("Tests do not reach the real Twilio.")
+
+
+@pytest.fixture(autouse=True)
+def no_real_twilio(monkeypatch):
+    """No test reaches Twilio's real servers (Oscar looks at the account's numbers when it
+    starts, for one): tests that need Twilio put their own stand-in in its place."""
+    from twilio.http import HttpClient
+    from twilio.rest import Client
+
+    from app import numbers, phone
+
+    class NoTwilio(_NoTwilio, HttpClient):
+        pass
+
+    def client(cfg: Config) -> Client:
+        return Client(cfg.twilio_account_sid, cfg.twilio_auth_token, http_client=NoTwilio())
+
+    monkeypatch.setattr(numbers, "twilio_client", client)
+    monkeypatch.setattr(phone, "_twilio_client", client)

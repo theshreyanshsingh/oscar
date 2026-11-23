@@ -18,12 +18,14 @@ else can start or hijack a call.
 import asyncio
 import json
 import re
+import socket
 
+import requests
+import urllib3
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 from loguru import logger
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
-from twilio.base.exceptions import TwilioRestException
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
@@ -33,7 +35,7 @@ from app.calls import AUDIO_NEVER_CONNECTED, CallManager, lines_busy
 from app.config import Config
 from app.costs import KeyCredit
 from app.notify import not_put_through_payload
-from app.numbers import twilio_message
+from app.numbers import KEYS_REFUSED, keys_refused, twilio_client, twilio_message, twilio_refusal
 from app.store import OPEN_STATUSES, AgentSettings, Store
 from app.summary import alert_if_missed, alert_owner
 
@@ -97,7 +99,32 @@ FAILED_CALL_REASONS = {
 
 
 class PhoneCallError(RuntimeError):
-    """Twilio refused to place or change a call."""
+    """Twilio refused to place or change a call.
+
+    `stops_lists`: the refusal is about the account or the number calls come from,
+    not the person called, so a call list pauses instead of failing everyone on it.
+    `try_later`: Twilio was too busy, or could not be reached; the person is called again later.
+    `call_id`: Twilio may have placed the call all the same (it did not answer in time):
+    the call is left open for Twilio's updates, or the stream token's expiry, to settle."""
+
+    def __init__(self, message: str, *, stops_lists: bool = False, try_later: bool = False, call_id: str = ""):
+        super().__init__(message)
+        self.stops_lists = stops_lists
+        self.try_later = try_later
+        self.call_id = call_id
+
+
+# Twilio's refusals (https://www.twilio.com/docs/api/errors) that are about the account
+# or the number calls come from, so every other call would be refused too.
+ACCOUNT_REFUSALS = {
+    10001,  # Account is not active
+    20003,  # Permission Denied (the Account SID and Auth Token)
+    20005,  # Account not active (suspended, or no balance)
+    20008,  # Test Credentials (they cannot place real calls)
+    21210,  # 'From' phone number not verified
+    21212,  # Invalid 'From' Number
+}
+TOO_MANY_REQUESTS = 20429
 
 
 NO_NUMBER_TO_CALL_FROM = (
@@ -120,7 +147,19 @@ def _twiml_response(twiml: str) -> Response:
 
 
 def _twilio_client(cfg: Config) -> Client:
-    return Client(cfg.twilio_account_sid, cfg.twilio_auth_token)
+    # With a timeout: a request Twilio never answers must not hold up a call list for good.
+    return twilio_client(cfg)
+
+
+def _never_reached(exc: Exception) -> bool:
+    """Whether a request failed before Twilio had it (no address, no connection), so
+    nothing it asked for can have happened. A timeout or a reset after sending is not."""
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return True
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        reason = getattr(exc.args[0], "reason", None) if exc.args else None
+        return isinstance(reason, (urllib3.exceptions.NewConnectionError, urllib3.exceptions.ConnectTimeoutError))
+    return isinstance(exc, (ConnectionRefusedError, socket.gaierror))
 
 
 async def place_outbound_call(
@@ -168,14 +207,32 @@ async def place_outbound_call(
             async_amd_status_callback_method="POST",
         )
     except Exception as exc:
-        if isinstance(exc, TwilioRestException):
-            message = f"Twilio refused the call: {twilio_message(exc)}."
-        else:
+        stops_lists = try_later = False
+        refusal = twilio_refusal(exc)
+        if refusal is not None:
+            if keys_refused(refusal):
+                message = KEYS_REFUSED
+            else:
+                message = f"Twilio refused the call: {twilio_message(refusal)}."
+            stops_lists = keys_refused(refusal) or refusal.code in ACCOUNT_REFUSALS
+            try_later = refusal.status == 429 or refusal.code == TOO_MANY_REQUESTS
+        elif _never_reached(exc):
             # What went wrong on this server's side goes to the log, not the dashboard.
             logger.warning(f"Could not reach Twilio to place a call: {exc!r}")
             message = "Could not reach Twilio. Try again in a moment."
+            try_later = True
+        else:
+            # Twilio may have placed it. Its updates name the call (call_id rides on them) and
+            # the stream token's expiry closes it if none come, so it is not closed here: a
+            # call closed now would be silence to someone who answers, and calling them
+            # again would ring them twice.
+            logger.warning(f"Twilio did not answer in time when placing a call: {exc!r}")
+            raise PhoneCallError(
+                "Twilio did not answer in time, so the call may still go through: Call history shows how it went.",
+                call_id=call["id"],
+            ) from exc
         calls.finish(call["id"], message)
-        raise PhoneCallError(message) from exc
+        raise PhoneCallError(message, stops_lists=stops_lists, try_later=try_later) from exc
 
     call = calls.update(call["id"], twilio_sid=twilio_call.sid)
     if call["status"] not in OPEN_STATUSES:
@@ -192,7 +249,8 @@ async def hang_up_phone_call(cfg: Config, twilio_sid: str) -> None:
     try:
         await asyncio.to_thread(_twilio_client(cfg).calls(twilio_sid).update, status="completed")
     except Exception as exc:
-        detail = twilio_message(exc) if isinstance(exc, TwilioRestException) else str(exc)
+        refusal = twilio_refusal(exc)
+        detail = twilio_message(refusal) if refusal is not None else str(exc)
         raise PhoneCallError(f"Twilio could not hang up the call: {detail}.") from exc
 
 
@@ -209,7 +267,8 @@ async def put_call_through(cfg: Config, call_id: str, twilio_sid: str, number: s
     try:
         await asyncio.to_thread(_twilio_client(cfg).calls(twilio_sid).update, twiml=str(response))
     except Exception as exc:
-        detail = twilio_message(exc) if isinstance(exc, TwilioRestException) else str(exc)
+        refusal = twilio_refusal(exc)
+        detail = twilio_message(refusal) if refusal is not None else str(exc)
         raise PhoneCallError(f"Twilio could not put the call through: {detail}.") from exc
 
 
@@ -284,10 +343,12 @@ def create_phone_router(
             response.hangup()
             return _twiml_response(str(response))
 
+        too_little = await credit.too_little_for_a_call() if credit else ""
+        # After the wait for the credit, and with none from here to the call being made,
+        # so two callers at once cannot both take the last line (MAX_CALLS).
         busy = lines_busy(store, cfg)
         if busy:
             return turn_away(busy, LINES_BUSY_LINE)
-        too_little = await credit.too_little_for_a_call() if credit else ""
         if too_little:
             return turn_away(too_little, "Sorry, this agent cannot take calls right now. Please try again later. Goodbye.")
 
@@ -321,9 +382,11 @@ def create_phone_router(
                 calls.update(call["id"], status="ringing")
             elif status in FAILED_CALL_REASONS:
                 calls.set_status_if_open(call["id"], "failed", FAILED_CALL_REASONS[status])
-            elif status == "completed" and call["id"] not in calls.active_call_ids:
-                # The call is over and no agent is running it: either it already
-                # finished, or it was answered but its audio stream never started.
+            elif status == "completed" and call["id"] not in calls.active_call_ids and call["status"] in OPEN_STATUSES:
+                # The call is over, no agent is running it and nothing closed it: it was
+                # answered but its audio stream never started. (One the agent ended has
+                # been closed, and alerted for if missed, already: Twilio's update often
+                # comes after, sometimes twice.)
                 calls.finish(call["id"], "" if call["status"] == "live" else AUDIO_NEVER_CONNECTED)
                 if call["status"] != "live":
                     alert_if_missed(calls, calls.store.get_call(call["id"]) or call, store.get_agent().name)

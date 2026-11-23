@@ -522,6 +522,19 @@ in its own words, with where to add them.
 A trial Twilio account is marked as such: it can only call numbers verified in
 Twilio, and Twilio plays a short message at the start of each call.
 
+**When Oscar starts** it brings its number to the agent by itself, so a phone
+number works without a visit to the dashboard:
+
+- A number still sending calls to an older address of Oscar (the tunnel
+  changed) is moved to this one.
+- The number Oscar calls from is connected if nothing answers its calls.
+- With no number chosen to call from and only one on the account that takes
+  calls, that one becomes it, and is connected the same way.
+- A number another app answers is never taken: Oscar notes it, and you connect
+  it under Your numbers (which asks first).
+
+What it did is listed under Your numbers ("When Oscar started") and in its log.
+
 ### Putting callers through to you
 
 Put your own number in **Put callers through to** (Agent settings, with the
@@ -564,10 +577,21 @@ Twilio's pricing page).
 
 ## Call lists
 
-Under **Lists**, give Oscar a CSV file (a spreadsheet saved as CSV, or rows
-pasted in) with a column of phone numbers. The column is found by its heading
-("Phone", "Mobile", "Number"...), or without headings by what is in it. Every
-other column is about the person: a name, what they ordered, a date.
+Under **Lists**, give Oscar an Excel workbook (.xlsx), a CSV file, or rows
+pasted in, with a column of phone numbers. Every other column is about the
+person: a name, what they ordered, a date. Oscar is told each person's row on
+their call, so it can talk about it.
+
+- **Excel:** the first sheet with rows is read; a workbook with several sheets
+  shows a **Sheet** choice. Dates read as 2026-11-24, and phone numbers kept as
+  numbers lose no digits. An old `.xls` (or a Numbers or OpenDocument file) is
+  refused with how to save it as `.xlsx`.
+- **The column of numbers** is found by its heading: a plain one ("Phone",
+  "Mobile", "Tel") before one that only may be ("Contact number"), and never
+  one that names something else ("Customer number", "Order no", "Account"),
+  so an ID is never dialled. The heading has to be over a column that is
+  mostly numbers, so a title row or two above the headings is left out.
+  Without headings, the column is found by what is in it.
 
 - **What these calls are about** is added to Oscar's call instructions for the
   list's calls. A column's heading in double braces, such as `{{name}}`, becomes
@@ -577,8 +601,12 @@ other column is about the person: a name, what they ordered, a date.
 - Before you start, the dashboard says how many people it found, which rows it
   left out and why (no number, not a number, the same number twice), and any
   `{{column}}` that is not in the file.
-- **Country code:** numbers written without one (`0412 345 678`) get it, with
-  the leading 0 dropped. Without it, such numbers are left out.
+- **Country code:** numbers written without one (`0412 345 678`) get it, read
+  the way that country writes them (Google's libphonenumber): the leading 0 (or
+  the US's 1) goes, an Italian 0 stays, and a number that already starts with
+  the country code (Excel keeps `+61 412 345 678` as `61412345678`) keeps it.
+  `+44 (0)20 …` loses its `(0)`. Without a country code, numbers written without
+  one are left out.
 - **Calls at once** (1 to 5) and **Call between** hours in **Their time zone**:
   Oscar only dials within those hours, and always leaves one line of
   `MAX_CALLS` free for people calling in.
@@ -587,8 +615,14 @@ other column is about the person: a name, what they ordered, a date.
   voicemails, no-answers, busy lines and failures back in line. **Pause**,
   **Resume** and **Stop** do what they say; a call going on when you pause or
   stop carries on to its end.
-- A list pauses itself, saying why, when the OpenRouter key runs low or the
-  Twilio settings are missing. It carries on where it was after a restart.
+- **Stop** asks first; a stopped list can be resumed.
+- A list pauses itself, saying why, when the OpenRouter key runs low, the
+  Twilio settings are missing, or Twilio refuses the account's keys, the account
+  (not active) or the number calls come from: no one is marked failed for it.
+  When Twilio cannot be reached or is too busy, the list tries again a minute
+  later. When Twilio does not answer in time, the call may still go through:
+  the person is settled by how that call goes, never called twice. It carries
+  on where it was after a restart.
 - Numbers on **Blocked numbers**, and on **Do not call**, are skipped.
 
 **Do not call.** When someone tells Oscar on a call that they do not want to be
@@ -1199,12 +1233,13 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/openrouter.py` | Shared OpenRouter helpers (error messages, headers) |
 | `app/main.py` | Web server: dashboard, JSON API, browser calls |
 | `app/phone.py` | Twilio: incoming/outgoing calls, signature checks, media stream |
-| `app/numbers.py` | Twilio numbers from the dashboard: listing, connecting, searching, buying, the number calls come from |
+| `app/numbers.py` | Twilio numbers from the dashboard: listing, connecting, searching, buying, the number calls come from, and connecting it when Oscar starts |
 | `app/script.py` | The owner's script: its steps, the note the speech model gets, and the model that keeps Oscar's place |
 | `app/summary.py` | The note written when a call ends: summary, name, number to call back, what to do |
 | `app/research.py` | The research notes written when a call ends: what its web searches found, checked against the pages |
 | `app/calls.py` | Call bookkeeping and live updates |
-| `app/campaigns.py` | Call lists: reading the CSV, each call's instructions, and the dialer |
+| `app/campaigns.py` | Call lists: reading the rows, each call's instructions, and the dialer |
+| `app/sheets.py` | Excel workbooks for call lists, read into the same rows as a CSV |
 | `app/recording.py` | Call recordings: taken during the call, encoded when it ends, kept 90 days |
 | `app/backup.py` | The daily copy of the database |
 | `app/store.py` | SQLite storage and agent settings |

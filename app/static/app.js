@@ -90,8 +90,9 @@ function goToSignIn() {
 }
 
 async function api(path, options = {}) {
+  // A file goes as a form, whose boundary the browser writes into its own Content-Type.
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers: options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
     ...options,
   });
   const text = await response.text();
@@ -460,13 +461,18 @@ async function blockCaller() {
   if (!call || !call.from_number) return;
   const button = $("detail-block");
   button.disabled = true;
+  const box = $("blocked-numbers");
+  // What is typed in Blocked numbers and not saved yet is left as it is.
+  const untouched = box.value === (state.blocked || []).join("\n");
   try {
+    // The list as it is now (another tab may have changed it): the server keeps only what is sent.
+    const { numbers: blocked } = await api("/api/blocked-numbers");
     const { numbers } = await api("/api/blocked-numbers", {
       method: "PUT",
-      body: JSON.stringify({ numbers: [...(state.blocked || []), call.from_number] }),
+      body: JSON.stringify({ numbers: [...blocked, call.from_number] }),
     });
     state.blocked = numbers;
-    $("blocked-numbers").value = numbers.join("\n");
+    if (untouched) box.value = numbers.join("\n");
     $("blocked-status").textContent = blockedCount(numbers);
   } catch (error) {
     showError("detail-error", error.message);
@@ -1029,9 +1035,10 @@ function setUpHistory() {
       loadCalls().catch((error) => showError("call-error", error.message));
     }, 250);
   });
-  for (const chip of document.querySelectorAll(".chip")) {
+  for (const chip of document.querySelectorAll(".chip[data-show]")) {
     chip.addEventListener("click", () => {
-      for (const other of document.querySelectorAll(".chip")) {
+      // Only the history's own filters: Get a new number has chips of its own.
+      for (const other of chip.parentElement.querySelectorAll(".chip")) {
         other.setAttribute("aria-pressed", String(other === chip));
       }
       state.history.show = chip.dataset.show;
@@ -1233,7 +1240,7 @@ function onDrawerKey(event) {
   }
   if (event.key !== "Tab") return;
   const focusable = [
-    ...$("call-detail").querySelectorAll("button, a[href], input, summary, [tabindex='0']"),
+    ...$("call-detail").querySelectorAll("button, a[href], input, textarea, summary, audio[controls], [tabindex='0']"),
   ].filter(canTabTo);
   if (!focusable.length) return;
   // -1 too when focus is on the panel's title (where it opens) or nowhere: wrap from there as well.
@@ -1319,6 +1326,9 @@ async function copyNumber() {
 }
 
 async function openDetail(callId) {
+  // Focus goes back here on closing: the history table's Transcript or a list's Open call.
+  const opener = document.activeElement;
+  state.detailOpener = opener && opener !== document.body && !$("call-detail").contains(opener) ? opener : state.detailOpener;
   state.detailCallId = callId;
   state.detailMessageIds = new Set();
   state.detailSearches = [];
@@ -1342,6 +1352,8 @@ async function openDetail(callId) {
   try {
     const { call, messages, searches } = await api(`/api/calls/${callId}`);
     if (state.detailCallId !== callId) return;
+    // Call back, Copy number and Block read it from here, for a call not on the history page too.
+    state.calls.set(call.id, call);
     state.detailSearches = searches;
     $("detail-title").textContent =
       `${KIND_LABELS[call.kind]} call · ${formatTime(call.started_at)} · ` +
@@ -1371,11 +1383,18 @@ function closeDetail({ restoreFocus = true } = {}) {
   $("detail-confirm").hidden = true;
   document.documentElement.classList.remove("drawer-open");
   document.removeEventListener("keydown", onDrawerKey);
+  $("detail-audio").pause(); // a recording playing must not go on behind the closed panel
   renderCalls();
-  // Back to the button that opened it (the table was drawn again meanwhile).
+  const opener = state.detailOpener;
+  state.detailOpener = null;
+  // Back to the button that opened it, or the one drawn in its place since.
   if (restoreFocus && callId) {
-    const opener = document.querySelector(`#calls-body button[data-call-id="${callId}"]`);
-    if (opener) opener.focus();
+    const again = opener && opener.dataset && opener.dataset.key
+      ? document.querySelector(`[data-key="${CSS.escape(opener.dataset.key)}"]`)
+      : null;
+    const target = (opener && opener.isConnected ? opener : again) ||
+      document.querySelector(`#calls-body button[data-call-id="${callId}"]`);
+    if (target) target.focus({ preventScroll: target !== opener && target !== again });
   }
 }
 
@@ -2577,8 +2596,12 @@ const lists = {
   people: new Map(), // list id -> its numbers, for the lists showing them
   open: new Set(), // lists showing their numbers
   confirming: null, // the list asking "Delete?"
+  stopping: null, // the list asking "Stop?"
+  creating: false, // a new list is being made: both of its buttons wait
   csv: "", // the file chosen (or rows pasted) for a new list
   fileName: "",
+  workbook: null, // the Excel file chosen, to read another of its sheets
+  fileAsked: 0, // files (and sheets) read: one that finishes after a newer choice is dropped
   previewTimer: null,
   previewAsked: 0, // previews asked for: an older one that answers late is not shown
   peopleTimers: new Map(),
@@ -2597,7 +2620,7 @@ async function loadLists() {
 function showListsAvailability() {
   const phone = Boolean(state.status && state.status.phone.enabled);
   $("lists-off").hidden = phone;
-  $("list-start").disabled = !phone;
+  $("list-start").disabled = !phone || lists.creating;
 }
 
 function clockRange(campaign) {
@@ -2722,7 +2745,7 @@ function listCard(campaign) {
   };
   if (campaign.status === "running") {
     button("Pause", "pause", () => listAction(campaign.id, "pause"), "secondary");
-  } else if (campaign.status === "paused") {
+  } else if (campaign.status === "paused" || campaign.status === "stopped") {
     const resume = button("Resume", "resume", () => listAction(campaign.id, "resume"), "secondary");
     resume.disabled = !(state.status && state.status.phone.enabled);
   }
@@ -2734,7 +2757,12 @@ function listCard(campaign) {
   const toggle = button(showing ? "Hide people" : "Show people", "people", () => togglePeople(campaign.id));
   toggle.setAttribute("aria-expanded", String(showing));
   if (campaign.status === "running" || campaign.status === "paused") {
-    button("Stop", "stop", () => listAction(campaign.id, "stop"));
+    button("Stop", "stop", () => {
+      lists.stopping = campaign.id;
+      renderLists();
+      const yes = document.querySelector(`[data-key="stop-yes-${CSS.escape(campaign.id)}"]`);
+      if (yes) yes.focus();
+    });
   }
   if (!counts.calling) {
     const remove = button("Delete", "delete", () => {
@@ -2748,6 +2776,7 @@ function listCard(campaign) {
   card.append(actions);
 
   if (lists.confirming === campaign.id) card.append(deleteListConfirm(campaign));
+  if (lists.stopping === campaign.id) card.append(stopListConfirm(campaign));
   const error = document.createElement("p");
   error.className = "error";
   error.id = `list-error-${campaign.id}`;
@@ -2785,6 +2814,54 @@ function deleteListConfirm(campaign) {
   return box;
 }
 
+function stopListConfirm(campaign) {
+  const box = document.createElement("div");
+  box.className = "detail-confirm";
+  box.setAttribute("role", "alertdialog");
+  box.setAttribute("aria-label", `Stop ${campaign.name}`);
+  const text = document.createElement("p");
+  text.textContent =
+    `Stop calling from "${campaign.name}"? Calls going on now carry on to their end. ` +
+    "The people not called yet stay on the list, and Resume calls them later.";
+  const row = document.createElement("div");
+  row.className = "actions";
+  const back = () => {
+    lists.stopping = null;
+    renderLists();
+    const stop = document.querySelector(`[data-key="stop-${CSS.escape(campaign.id)}"]`);
+    if (stop) stop.focus();
+  };
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = "danger-button";
+  yes.textContent = "Stop list";
+  yes.dataset.key = `stop-yes-${campaign.id}`;
+  yes.addEventListener("click", () => {
+    lists.stopping = null;
+    listAction(campaign.id, "stop");
+  });
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "link";
+  no.textContent = "Keep calling";
+  no.addEventListener("click", back);
+  box.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      back();
+    }
+  });
+  row.append(yes, no);
+  box.append(text, row);
+  return box;
+}
+
+// Who a person on a list is: their name when a column is headed for it, else the first column.
+function personLabel(fields) {
+  const named = Object.keys(fields).find((heading) => /name/i.test(heading) && fields[heading]);
+  return named ? fields[named] : Object.values(fields)[0] || "";
+}
+
 function peopleTable(campaign) {
   const wrap = document.createElement("div");
   wrap.className = "list-people table-wrap";
@@ -2804,8 +2881,8 @@ function peopleTable(campaign) {
     const row = document.createElement("tr");
     const who = document.createElement("td");
     who.dataset.label = "Person";
-    const values = Object.values(person.fields || {});
-    who.textContent = values[0] || "—";
+    const label = personLabel(person.fields || {});
+    who.textContent = label || "—";
     const number = document.createElement("td");
     number.dataset.label = "Number";
     number.className = "number";
@@ -2831,7 +2908,7 @@ function peopleTable(campaign) {
       link.className = "link";
       link.textContent = "Open call";
       link.dataset.key = `open-${person.id}`;
-      link.setAttribute("aria-label", `Open the call to ${values[0] || person.number}`);
+      link.setAttribute("aria-label", `Open the call to ${label || person.number}`);
       link.addEventListener("click", () => openDetail(person.call_id));
       open.append(link);
     }
@@ -3017,30 +3094,104 @@ function renderPreview(preview) {
   }
 }
 
+// Spreadsheets go to Oscar to be read (app/sheets.py); it says how to save the ones it cannot read.
+const SPREADSHEET_FILE = /\.(xlsx|xlsm|xls|xlsb|ods|numbers)$/i;
+
+async function readWorkbook(file, sheet = "") {
+  const form = new FormData();
+  form.append("file", file);
+  if (sheet) form.append("sheet", sheet);
+  return api("/api/campaigns/sheet", { method: "POST", body: form });
+}
+
+function showSheets(sheets, chosen) {
+  const select = $("list-sheet");
+  select.replaceChildren(
+    ...sheets.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      return option;
+    }),
+  );
+  select.value = chosen;
+  $("list-sheet-row").hidden = sheets.length < 2;
+}
+
+function useListRows(text) {
+  lists.csv = text;
+  $("list-paste").value = text;
+  return previewList();
+}
+
 async function chooseListFile(file) {
   if (!file) return;
-  if (file.size > 2_000_000) {
-    showError("list-error", "That file is over 2 MB. Split it into smaller lists.");
+  const spreadsheet = SPREADSHEET_FILE.test(file.name);
+  if (file.size > (spreadsheet ? 10_000_000 : 2_000_000)) {
+    showError(
+      "list-error",
+      spreadsheet
+        ? "That workbook is over 10 MB. Keep just the sheet of people to call, or split it."
+        : "That file is over 2 MB. Split it into smaller lists.",
+    );
     return;
   }
   showError("list-error", "");
-  lists.csv = await file.text();
+  const asked = ++lists.fileAsked;
+  let text;
+  let read = null;
+  if (spreadsheet) {
+    $("list-file-name").textContent = `Reading ${file.name}…`;
+    try {
+      read = await readWorkbook(file);
+    } catch (error) {
+      if (asked !== lists.fileAsked) return;
+      $("list-file-name").textContent = lists.fileName || "Choose an Excel or CSV file";
+      showError("list-error", error.message);
+      return;
+    }
+    text = read.csv;
+  } else {
+    text = await file.text();
+  }
+  if (asked !== lists.fileAsked) return;
   lists.fileName = file.name;
+  lists.workbook = read ? file : null;
+  showSheets(read ? read.sheets : [], read ? read.sheet : "");
   $("list-file-name").textContent = file.name;
   $("list-drop-note").textContent = "Choose another file, or drop one here";
   $("list-drop").classList.add("chosen");
   if (!$("list-name").value.trim()) {
-    const name = file.name.replace(/\.(csv|txt)$/i, "").replace(/[_-]+/g, " ").trim();
+    const name = file.name.replace(/\.(csv|txt|xlsx|xlsm)$/i, "").replace(/[_-]+/g, " ").trim();
     $("list-name").value = name.charAt(0).toUpperCase() + name.slice(1);
   }
-  $("list-paste").value = lists.csv;
-  await previewList();
+  await useListRows(text);
+}
+
+async function chooseSheet(sheet) {
+  const file = lists.workbook;
+  if (!file) return;
+  const asked = ++lists.fileAsked;
+  const select = $("list-sheet");
+  select.disabled = true;
+  showError("list-error", "");
+  try {
+    const read = await readWorkbook(file, sheet);
+    if (asked !== lists.fileAsked) return;
+    await useListRows(read.csv);
+  } catch (error) {
+    if (asked !== lists.fileAsked) return;
+    showError("list-error", error.message);
+  } finally {
+    if (asked === lists.fileAsked) select.disabled = false;
+  }
 }
 
 function setUpListForm() {
   fillTimeZones();
   const drop = $("list-drop");
   $("list-file").addEventListener("change", (event) => chooseListFile(event.target.files[0]));
+  $("list-sheet").addEventListener("change", (event) => chooseSheet(event.target.value));
   for (const type of ["dragenter", "dragover"]) {
     drop.addEventListener(type, (event) => {
       event.preventDefault();
@@ -3063,8 +3214,11 @@ function setUpListForm() {
   });
   $("list-paste").addEventListener("input", () => {
     lists.csv = $("list-paste").value;
+    lists.fileAsked += 1; // a file still being read no longer replaces what is typed
     if (lists.fileName) {
       lists.fileName = "";
+      lists.workbook = null;
+      $("list-sheet-row").hidden = true;
       $("list-file-name").textContent = "Rows pasted below";
     }
     previewListSoon();
@@ -3088,11 +3242,13 @@ async function createList(start) {
     return;
   }
   if (!lists.csv.trim()) {
-    showError("list-error", "Choose a CSV file of people to call, or paste the rows.");
+    showError("list-error", "Choose an Excel or CSV file of people to call, or paste the rows.");
     return;
   }
-  const button = start ? $("list-start") : $("list-save");
-  button.disabled = true;
+  if (lists.creating) return;
+  lists.creating = true;
+  $("list-start").disabled = true;
+  $("list-save").disabled = true;
   try {
     const { campaign } = await api("/api/campaigns", {
       method: "POST",
@@ -3118,8 +3274,9 @@ async function createList(start) {
   } catch (error) {
     showError("list-error", error.message);
   } finally {
-    button.disabled = false;
-    showListsAvailability();
+    lists.creating = false;
+    $("list-save").disabled = false;
+    showListsAvailability(); // Start calling, as far as phone calls are set up
   }
 }
 
@@ -3128,7 +3285,10 @@ function resetListForm() {
   $("list-file").value = "";
   lists.csv = "";
   lists.fileName = "";
-  $("list-file-name").textContent = "Choose a CSV file";
+  lists.workbook = null;
+  lists.fileAsked += 1;
+  $("list-sheet-row").hidden = true;
+  $("list-file-name").textContent = "Choose an Excel or CSV file";
   $("list-drop-note").textContent = DROP_NOTE;
   $("list-drop").classList.remove("chosen");
   $("list-preview").hidden = true;
@@ -3302,6 +3462,15 @@ function renderNumbers() {
       ? " (chosen here)"
       : " (TWILIO_PHONE_NUMBER in .env)";
   $("numbers-more").hidden = !overview.more;
+  const atStart = overview.at_start || [];
+  $("numbers-at-start").hidden = !atStart.length;
+  $("numbers-at-start-list").replaceChildren(
+    ...atStart.map((sentence) => {
+      const item = document.createElement("li");
+      item.textContent = sentence;
+      return item;
+    }),
+  );
   const list = $("numbers-list");
   keepFocus(list, () => {
     list.replaceChildren();
@@ -3404,6 +3573,7 @@ function numberRow(number, overview) {
         noLabel: "Keep it as it is",
         noKey: `${asking.action}-no-${number.sid}`,
         onYes: () => (taking ? connectNumber(number.sid) : disconnectNumber(number.sid)),
+        busy: phoneNumbers.busy.has(number.sid), // one press, one request
         onNo: () => {
           phoneNumbers.confirming = null;
           renderNumbers();
@@ -3517,11 +3687,12 @@ async function numberAction(key, request) {
 }
 
 function connectNumber(sid) {
+  if (phoneNumbers.confirming && phoneNumbers.confirming.sid === sid) phoneNumbers.confirming = null;
   return numberAction(sid, () => api(`/api/numbers/${sid}/connect`, { method: "POST" }));
 }
 
 function disconnectNumber(sid) {
-  phoneNumbers.confirming = null;
+  if (phoneNumbers.confirming && phoneNumbers.confirming.sid === sid) phoneNumbers.confirming = null;
   return numberAction(sid, () => api(`/api/numbers/${sid}/disconnect`, { method: "POST" }));
 }
 

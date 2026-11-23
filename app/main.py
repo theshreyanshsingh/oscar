@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi import Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,7 +48,8 @@ from app.catalog import ModelCatalog
 from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
 from app.numbers import NumbersError, TwilioNumbers, calls_from
 from app.preview import PreviewFailed, voice_sample
-from app.recording import finish_leftovers, prune, recording_path, recordings_folder
+from app.recording import finish_leftovers, forget_recording, prune, recording_path, recordings_folder
+from app.sheets import SHEET_MOST_BYTES, SheetError, other_spreadsheet, read_sheet
 from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
 from app.config import (
     ROOT_DIR,
@@ -155,8 +156,8 @@ CALL_SETUP_FAILED = "The call could not be set up. Try again."
 TRYING_SETTINGS_NOTE = "Made with Agent settings that were not saved yet."
 # How many searches of the call history (and CSV downloads) run at once.
 SLOW_READS_AT_ONCE = 2
-# The most calls one export holds.
-CSV_MOST_CALLS = 10000
+# The calls CSV is read this many calls at a time.
+CSV_PAGE_CALLS = 2000
 CSV_COLUMNS = [
     ("Started (UTC)", "started_at"),
     ("Type", "kind"),
@@ -255,10 +256,12 @@ def create_app(
         watching = asyncio.create_task(watch_credit())
         backing_up = asyncio.create_task(keep_backing_up())
         dialing = asyncio.create_task(keep_dialing())
+        connecting = asyncio.create_task(connect_numbers())
         yield
         watching.cancel()
         backing_up.cancel()
         dialing.cancel()
+        connecting.cancel()
         await calls.shutdown()
         await webrtc.close()
         store.close()
@@ -350,12 +353,35 @@ def create_app(
         for call_id, seconds in finished.items():
             if seconds and store.get_call(call_id):
                 calls.update(call_id, recording_seconds=round(seconds, 1))
+            elif seconds:
+                forget_recording(cfg.db_path, call_id)  # of a call deleted since
         for call_id in await asyncio.to_thread(prune, folder):
             if store.get_call(call_id):
                 calls.update(call_id, recording_seconds=0)
 
     dialer = CampaignDialer(cfg, calls, credit)
     numbers = TwilioNumbers(cfg, store)
+    # What Oscar did with the Twilio numbers when it started, for Your numbers to say.
+    numbers_at_start: list[str] = []
+
+    async def connect_numbers() -> None:
+        """On starting, bring the number Oscar calls from (and any left at an older address
+        of Oscar) to the agent: TwilioNumbers.connect_by_itself."""
+        if cfg.missing_phone_settings():
+            return
+        try:
+            said = await asyncio.to_thread(numbers.connect_by_itself)
+        except NumbersError as exc:
+            logger.warning(f"Could not look at the Twilio numbers on starting: {exc}")
+            return
+        except Exception:
+            logger.exception("Could not look at the Twilio numbers on starting")
+            return
+        for sentence in said:
+            logger.info(sentence)
+        if said:
+            numbers_at_start[:] = said
+            bus.publish({"type": "numbers"})
 
     async def keep_dialing() -> None:
         """Make the calls of the call lists that are running (app/campaigns.py)."""
@@ -537,8 +563,19 @@ def create_app(
         show: Literal["all", "todo", "incoming", "outgoing", "browser", "failed"] = "all",
     ) -> Response:
         """Call history as a spreadsheet: the calls the search and filter show, newest first."""
+        def every_call() -> list[dict]:
+            # Page by page, so a long history comes whole (the dashboard says it is every call found).
+            found: list[dict] = []
+            after = ""
+            while True:
+                page, more = store.find_calls(limit=CSV_PAGE_CALLS, before_id=after, query=q, show=show)
+                found.extend(page)
+                if not more or not page:
+                    return found
+                after = page[-1]["id"]
+
         async with slow_reads:
-            found, _ = await asyncio.to_thread(store.find_calls, limit=CSV_MOST_CALLS, query=q, show=show)
+            found = await asyncio.to_thread(every_call)
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return Response(
             content=await asyncio.to_thread(calls_csv, found, store.get_agent().summary_fields),
@@ -559,7 +596,7 @@ def create_app(
                 status_code=409, detail="Its summary is still being written. Delete it once that is done."
             )
         store.delete_call(call_id)
-        recording_path(cfg.db_path, call_id).unlink(missing_ok=True)
+        forget_recording(cfg.db_path, call_id)
         bus.publish({"type": "call_deleted", "id": call_id})
         return {"deleted": call_id}
 
@@ -594,13 +631,15 @@ def create_app(
     @app.post("/api/calls/browser")
     async def start_browser_call(offer: BrowserCallOffer) -> dict:
         require_agent_keys()
-        require_a_free_line()
         await require_credit()
+        # The call is made before the audio connection is set up (which takes a moment),
+        # so it holds its line: another call starting meanwhile sees it (MAX_CALLS).
+        require_a_free_line()
+        call = calls.create("browser", status="connecting")
         agent = offer.agent or store.get_agent()
         started: dict[str, str] = {}
 
         async def on_connection(connection: SmallWebRTCConnection) -> None:
-            call = calls.create("browser", status="connecting")
             started["call_id"] = call["id"]
             if offer.agent is not None:
                 calls.add_message(call["id"], "note", TRYING_SETTINGS_NOTE)
@@ -633,18 +672,20 @@ def create_app(
             )
         except Exception:
             logger.exception("Browser call setup failed")
-            if "call_id" in started:
-                calls.finish(started["call_id"], CALL_SETUP_FAILED)
+            calls.finish(call["id"], CALL_SETUP_FAILED)
             raise HTTPException(status_code=400, detail="Could not set up the audio connection.")
         if not answer or "call_id" not in started or "error" in started:
+            calls.finish(call["id"], CALL_SETUP_FAILED)
             raise HTTPException(status_code=500, detail="Could not start the call.")
         return {"sdp": answer["sdp"], "type": answer["type"], "call_id": started["call_id"]}
 
     @app.post("/api/calls/phone")
     async def start_phone_call(request: PhoneCallRequest) -> dict:
         require_agent_keys()
-        require_a_free_line()
         await require_credit()
+        # Nothing waits from here to the call being made (place_outbound_call), so no
+        # other call can take the line in between (MAX_CALLS).
+        require_a_free_line()
         missing = cfg.missing_phone_settings()
         if missing:
             raise HTTPException(
@@ -735,6 +776,18 @@ def create_app(
     async def list_campaigns() -> dict:
         return {"campaigns": store.list_campaigns(), "do_not_call": store.get_do_not_call()}
 
+    @app.post("/api/campaigns/sheet")
+    async def read_workbook(file: UploadFile = File(...), sheet: str = Form("", max_length=31)) -> dict:
+        """An Excel workbook's sheet as CSV text, for the list form to preview and send (app/sheets.py)."""
+        refused = other_spreadsheet(file.filename or "")
+        if refused:
+            raise HTTPException(status_code=400, detail=refused)
+        data = await file.read(SHEET_MOST_BYTES + 1)
+        try:
+            return await asyncio.to_thread(read_sheet, data, sheet)
+        except SheetError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
     @app.post("/api/campaigns/preview")
     async def preview_contacts(preview: ContactsPreview) -> dict:
         """What a CSV holds, before it is made into a list: how many numbers, and what is wrong."""
@@ -758,7 +811,7 @@ def create_app(
     async def create_campaign(request: CampaignRequest) -> dict:
         contacts, _, _ = await asyncio.to_thread(parse_contacts, request.contacts_csv, request.country_code)
         if not contacts:
-            raise HTTPException(status_code=400, detail="The CSV has no phone numbers Oscar can call.")
+            raise HTTPException(status_code=400, detail="The list has no phone numbers Oscar can call.")
         if request.start:
             require_phone_for_lists()
         campaign = store.create_campaign(
@@ -863,7 +916,8 @@ def create_app(
     @app.get("/api/numbers")
     async def phone_numbers() -> dict:
         """The Twilio account's numbers, whether each reaches Oscar, and the number Oscar calls from."""
-        return await on_twilio(numbers.overview)
+        overview = await on_twilio(numbers.overview)
+        return {**overview, "at_start": numbers_at_start}
 
     @app.post("/api/numbers/{sid}/connect")
     async def connect_number(sid: str) -> dict:

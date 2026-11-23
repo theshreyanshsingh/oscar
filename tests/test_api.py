@@ -302,6 +302,20 @@ def test_server_restart_closes_calls_left_open(cfg):
     assert untouched["status"] == "ended"
 
 
+def test_a_call_cut_off_by_a_restart_ends_when_last_anything_was_said(cfg):
+    store = Store(cfg.db_path)
+    call = store.create_call("phone_inbound", status="live")
+    store.add_message(call["id"], "user", "Hello?")
+    said_at = store.get_messages(call["id"])[-1]["created_at"]
+    silent = store.create_call("browser", status="live")
+    # The server was down for an hour: that is not part of either call.
+    store._db.execute("UPDATE calls SET started_at = '2026-11-24T09:58:00+00:00' WHERE id = ?", (silent["id"],))
+    store.close()
+    with local_client(cfg) as client:
+        assert client.get(f"/api/calls/{call['id']}").json()["call"]["ended_at"] == said_at
+        assert client.get(f"/api/calls/{silent['id']}").json()["call"]["ended_at"] == "2026-11-24T09:58:00+00:00"
+
+
 def test_end_call_that_is_not_running_marks_it_ended(client, cfg):
     store = Store(cfg.db_path)
     call = store.create_call("browser", status="connecting")
@@ -712,3 +726,15 @@ def test_a_search_note_is_kept_in_the_transcript(client):
         ("user", "What's the weather?"),
         ("note", "Searched the web for: weather today"),
     ]
+
+
+def test_the_calls_csv_holds_every_call_however_many(client, cfg, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main, "CSV_PAGE_CALLS", 2)
+    store = client.app.state.store
+    for n in range(5):
+        store.create_call("phone_inbound", status="ended", from_number=f"+6141234567{n}")
+    rows = client.get("/api/calls.csv").text.strip().splitlines()
+    assert len(rows) == 1 + 5
+    assert len(set(rows[1:])) == 5

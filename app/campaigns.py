@@ -17,9 +17,11 @@ each number has got to is kept in the database, so a restart carries on.
 import csv
 import io
 import re
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
+import phonenumbers
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -37,6 +39,9 @@ CSV_MOST_CHARACTERS = 2_000_000
 AT_ONCE_MOST = 5
 # How often the dialer looks for numbers to call.
 TICK_SECONDS = 5
+# How long a list waits when Twilio could not be reached or was too busy.
+REST_SECONDS = 60
+TRYING_AGAIN = "Twilio could not take the call just now: Oscar tries again in a minute."
 # Each person's details, as Oscar is told them: the most columns, and characters a value.
 FIELDS_MOST = 20
 FIELD_CHARS = 300
@@ -47,7 +52,31 @@ CONTACT_STATUSES = ("waiting", "calling", "answered", "voicemail", "no_answer", 
 CALL_AGAIN_STATUSES = ("voicemail", "no_answer", "busy", "failed")
 
 # A column holding the numbers is found by its heading.
-_NUMBER_HEADING = re.compile(r"phone|mobile|cell|number|tel|whatsapp|contact", re.IGNORECASE)
+# How far down a sheet the row of headings is looked for (below a title, say).
+HEADING_ROWS_LOOKED_AT = 10
+# Headings of a column of phone numbers: plainly ("Phone", "Mobile", "Tel."), or maybe
+# ("Contact number"). One that names something else is never taken for them: an order,
+# customer or account number would ring whoever has that number.
+_PHONE_HEADING = re.compile(r"phone|mobile|\bcell|\btel\b|\btel\.|telephone|whatsapp|\bph\b", re.IGNORECASE)
+_MAYBE_PHONE_HEADING = re.compile(r"number|contact|\bno\b", re.IGNORECASE)
+_NOT_PHONE_HEADING = re.compile(
+    r"\b(?:id|ids|order|account|acct|invoice|reference|ref|customer|client|member|policy|postcode|post\s*code|"
+    r"zip|abn|acn|tax|vat|serial|ticket|case|booking|quote|job|unit|street|house|licen[cs]e|passport|"
+    r"card|iban|bsb|sku|item|qty|quantity|age|count|row)\b",
+    re.IGNORECASE,
+)
+
+
+def heading_strength(heading: str) -> int:
+    """2 for a heading of phone numbers, 1 for one that may be, 0 for one that is not."""
+    heading = heading.strip()
+    if not heading or dialable(heading, "1") is not None:
+        return 0
+    if _PHONE_HEADING.search(heading):
+        return 2
+    if _MAYBE_PHONE_HEADING.search(heading) and not _NOT_PHONE_HEADING.search(heading):
+        return 1
+    return 0
 _PLACEHOLDER = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 
 # How the note of a voicemail left begins (app/agent.py, leave_voicemail).
@@ -75,22 +104,45 @@ def placeholders(template: str) -> list[str]:
     return [field_key(name) for name in _PLACEHOLDER.findall(template)]
 
 
+def _as_written_in(code: str, digits: str) -> str:
+    """A number written without "+" read the way its country writes them, by Google's
+    libphonenumber: the trunk prefix ("0" in Australia, "1" in the US) comes off, an
+    Italian 0 stays, and a number that already starts with the country code keeps it
+    (Excel keeps +61 412 345 678 as the number 61412345678). "" when libphonenumber
+    does not know it for a real number there, to fall back on the plain rule."""
+    # With no code, `digits` is written with its own: "+44 (0)20 7946 0958" loses its "(0)".
+    region = None
+    if code:
+        region = phonenumbers.region_code_for_country_code(int(code)) if code.isdigit() else "ZZ"
+        if region == "ZZ":
+            return ""
+    try:
+        parsed = phonenumbers.parse(digits, region)
+    except phonenumbers.NumberParseException:
+        return ""
+    if not phonenumbers.is_valid_number(parsed):
+        return ""
+    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164).removeprefix("+")
+
+
 def dialable(raw: str, country_code: str = "") -> str | None:
     """A number as Twilio dials it (+61412345678), or None when it cannot be one.
 
     "0412 345 678" with country code +61 becomes +61412345678 (the 0 before the
-    area code goes); "0061 412..." and "+61 412..." need no country code.
+    area code goes), and so does "61412345678"; "0061 412..." and "+61 412..." need
+    no country code.
     """
     text = raw.strip()
     if not text or re.search(r"[^\d\s()+.\-/]", text):
         return None
     digits = re.sub(r"\D", "", text)
     if text.startswith("+"):
-        number = digits
+        number = _as_written_in("", text) or digits
     elif digits.startswith("00"):
-        number = digits[2:]
+        number = _as_written_in("", re.sub(r"^\D*00", "+", text)) or digits[2:]
     elif country_code:
-        number = re.sub(r"\D", "", country_code) + digits.lstrip("0")
+        code = re.sub(r"\D", "", country_code)
+        number = _as_written_in(code, digits) or code + digits.lstrip("0")
     else:
         return None
     if not 8 <= len(number) <= 15 or number.startswith("0"):
@@ -98,12 +150,37 @@ def dialable(raw: str, country_code: str = "") -> str | None:
     return "+" + number
 
 
+def _headings_at(rows: list[list[str]]) -> tuple[int, int] | None:
+    """(Which row has the headings, which column the numbers).
+
+    The headings are the first of the first ten rows with a heading of phone numbers
+    ("Phone", "Mobile"...) over a column that is mostly numbers, so a title above them
+    and a "Contact name" column are passed over; a plain heading of phone numbers comes
+    before one that only may be ("Contact number"), and one that names something else
+    ("Customer number", "Order no") is never taken. Failing that, the first row, when
+    it has such a heading over numbers that cannot be read."""
+    for strength in (2, 1):
+        for at, row in enumerate(rows[:HEADING_ROWS_LOOKED_AT]):
+            for column, cell in enumerate(row):
+                if heading_strength(cell) != strength:
+                    continue
+                below = [other[column] for other in rows[at + 1 : at + 11] if column < len(other) and other[column].strip()]
+                if below and 2 * sum(1 for value in below if dialable(value, "1")) > len(below):
+                    return at, column
+    first = [heading_strength(cell) for cell in rows[0]]
+    for strength in (2, 1):
+        if strength in first:
+            return 0, first.index(strength)
+    return None
+
+
 def parse_contacts(text: str, country_code: str = "") -> tuple[list[dict], list[str], list[str]]:
     """The people in a CSV: ([{"number", "fields"}], the headings, problems as sentences).
 
-    The first row is the headings when it has a heading for the numbers ("Phone",
-    "Mobile", "Number"...). Without headings, the first column whose values look
-    like phone numbers holds them, and the columns are "Column 1", "Column 2"...
+    The headings are the row (of the first ten) with a heading for the numbers
+    ("Phone", "Mobile", "Number"...) over a column of numbers; rows above it are left
+    out. Without headings, the first column whose values look like phone numbers
+    holds them, and the columns are "Column 1", "Column 2"...
     The same number twice is called once.
     """
     try:
@@ -111,19 +188,24 @@ def parse_contacts(text: str, country_code: str = "") -> tuple[list[dict], list[
     except csv.Error:
         dialect = csv.excel
     # (Row number in the file, its cells), blank rows left out.
-    numbered = [
-        (line, row)
-        for line, row in enumerate(csv.reader(io.StringIO(text), dialect), start=1)
-        if any(cell.strip() for cell in row)
-    ]
+    try:
+        # newline="": a file with old Mac line endings (CR alone) is read too.
+        numbered = [
+            (line, row)
+            for line, row in enumerate(csv.reader(io.StringIO(text, newline=""), dialect), start=1)
+            if any(cell.strip() for cell in row)
+        ]
+    except csv.Error as exc:
+        return [], [], [f"The file could not be read as rows ({exc}). Save it again as CSV, or as an Excel workbook."]
     rows = [row for _, row in numbered]
     if not rows:
         return [], [], ["The file has no rows."]
 
-    first = [cell.strip() for cell in rows[0]]
-    column = next((i for i, heading in enumerate(first) if _NUMBER_HEADING.search(heading)), None)
-    if column is not None and dialable(first[column], "1") is None:
-        headings, body = first, numbered[1:]
+    found = _headings_at(rows)
+    if found is not None:
+        at, column = found
+        # Rows above the headings (a sheet's title, a date) are not people.
+        headings, body = [cell.strip() for cell in rows[at]], numbered[at + 1 :]
     else:
         width = max(len(row) for row in rows)
         sample = rows[:20]
@@ -290,6 +372,8 @@ class CampaignDialer:
         self._calls = calls
         self._store: Store = calls.store
         self._credit = credit
+        # Lists that wait a while before calling again (Twilio out of reach or too busy).
+        self._resting: dict[str, float] = {}
 
     def _publish(self, campaign_id: str) -> None:
         campaign = self._store.get_campaign(campaign_id)
@@ -324,12 +408,23 @@ class CampaignDialer:
     async def tick(self) -> None:
         self.settle()
         for campaign in self._store.campaigns_with_status("running"):
+            if time.monotonic() < self._resting.get(campaign["id"], 0):
+                continue
             try:
-                await self._run(campaign)
+                await self._run(campaign["id"])
             except Exception:
                 logger.exception(f"Call list {campaign['id']} could not go on")
 
-    async def _run(self, campaign: dict) -> None:
+    def _still_running(self, campaign_id: str) -> dict | None:
+        """The list as it is now, when it is still running: the owner may have paused or
+        stopped it while Oscar waited for Twilio or the key's credit."""
+        campaign = self._store.get_campaign(campaign_id)
+        return campaign if campaign is not None and campaign["status"] == "running" else None
+
+    async def _run(self, campaign_id: str) -> None:
+        campaign = self._still_running(campaign_id)
+        if campaign is None:
+            return
         counts = campaign["counts"]
         if not counts.get("waiting") and not counts.get("calling"):
             self._set_status(campaign, "done")
@@ -354,25 +449,30 @@ class CampaignDialer:
         # One line is left for people calling in (unless Oscar takes only one call at once).
         lines_for_lists = self._cfg.max_calls - 1 if self._cfg.max_calls > 1 else 1
         while free > 0:
-            if lines_busy(self._store, self._cfg) or self._store.count_open_calls() >= lines_for_lists:
-                return
             if self._credit is not None:
                 too_little = await self._credit.too_little_for_a_call()
+                campaign = self._still_running(campaign_id)
+                if campaign is None:
+                    return
                 if too_little:
                     self._set_status(campaign, "paused", f"Paused: {too_little}")
                     return
-            waiting = self._store.campaign_contacts(campaign["id"], status="waiting", limit=1)
+            # From here to the call being made (in place_outbound_call) nothing waits, so
+            # no other call can take the line in between.
+            if lines_busy(self._store, self._cfg) or self._store.count_open_calls() >= lines_for_lists:
+                return
+            waiting = self._store.campaign_contacts(campaign_id, status="waiting", limit=1)
             if not waiting:
                 return
             contact = waiting[0]
             digits = re.sub(r"\D", "", contact["number"])
             if digits in opted_out:
                 self._store.update_contact(contact["id"], status="skipped", detail="Asked not to be called again.")
-                self._publish(campaign["id"])
+                self._publish(campaign_id)
                 continue
             if is_blocked(contact["number"], blocked):
                 self._store.update_contact(contact["id"], status="skipped", detail="On the blocked list.")
-                self._publish(campaign["id"])
+                self._publish(campaign_id)
                 continue
             self._store.update_contact(contact["id"], status="calling", detail="")
             try:
@@ -381,12 +481,31 @@ class CampaignDialer:
                     self._calls,
                     contact["number"],
                     agent=agent_for_contact(agent, campaign, contact),
-                    campaign_id=campaign["id"],
+                    campaign_id=campaign_id,
                     from_number=from_number,
                 )
             except PhoneCallError as exc:
-                self._store.update_contact(contact["id"], status="failed", detail=str(exc))
+                if exc.call_id:
+                    # Twilio may have placed it: how the call goes settles the person (settle).
+                    self._store.update_contact(contact["id"], status="calling", call_id=exc.call_id, detail="")
+                elif exc.stops_lists or exc.try_later:
+                    # Not this person's doing: they are called once the list goes on.
+                    self._store.update_contact(contact["id"], status="waiting", detail="")
+                    now = self._still_running(campaign_id)
+                    if now is None:
+                        self._publish(campaign_id)
+                    elif exc.stops_lists:
+                        self._set_status(now, "paused", f"Paused: {exc}")
+                    else:
+                        self._resting[campaign_id] = time.monotonic() + REST_SECONDS
+                        self._set_status(now, "running", f"{TRYING_AGAIN} ({exc})")
+                    return
+                else:
+                    self._store.update_contact(contact["id"], status="failed", detail=str(exc))
             else:
                 self._store.update_contact(contact["id"], status="calling", call_id=call["id"])
-            self._publish(campaign["id"])
+            self._publish(campaign_id)
             free -= 1
+            campaign = self._still_running(campaign_id)
+            if campaign is None:
+                return

@@ -28,7 +28,7 @@ from urllib.parse import urlsplit
 
 import json
 
-from twilio.base.exceptions import TwilioException, TwilioRestException
+from twilio.base.exceptions import TwilioException, TwilioRestException, TwilioServiceException
 from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
 
@@ -72,6 +72,21 @@ def twilio_client(cfg: Config) -> Client:
     )
 
 
+KEYS_REFUSED = (
+    "Twilio refused the Account SID and Auth Token in .env. Check them in Twilio's "
+    "console (Account Info), save them with scripts.set_keys --phone, and restart Oscar."
+)
+
+
+def keys_refused(exc: TwilioRestException) -> bool:
+    """Twilio refused the Account SID and Auth Token: error 20003, or an HTTP 401 that
+    names no error (another code, like 20005 for an account that is not active, is not)."""
+    # With no code in Twilio's answer, the library gives the HTTP status as the code.
+    if exc.code not in (None, exc.status):
+        return exc.code == 20003
+    return exc.status == 401
+
+
 def twilio_message(exc: TwilioRestException) -> str:
     """Twilio's own words for a refusal, without the full stop, and without what the
     Twilio library puts in front of them ("Unable to create record: ...")."""
@@ -80,11 +95,16 @@ def twilio_message(exc: TwilioRestException) -> str:
     return message.rstrip(".") or f"error {exc.status}"
 
 
-def _refusal(exc: Exception) -> TwilioRestException | None:
-    """Twilio's refusal, whichever way the library raised it. A list's page that Twilio
-    refuses comes as a bare TwilioException("Unable to fetch page", response)."""
+def twilio_refusal(exc: Exception) -> TwilioRestException | None:
+    """Twilio's refusal, whichever way the library raised it, or None when Twilio did not
+    answer. A list's page that Twilio refuses comes as a bare TwilioException("Unable to
+    fetch page", response), and an answer in RFC 9457's form as a TwilioServiceException."""
     if isinstance(exc, TwilioRestException):
         return exc
+    if isinstance(exc, TwilioServiceException):
+        return TwilioRestException(
+            exc.status, exc.uri, msg=str(exc.detail or exc.title or ""), code=exc.code, method=exc.method
+        )
     if isinstance(exc, TwilioException) and len(exc.args) >= 2 and hasattr(exc.args[1], "status_code"):
         response = exc.args[1]
         try:
@@ -93,21 +113,21 @@ def _refusal(exc: Exception) -> TwilioRestException | None:
             body = {}
         body = body if isinstance(body, dict) else {}
         return TwilioRestException(
-            response.status_code, "", msg=str(body.get("message") or ""), code=body.get("code")
+            response.status_code,
+            "",
+            # Twilio's usual answer says "message"; one in RFC 9457's form, "detail" and "title".
+            msg=str(body.get("message") or body.get("detail") or body.get("title") or ""),
+            code=body.get("code"),
         )
     return None
 
 
 def describe(exc: Exception) -> NumbersError:
     """What went wrong with a request to Twilio, in words, with Twilio's own message."""
-    exc = _refusal(exc) or exc
+    exc = twilio_refusal(exc) or exc
     if isinstance(exc, TwilioRestException):
-        if exc.status == 401 or exc.code == 20003:
-            return NumbersError(
-                "Twilio refused the Account SID and Auth Token in .env. Check them in Twilio's "
-                "console (Account Info), save them with scripts.set_keys --phone, and restart Oscar.",
-                status=400,
-            )
+        if keys_refused(exc):
+            return NumbersError(KEYS_REFUSED, status=400)
         message = twilio_message(exc)
         hint = REGULATORY_HINT if re.search(r"address|bundle|regulat|identity", message, re.IGNORECASE) else ""
         return NumbersError(f"Twilio said: {message}.{hint}", status=400 if 400 <= (exc.status or 0) < 500 else 502)
@@ -237,6 +257,52 @@ class TwilioNumbers:
             "more": len(numbers) >= NUMBERS_READ,
         }
 
+    def connect_by_itself(self) -> list[str]:
+        """What Oscar does with the account's numbers when it starts, so its number reaches
+        the agent without a visit to the dashboard. In sentences, for the log and the dashboard.
+
+        - A number still sending calls to an older address of Oscar (a tunnel that changed)
+          is moved to this one.
+        - The number Oscar calls from is connected when nothing answers its calls.
+        - With no number chosen to call from and only one on the account that takes calls,
+          that one becomes it (and is connected the same way).
+
+        A number another app answers (a webhook, a TwiML app, a SIP trunk) is never taken:
+        that is asked in the dashboard first."""
+        client = self._client()
+        known = self._known()
+        try:
+            numbers = self._owned(client)
+        except Exception as exc:
+            raise describe(exc) from None
+        voice = [number for number in numbers if capabilities(number.capabilities)["voice"]]
+        here = calls_from(self._cfg, self._store)
+        said: list[str] = []
+        if not here and len(voice) == 1:
+            here = voice[0].phone_number
+            self._store.set_calls_from(here)
+            said.append(f"{here} is the number Oscar calls from: it is the only one on the Twilio account.")
+        for number in numbers:
+            state, detail = number_state(self._cfg, number, known)
+            if state == "old_address":
+                done = f"{number.phone_number} sent its calls to an older address of Oscar: they now come to this one."
+            elif state == "unset" and number.phone_number == here:
+                done = f"{number.phone_number}, the number Oscar calls from, answered nothing: its calls now come to Oscar."
+            else:
+                if number.phone_number == here and state != "connected":
+                    said.append(
+                        f"{number.phone_number}, the number Oscar calls from, does not bring its calls to Oscar. "
+                        f"{detail} Connect it in Phone, Your numbers."
+                    )
+                continue
+            try:
+                self.connect(number.sid)
+            except NumbersError as exc:
+                said.append(f"{number.phone_number} could not be connected to Oscar: {exc}")
+                continue
+            said.append(done)
+        return said
+
     def connect(self, sid: str) -> dict:
         """Have Twilio send this number's calls to Oscar."""
         client = self._client()
@@ -259,7 +325,10 @@ class TwilioNumbers:
                         "status_callback_method": number.status_callback_method,
                     },
                 )
-            changes = {"voice_url": voice_webhook(self._cfg), "voice_method": "POST", "voice_application_sid": ""}
+            changes = {"voice_url": voice_webhook(self._cfg), "voice_method": "POST"}
+            if number.voice_application_sid:
+                # A TwiML app comes before the voice URL; an empty value takes it off.
+                changes["voice_application_sid"] = ""
             # The status callback is only taken when no one else uses it.
             if not number.status_callback or _ours(number.status_callback, known):
                 changes.update(status_callback=status_webhook(self._cfg), status_callback_method="POST")
@@ -282,8 +351,9 @@ class TwilioNumbers:
             changes = {
                 "voice_url": before.get("voice_url", ""),
                 "voice_method": before.get("voice_method") or "POST",
-                "voice_application_sid": before.get("voice_application_sid", ""),
             }
+            if before.get("voice_application_sid"):
+                changes["voice_application_sid"] = before["voice_application_sid"]
             if _ours(number.status_callback or "", known):
                 changes["status_callback"] = before.get("status_callback", "")
                 changes["status_callback_method"] = before.get("status_callback_method") or "POST"
@@ -327,7 +397,8 @@ class TwilioNumbers:
             if re.sub(r"[\s_-]", "", str(entry.get("number_type", ""))).lower() == wanted:
                 monthly = entry.get("current_price") or entry.get("base_price")
                 if monthly not in (None, ""):
-                    return {"monthly": str(monthly), "unit": prices.price_unit or "USD"}
+                    # An ISO 4217 code, which Twilio's reference shows in either case.
+                    return {"monthly": str(monthly), "unit": (prices.price_unit or "USD").upper()}
         return None
 
     def search(self, country: str, kind: str, area_code: str = "", contains: str = "") -> dict:
@@ -384,7 +455,7 @@ class TwilioNumbers:
                 status_callback_method="POST",
             )
         except Exception as exc:
-            if _refusal(exc):
+            if twilio_refusal(exc):
                 raise describe(exc) from None
             # No answer in time (or the connection broke): Twilio may have bought it all
             # the same. Saying it failed could have it bought twice, so look first.

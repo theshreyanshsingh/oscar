@@ -9,6 +9,7 @@ be sent: which address, which form fields.
 import json
 import logging
 import re
+import time
 
 import pytest
 from twilio.http import HttpClient
@@ -18,7 +19,7 @@ from twilio.rest import Client
 from app import numbers as numbers_module
 from app.numbers import NumbersError, TwilioNumbers, calls_from
 from app.store import Store
-from tests.conftest import PUBLIC_URL, local_client, make_config
+from tests.conftest import PUBLIC_URL, local_client, make_config, real_twilio_client
 
 ACCOUNT = "AC" + "0" * 32
 WEBHOOK = f"{PUBLIC_URL}/twilio/voice"
@@ -158,7 +159,7 @@ TOKEN = "test-auth-token"
 @pytest.fixture
 def twilio(monkeypatch, tmp_path) -> FakeTwilio:
     # Oscar's own client gives every request to Twilio a timeout.
-    real = numbers_module.twilio_client(make_config(tmp_path, twilio_auth_token=TOKEN))
+    real = real_twilio_client(make_config(tmp_path, twilio_auth_token=TOKEN))
     assert real.http_client.timeout == numbers_module.TWILIO_TIMEOUT_SECONDS
     fake = FakeTwilio()
 
@@ -226,14 +227,15 @@ def test_connecting_points_the_number_at_oscar_and_keeps_what_it_had(numbers, tw
     assert (connected["state"], connected["phone_number"]) == ("connected", "+61255550102")
     ((url, fields),) = twilio.posted()
     assert url == f"{API}/IncomingPhoneNumbers/{sid}.json"
-    # Its status callback belongs to something else, so it is left alone.
-    assert fields == {"VoiceUrl": WEBHOOK, "VoiceMethod": "POST", "VoiceApplicationSid": ""}
+    # Its status callback belongs to something else, so it is left alone, and it has
+    # no TwiML app to take off, so nothing is sent about one.
+    assert fields == {"VoiceUrl": WEBHOOK, "VoiceMethod": "POST"}
     kept = store.get_number_connection(sid)
     assert (kept["voice_url"], kept["status_callback"]) == ("https://crm.example.com/voice", "https://crm.example.com/status")
 
     numbers.disconnect(sid)
     (_, put_back) = twilio.posted()[-1]
-    assert put_back == {"VoiceUrl": "https://crm.example.com/voice", "VoiceMethod": "POST", "VoiceApplicationSid": ""}
+    assert put_back == {"VoiceUrl": "https://crm.example.com/voice", "VoiceMethod": "POST"}
     assert twilio.numbers[sid]["status_callback"] == "https://crm.example.com/status"
     assert store.get_number_connection(sid) is None
 
@@ -246,6 +248,9 @@ def test_a_number_a_twiml_app_answered_gets_its_app_back(numbers, twilio):
     assert fields == {"VoiceUrl": WEBHOOK, "VoiceMethod": "POST", "VoiceApplicationSid": "",
                       "StatusCallback": STATUS, "StatusCallbackMethod": "POST"}
     back = numbers.disconnect(sid)
+    (_, put_back) = twilio.posted()[-1]
+    assert put_back == {"VoiceUrl": "", "VoiceMethod": "POST", "VoiceApplicationSid": "AP" + "3" * 32,
+                        "StatusCallback": "", "StatusCallbackMethod": "POST"}
     assert back["state"] == "elsewhere"
     assert twilio.numbers[sid]["voice_application_sid"] == "AP" + "3" * 32
     assert (twilio.numbers[sid]["voice_url"], twilio.numbers[sid]["status_callback"]) == ("", "")
@@ -313,6 +318,12 @@ def test_toll_free_numbers_are_priced_as_toll_free(numbers, twilio):
     assert found["price"] == {"monthly": "2.15", "unit": "USD"}
 
 
+def test_a_price_in_a_lower_case_currency_is_shown_in_capitals(numbers, twilio):
+    # Twilio's reference gives the unit as an ISO 4217 code "(e.g. `usd`, `eur`, `jpy`)".
+    twilio.prices["US"]["price_unit"] = "usd"
+    assert numbers.search("US", "local")["price"] == {"monthly": "1.15", "unit": "USD"}
+
+
 def test_a_price_twilio_does_not_give_is_left_unknown(numbers, twilio):
     assert numbers.search("AU", "mobile")["price"] is None
 
@@ -368,6 +379,40 @@ def test_wrong_credentials_say_how_to_fix_them(numbers, twilio):
     twilio.refuse[("GET", r".")] = (401, {"code": 20003, "message": "Authenticate", "status": 401})
     with pytest.raises(NumbersError, match="refused the Account SID and Auth Token") as refused:
         numbers.overview()
+    assert refused.value.status == 400
+
+
+@pytest.mark.parametrize(
+    ("body", "said"),
+    [
+        ({"message": "Authenticate"}, "refused the Account SID and Auth Token"),  # no error code
+        ({"code": 20005, "message": "Account not active"}, "Twilio said: Account not active."),
+    ],
+)
+def test_only_refused_keys_are_blamed_on_the_keys(numbers, twilio, body, said):
+    twilio.refuse[("GET", r".")] = (401, {**body, "status": 401})
+    with pytest.raises(NumbersError) as refused:
+        numbers.overview()
+    assert said in str(refused.value)
+
+
+RFC_9457 = {"type": "https://www.twilio.com/docs/errors/21422", "title": "Phone number unavailable",
+            "status": 400, "code": 21422, "detail": "+14155550199 is not available"}
+
+
+@pytest.mark.parametrize("asked", ["a list", "an instance", "a purchase"])
+def test_a_refusal_in_twilios_newer_form_is_explained_in_its_words(numbers, twilio, asked):
+    # The library raises these as a bare TwilioException (a list's page) or a
+    # TwilioServiceException (anything else), neither of them a TwilioRestException.
+    method, ask = {
+        "a list": ("GET", numbers.countries),  # only a list's pages
+        "an instance": ("GET", lambda: numbers.connect("PN" + "2" * 32)),
+        "a purchase": ("POST", lambda: numbers.buy("+14155550199")),
+    }[asked]
+    twilio.refuse[(method, r".")] = (400, RFC_9457)
+    with pytest.raises(NumbersError) as refused:
+        ask()
+    assert str(refused.value) == "Twilio said: +14155550199 is not available."
     assert refused.value.status == 400
 
 
@@ -495,3 +540,66 @@ def test_the_number_to_call_from_is_looked_up_by_itself(numbers, twilio):
     numbers.choose_calls_from("+61412345678")
     asked = [fields.get("PhoneNumber") for method, _, fields in twilio.requests if method == "GET"]
     assert asked == ["+61412345678", "+61412345678"]  # the account's numbers, then verified caller IDs
+
+
+# On starting, Oscar brings its number to the agent by itself
+
+
+def test_on_starting_numbers_at_an_older_address_of_oscar_are_moved_to_this_one(numbers, twilio):
+    said = numbers.connect_by_itself()
+    assert said == ["+61255550104 sent its calls to an older address of Oscar: they now come to this one."]
+    assert twilio.numbers["PN" + "4" * 32]["voice_url"] == WEBHOOK
+    # Only that number was changed: another app's numbers, the trunk's and the texts-only one were not.
+    assert [url for url, _ in twilio.posted()] == [f"{API}/IncomingPhoneNumbers/{'PN' + '4' * 32}.json"]
+
+
+def test_on_starting_the_number_oscar_calls_from_is_connected_when_nothing_answers_it(numbers, twilio, store):
+    twilio.numbers["PN" + "7" * 32] = number("7", "+61255550107")
+    store.set_calls_from("+61255550107")
+    said = numbers.connect_by_itself()
+    assert "+61255550107, the number Oscar calls from, answered nothing: its calls now come to Oscar." in said
+    assert twilio.numbers["PN" + "7" * 32]["voice_url"] == WEBHOOK
+
+
+def test_on_starting_a_number_another_app_answers_is_not_taken(numbers, twilio, store):
+    store.set_calls_from("+61255550102")
+    (about,) = [sentence for sentence in numbers.connect_by_itself() if sentence.startswith("+61255550102")]
+    assert about.startswith("+61255550102, the number Oscar calls from, does not bring its calls to Oscar.")
+    assert about.endswith("Connect it in Phone, Your numbers.")
+    assert twilio.numbers["PN" + "2" * 32]["voice_url"] == "https://crm.example.com/voice"
+
+
+def test_on_starting_the_only_number_on_the_account_is_the_one_oscar_calls_from(tmp_path, twilio):
+    store = Store(tmp_path / "only.db")
+    twilio.numbers = {"PN" + "7" * 32: number("7", "+61255550107")}
+    numbers = TwilioNumbers(make_config(tmp_path, twilio_phone_number="", twilio_auth_token=TOKEN), store)
+    said = numbers.connect_by_itself()
+    assert said == [
+        "+61255550107 is the number Oscar calls from: it is the only one on the Twilio account.",
+        "+61255550107, the number Oscar calls from, answered nothing: its calls now come to Oscar.",
+    ]
+    assert store.get_calls_from() == "+61255550107"
+    assert twilio.numbers["PN" + "7" * 32]["voice_url"] == WEBHOOK
+
+
+def test_on_starting_with_several_numbers_none_is_chosen_for_you(tmp_path, twilio):
+    store = Store(tmp_path / "several.db")
+    twilio.numbers = {sid: number(sid[2], phone) for sid, phone in [("PN" + "7" * 32, "+61255550107"), ("PN" + "8" * 32, "+61255550108")]}
+    numbers = TwilioNumbers(make_config(tmp_path, twilio_phone_number="", twilio_auth_token=TOKEN), store)
+    assert numbers.connect_by_itself() == []
+    assert store.get_calls_from() == "" and twilio.posted() == []
+
+
+def test_the_dashboard_says_what_oscar_did_on_starting(tmp_path, twilio):
+    store = Store(tmp_path / "oscar-test.db")
+    store.remember_oscar_address(OLD_TUNNEL)
+    store.close()
+    with local_client(make_config(tmp_path, twilio_auth_token=TOKEN)) as client:
+        for _ in range(100):
+            overview = client.get("/api/numbers").json()
+            if overview["at_start"]:
+                break
+            time.sleep(0.05)
+        assert overview["at_start"] == ["+61255550104 sent its calls to an older address of Oscar: they now come to this one."]
+        states = {n["phone_number"]: n["state"] for n in overview["numbers"]}
+        assert states["+61255550104"] == "connected"

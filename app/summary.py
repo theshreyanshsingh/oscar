@@ -278,6 +278,7 @@ def only_what_was_said(summary: CallSummary, messages: list[dict]) -> CallSummar
         callback_number=plus + digits_in(number) if _given_whole(number, messages) else "",
         follow_up=summary.follow_up,
         details=details,
+        do_not_call=summary.do_not_call,
     )
 
 

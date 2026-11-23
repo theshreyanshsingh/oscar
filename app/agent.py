@@ -634,3 +634,6 @@ async def keep_recording(calls: CallManager, call_id: str, recorder: CallRecorde
         return
     if seconds and calls.store.get_call(call_id):
         calls.update(call_id, recording_seconds=round(seconds, 1))
+    elif seconds:
+        # The call was deleted while its recording was being encoded: the recording goes too.
+        recorder.target.unlink(missing_ok=True)

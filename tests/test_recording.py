@@ -60,3 +60,39 @@ def test_a_half_encoded_file_left_by_a_stopped_server_goes(tmp_path):
     fresh.write_bytes(b"x")  # being encoded now
     prune(tmp_path)
     assert not partial.exists() and fresh.exists()
+
+
+def test_deleting_a_call_deletes_its_recording_finished_or_not(tmp_path):
+    from app.recording import forget_recording, recordings_folder
+
+    db = tmp_path / "oscar.db"
+    folder = recordings_folder(db)
+    folder.mkdir()
+    call_id, other = "a" * 32, "b" * 32
+    files = [folder / f"{call_id}.m4a", folder / f".{call_id}.m4a.partial", folder / f".{call_id}.16000.pcm"]
+    kept = folder / f"{other}.m4a"
+    for path in [*files, kept]:
+        path.write_bytes(b"x")
+    forget_recording(db, call_id)
+    assert not any(path.exists() for path in files)
+    assert kept.exists()
+    forget_recording(db, "../" + other)  # not a call's id: nothing is touched
+    assert kept.exists()
+
+
+async def test_a_recording_finished_after_its_call_was_deleted_goes(tmp_path):
+    from app.agent import keep_recording
+    from app.calls import CallManager
+    from app.events import EventBus
+    from app.recording import CallRecorder, recordings_folder
+    from app.store import Store
+
+    store = Store(tmp_path / "oscar.db")
+    calls = CallManager(store, EventBus())
+    call = calls.create("phone_inbound", status="live")
+    recorder = CallRecorder(recordings_folder(tmp_path / "oscar.db"), call["id"], 8000)
+    recorder._write(tone_pcm(3, 8000))
+    store.delete_call(call["id"])  # deleted while the recording is still to be encoded
+    await keep_recording(calls, call["id"], recorder)
+    assert not recorder.target.exists()
+    store.close()

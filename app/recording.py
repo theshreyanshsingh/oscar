@@ -38,6 +38,17 @@ def recording_path(db_path: Path, call_id: str) -> Path:
     return recordings_folder(db_path) / f"{call_id}.m4a"
 
 
+def forget_recording(db_path: Path, call_id: str) -> None:
+    """Delete a call's recording: the .m4a, and a raw or half-encoded one still to finish
+    (an encoding under way that ends after this is deleted by whoever finishes it, when
+    the call is no longer there)."""
+    folder = recordings_folder(db_path)
+    if not re.fullmatch(r"[0-9a-f]{32}", call_id or ""):
+        return
+    for path in (folder / f"{call_id}.m4a", folder / f".{call_id}.m4a.partial", *folder.glob(f".{call_id}.*.pcm")):
+        path.unlink(missing_ok=True)
+
+
 def encode(raw: Path, target: Path, sample_rate: int) -> float:
     """Encode 16-bit mono PCM as AAC in an .m4a. Returns its length in seconds."""
     partial = target.with_name(f".{target.name}.partial")
@@ -95,7 +106,11 @@ class CallRecorder:
         if self._file is not None:
             self._file.close()
             self._file = None
-        return finish_raw(self._raw, self._folder / f"{self._call_id}.m4a", self._rate)
+        return finish_raw(self._raw, self.target, self._rate)
+
+    @property
+    def target(self) -> Path:
+        return self._folder / f"{self._call_id}.m4a"
 
     def discard(self) -> None:
         if self._file is not None:

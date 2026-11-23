@@ -788,11 +788,14 @@ class Store:
         return int(row["open"])
 
     def fail_open_calls(self, reason: str) -> int:
-        """Close calls left open by a previous run of the server."""
+        """Close calls left open by a previous run of the server. They end when last
+        anything was said on them (or when they started): the time the server was down
+        is not part of the call."""
         placeholders = ", ".join("?" for _ in OPEN_STATUSES)
         with self._lock:
             cursor = self._db.execute(
-                f"UPDATE calls SET status = 'failed', error = ?, ended_at = ? "
+                "UPDATE calls SET status = 'failed', error = ?, ended_at = COALESCE("
+                "(SELECT MAX(created_at) FROM messages WHERE messages.call_id = calls.id), started_at, ?) "
                 f"WHERE status IN ({placeholders})",
                 (reason, utc_now(), *OPEN_STATUSES),
             )

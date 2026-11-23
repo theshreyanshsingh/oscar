@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=22" />
+    <link rel="stylesheet" href="/static/style.css?v=24" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -203,6 +203,10 @@
                 Twilio trial account: Oscar can only call numbers you have verified in Twilio, and
                 Twilio plays a short message before each call.
               </p>
+              <div class="numbers-at-start" id="numbers-at-start" hidden>
+                <p class="numbers-at-start-title">When Oscar started</p>
+                <ul id="numbers-at-start-list"></ul>
+              </div>
               <ul class="numbers-list" id="numbers-list" aria-live="polite">
                 <li class="numbers-empty hint">Asking Twilio…</li>
               </ul>
@@ -328,13 +332,22 @@
               <div class="field span-all">
                 <span class="field-label" id="list-file-label">People to call</span>
                 <label class="dropzone" id="list-drop" for="list-file">
-                  <input type="file" id="list-file" accept=".csv,text/csv,.txt" aria-labelledby="list-file-label" />
+                  <input
+                    type="file"
+                    id="list-file"
+                    accept=".csv,.txt,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
+                    aria-labelledby="list-file-label"
+                  />
                   <span class="dropzone-icon" aria-hidden="true"></span>
                   <span class="dropzone-text">
-                    <span class="dropzone-title" id="list-file-name">Choose a CSV file</span>
+                    <span class="dropzone-title" id="list-file-name">Choose an Excel or CSV file</span>
                     <span class="dropzone-note" id="list-drop-note">or drop one here: a row for each person, with a column of phone numbers</span>
                   </span>
                 </label>
+                <div class="list-sheet" id="list-sheet-row" hidden>
+                  <label class="field-label" for="list-sheet">Sheet</label>
+                  <select id="list-sheet"></select>
+                </div>
                 <button type="button" class="link list-paste-toggle" id="list-paste-toggle" aria-expanded="false" aria-controls="list-paste">
                   Paste the rows instead
                 </button>
@@ -944,7 +957,7 @@
           <button type="button" class="link" id="detail-delete-no">Keep it</button>
         </div>
       </div>
-      <p class="error" id="detail-error" hidden></p>
+      <p class="error" id="detail-error" role="alert" hidden></p>
       <p class="call-outcome" id="detail-outcome" hidden></p>
       <div class="recording" id="detail-recording" hidden>
         <p class="recording-label">Recording <span id="detail-recording-length"></span></p>
@@ -963,6 +976,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=40"></script>
+    <script src="/static/app.js?v=42"></script>
   </body>
 </html>

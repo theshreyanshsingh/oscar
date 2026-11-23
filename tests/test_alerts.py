@@ -78,6 +78,30 @@ def test_a_caller_turned_away_when_the_lines_are_busy_is_sent(tmp_path, monkeypa
     assert payload["text"].startswith("Oscar missed a call from +61412345678: Oscar is already on 1 call")
 
 
+def test_twilios_update_after_a_missed_call_ended_sends_no_second_alert(tmp_path, monkeypatch):
+    sent = []
+
+    async def send(url, payload, client=None):
+        sent.append(payload)
+        return ""
+
+    monkeypatch.setattr(summary, "send_summary", send)
+    with local_client(make_config(tmp_path)) as client:
+        store = client.app.state.store
+        store.save_summary_webhook_url(HOOK)
+        # Ended (and alerted for) by the agent: the caller hung up during the greeting.
+        ended = store.create_call("phone_inbound", status="live", from_number="+61412345678")
+        store.update_call(ended["id"], twilio_sid="CA" + "4" * 32)
+        store.update_call(ended["id"], status="failed", error="The caller hung up.")
+        # Never got its audio: only Twilio's update closes it.
+        stuck = store.create_call("phone_inbound", status="connecting", from_number="+61498765432")
+        store.update_call(stuck["id"], twilio_sid="CA" + "5" * 32)
+        for sid in ("CA" + "4" * 32, "CA" + "4" * 32, "CA" + "5" * 32, "CA" + "5" * 32):
+            signed_post(client, "/twilio/status", {"CallSid": sid, "CallStatus": "completed"})
+    (payload,) = sent
+    assert payload["text"].startswith("Oscar missed a call from +61498765432")
+
+
 # A key running low
 
 

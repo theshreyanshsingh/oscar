@@ -838,3 +838,13 @@ async def test_the_details_are_saved_with_the_summary(calls, tmp_path, monkeypat
     await finished(calls)
     assert calls.store.get_call(call["id"])["details"] == {"Budget": "5000"}
     assert seen[0]["fields"] == FIELDS
+
+
+async def test_a_request_not_to_be_called_again_comes_through_the_check():
+    # The check of what was said rebuilt the summary and dropped this, so no one asking
+    # was ever put on the do-not-call list.
+    call = talk(("agent", GREETING), ("user", "Please stop calling me and take me off your list."))
+    note = await written(call, {**SAMS_NOTE, "caller_name": "", "callback_number": "", "do_not_call": True})
+    assert note.do_not_call is True
+    note = await written(call, {**SAMS_NOTE, "caller_name": "", "callback_number": ""})
+    assert note.do_not_call is False

@@ -2348,6 +2348,23 @@ button.danger-button:disabled {
   line-height: 1.35;
 }
 
+.list-sheet {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.list-sheet .field-label {
+  margin: 0;
+}
+
+.list-sheet select {
+  flex: 1;
+  min-width: 0;
+  max-width: 320px;
+}
+
 .list-paste-toggle {
   margin-top: 10px;
 }
@@ -2617,6 +2634,13 @@ button.danger-button:disabled {
   border-top: 1px solid var(--line);
   max-height: 420px;
   overflow-y: auto;
+}
+
+/* The people table runs to the card's edges, which come in with its padding (.panel-outline). */
+@media (max-width: 860px) {
+  .list-people {
+    margin: 2px -18px -18px;
+  }
 }
 
 .list-people table {
@@ -2893,6 +2917,27 @@ button.danger-button:disabled {
   background: #fff6e6;
   color: #7a4a00;
   font-size: 13px;
+}
+
+.numbers-at-start {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #e8f6ef;
+  color: #14613f;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.numbers-at-start-title {
+  margin: 0 0 2px;
+  font-weight: 600;
+}
+
+.numbers-at-start ul {
+  margin: 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
 }
 
 .numbers-list {
