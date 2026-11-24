@@ -20,7 +20,10 @@ reading past calls.
   caller's name and number if they left them, and what is left for you to do.
 - **Research notes:** what Oscar's web searches on the call found, written
   down with links to the pages.
-- **Recordings:** both sides of every call, to play back in Call history.
+- **Recordings and transcripts:** both sides of every call, to play back in
+  Call history, with the transcript playing along (each line plays the call
+  from where it was said). A call put through to a person is recorded and
+  written down to the end.
 - **Dashboard:** live transcript, agent settings, call history with summaries
   and transcripts.
 
@@ -553,7 +556,14 @@ itself.
   that someone will call them back, the call's transcript says what happened,
   and you get an alert (see Summaries sent to you).
 - The call's transcript notes when it was put through and how long the two of
-  you talked. Its recording and length cover Oscar's part only.
+  you talked. With **Record calls** on, Twilio records the two of you too, each
+  on a channel of their own, and Oscar adds that to the end of the call's
+  recording and writes it down: each line, the caller's and the person's (shown
+  by the number they were put through to), at its place in the recording. The
+  summary is then written again with the whole conversation (and not sent to
+  the webhook a second time). Oscar deletes Twilio's copy once it has its own
+  (`app/put_through.py`); Twilio charges for recording that part. The call's
+  length still covers Oscar's part only.
 - The same per-turn decision that sends a question to a web search or the fact
   sheet (`app/search.py`) decides whether the caller asked for a person. Tried
   on 2026-11-23 with eleven caller lines said by a real voice, under three
@@ -890,10 +900,16 @@ Two things to know:
   said (hover for the time of day).
 - **Recordings:** with **Record calls** on (Agent settings, on unless you turn
   it off), each call's audio, both sides mixed, plays in the call's panel, with
-  **Download** for an `.m4a` file. They are kept in `data/call-recordings/`
+  **Download audio** for an `.m4a` file. They are kept in `data/call-recordings/`
   (readable by you only) for 90 days, and go when you delete the call. They
   are about a quarter of a megabyte a minute. In some places everyone on a call
   has to be told it is recorded: if so, say it in the opening line.
+- **The transcript plays along:** each line's time plays the recording from
+  that line. While it plays, the line being said stands out and the panel
+  keeps it in view (scroll yourself and it leaves you be for a few seconds),
+  and the player stays at the top of the panel. **Copy** and **Download** above
+  the transcript give it as text: the call, its summary, then a line each,
+  `[0:06] Caller: ...`. The summary webhook carries the transcript too.
 - **Tags** under a call's summary say when it reached a voicemail, was put
   through to you (or could not be), came from a call list, or was recorded.
 - **Copy link** copies the dashboard's address with that call open
@@ -970,8 +986,11 @@ arrives where you already look:
 - **Google Chat:** a space's *Apps & integrations → Webhooks* address.
 - **Zapier, Make, n8n or your own server:** a "catch hook" address. Besides the
   message, the post has the call's details as data: who called, when, how
-  long, what it cost, the summary, the caller's name and number, the to-do and
-  the research notes.
+  long, what it cost, the summary, the caller's name and number, the to-do,
+  the research notes and the transcript. `transcript` has a line for each
+  thing said, with who said it and when (`{"speaker": "Caller", "text": "...",
+  "at_seconds": 3.2}`), and `transcript_text` is the same as plain text
+  (`[0:03] Caller: ...`). The chat message itself stays the summary.
 
 The message reads, for example:
 
@@ -1221,6 +1240,13 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   to a raw file every two seconds during the call and is encoded as AAC when
   the call ends (`app/recording.py`), so a long call never sits in memory. A
   recording cut off by the server stopping is finished the next time it starts.
+- Each transcript line keeps where it begins in the recording (`at_seconds`,
+  `CallClock` in `app/calls.py`). The recorder says how far it has got each
+  time it writes, and a moment is placed from the write before it, so line
+  times stay true to the recording even when audio comes in unevenly. The
+  caller's line begins where the voice service began keeping their turn's
+  audio; Oscar's where its reply starts to play. Lines from before this was
+  kept show how long after the call began they were written down.
 - With a script, a text model is asked after each reply which step Oscar is on
   (`app/script.py`), and the next step is put in the note the speech model
   reads before the caller's next turn, after the accent reminder.
@@ -1283,6 +1309,7 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/sheets.py` | Excel workbooks for call lists, read into the same rows as a CSV |
 | `app/tables.py` | Spreadsheets Oscar answers from: reading them, finding the rows for a question, private rows |
 | `app/recording.py` | Call recordings: taken during the call, encoded when it ends, kept 90 days |
+| `app/put_through.py` | The part of a call put through to a person: Twilio's recording added to the call's, and written down |
 | `app/backup.py` | The daily copy of the database |
 | `app/store.py` | SQLite storage and agent settings |
 | `app/config.py` | Settings from `.env` |

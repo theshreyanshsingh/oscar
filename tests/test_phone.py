@@ -516,6 +516,66 @@ def test_putting_a_call_through_hands_it_to_a_dial(cfg, twilio):
     assert dial.text == "+61412345678"
     assert dial.get("action") == "https://oscar.example.test/twilio/put-through?call_id=abc123"
     assert dial.get("timeout") == str(phone.TRANSFER_RING_SECONDS)
+    assert dial.get("record") is None  # calls are not recorded: nor is this part
+
+
+def test_a_recorded_call_put_through_is_recorded_on_two_channels(cfg, twilio):
+    import asyncio
+
+    asyncio.run(phone.put_call_through(cfg, "abc123", "CA" + "8" * 32, "+61412345678", record=True))
+    ((_, update),) = twilio.updates
+    dial = ET.fromstring(update["twiml"]).find("./Dial")
+    assert dial.get("record") == "record-from-answer-dual"
+    assert dial.get("recordingStatusCallback") == "https://oscar.example.test/twilio/put-through-recording?call_id=abc123"
+    assert (dial.get("recordingStatusCallbackMethod"), dial.get("recordingStatusCallbackEvent")) == ("POST", "completed")
+
+
+RECORDED = {
+    "AccountSid": "AC" + "0" * 32,
+    "CallSid": "CA" + "1" * 32,
+    "RecordingSid": "RE" + "3" * 32,
+    "RecordingUrl": "https://api.twilio.com/2010-04-01/Accounts/AC" + "0" * 32 + "/Recordings/RE" + "3" * 32,
+    "RecordingStatus": "completed",
+    "RecordingChannels": "2",
+    "RecordingDuration": "75",
+}
+
+
+def test_twilios_recording_of_the_part_put_through_is_kept_once(client, cfg, monkeypatch):
+    kept = []
+
+    async def keep(cfg, calls, call_id, sid, url):
+        kept.append((call_id, sid, url))
+
+    monkeypatch.setattr(phone, "keep_put_through", keep)
+    call = _put_through_call(cfg)
+    path = f"/twilio/put-through-recording?call_id={call['id']}"
+    assert client.post(path, data=RECORDED).status_code == 403  # not signed by Twilio
+    assert signed_post(client, path, RECORDED).status_code == 204
+    assert signed_post(client, path, RECORDED).status_code == 204  # told twice
+    time.sleep(0.1)
+    assert kept == [(call["id"], RECORDED["RecordingSid"], RECORDED["RecordingUrl"])]
+
+
+def test_a_recording_twilio_could_not_make_is_noted(client, cfg, monkeypatch):
+    monkeypatch.setattr(phone, "keep_put_through", lambda *args: pytest.fail("nothing to keep"))
+    call = _put_through_call(cfg)
+    form = {**RECORDED, "RecordingStatus": "failed"}
+    assert signed_post(client, f"/twilio/put-through-recording?call_id={call['id']}", form).status_code == 204
+    detail = client.get(f"/api/calls/{call['id']}").json()
+    assert detail["messages"][-1]["text"] == "Twilio could not record the call after it was put through."
+
+
+def test_the_recording_of_a_deleted_call_is_deleted_from_twilio(client, cfg, monkeypatch):
+    forgotten = []
+
+    async def forget(cfg, sid):
+        forgotten.append(sid)
+
+    monkeypatch.setattr(phone, "forget_on_twilio", forget)
+    assert signed_post(client, "/twilio/put-through-recording?call_id=" + "f" * 32, RECORDED).status_code == 204
+    time.sleep(0.1)
+    assert forgotten == [RECORDED["RecordingSid"]]
 
 
 def test_a_call_twilio_will_not_put_through_says_why(cfg, monkeypatch):
@@ -584,6 +644,8 @@ def test_the_media_stream_gives_the_call_a_way_to_put_it_through(client, monkeyp
         time.sleep(0.3)
     ((sid, update),) = twilio.updates
     assert sid == INBOUND["CallSid"] and "<Dial" in update["twiml"]
+    # Calls are recorded (Agent settings, by default), so the part put through is too.
+    assert 'record="record-from-answer-dual"' in update["twiml"]
     # Oscar's side stopping must not hang up the call Twilio is putting through.
     serializer = ran["transport"]._params.serializer
     assert serializer._params.auto_hang_up is False

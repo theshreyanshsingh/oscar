@@ -947,6 +947,11 @@ label.check input:focus-visible {
   color: var(--blue);
 }
 
+.line.from-person .who {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .line.note {
   color: var(--text-soft);
   font-size: 13px;
@@ -2758,9 +2763,9 @@ button.danger-button:disabled {
 
 .recording {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 6px 14px;
+  gap: 6px;
   margin-top: 14px;
   padding: 12px 14px;
   border: 1px solid var(--line);
@@ -2768,8 +2773,14 @@ button.danger-button:disabled {
   background: var(--white);
 }
 
+.recording-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .recording-label {
-  grid-column: 1 / -1;
   margin: 0;
   color: var(--blue);
   font-size: 13px;
@@ -3758,4 +3769,102 @@ button.secondary.small {
   .table-ask-row input {
     flex-basis: 100%;
   }
+}
+
+/* ---------- a call's transcript, played along with its recording ---------- */
+
+/* The player stays under the panel's title while the transcript scrolls by. The
+   white ring covers the lines passing behind its rounded edges. */
+.drawer .recording {
+  position: sticky;
+  top: calc(var(--detail-head-height, 62px) + 8px);
+  z-index: 1;
+  box-shadow:
+    0 0 0 8px var(--white),
+    0 18px 22px -16px rgba(0, 18, 46, 0.22);
+}
+
+.transcript-tools {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.transcript-tools-label {
+  margin: 0 auto 0 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.transcript-tools + .transcript {
+  margin-top: 8px;
+}
+
+.drawer .transcript .line {
+  margin: 0 -10px 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  transition:
+    background-color 0.25s var(--ease),
+    color 0.25s var(--ease),
+    box-shadow 0.25s var(--ease);
+}
+
+.drawer .transcript .line:last-child {
+  margin-bottom: 0;
+}
+
+/* While the recording plays, the line being said stands out and the rest step back. */
+.drawer .transcript.is-following .line:not(.is-playing) {
+  color: var(--text-soft);
+}
+
+.drawer .transcript .line.is-playing {
+  background: var(--white);
+  box-shadow: 0 1px 3px rgba(0, 18, 46, 0.08);
+}
+
+.line .who button.said-at {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+  margin: -1px 0 -1px 2px;
+  padding: 1px 7px 1px 6px;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-soft);
+  font: inherit;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  vertical-align: baseline;
+  transition: background-color 0.15s;
+}
+
+.line .who button.said-at:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.transcript.playable .line .who button.said-at {
+  color: var(--blue);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.transcript.playable .line .who button.said-at::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid currentColor;
+}
+
+.transcript.playable .line .who button.said-at:hover,
+.transcript.playable .line.is-playing .who button.said-at {
+  background: var(--blue-soft);
 }

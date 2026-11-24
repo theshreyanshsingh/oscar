@@ -5,6 +5,8 @@ Every change is saved to the store and published to the dashboard.
 
 import asyncio
 import secrets
+import time
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
@@ -42,6 +44,46 @@ def lines_busy(store, cfg) -> str:
     )
 
 
+class CallClock:
+    """Where a moment of a call falls in its audio: seconds from the start of its recording.
+
+    The recording is written a couple of seconds at a time, and each write says
+    how far the audio has got at that moment (`reached`). A moment is placed from
+    the write before it, so times stay true to the recording even when its audio
+    came in unevenly. A call that is not recorded counts from when its audio began
+    (`began`). Each transcript line keeps its time (app/store.py, at_seconds), and
+    Call history plays the recording from it.
+    """
+
+    def __init__(self) -> None:
+        self._began: float | None = None
+        self._walls: list[float] = []
+        self._seconds: list[float] = []
+
+    def began(self, wall: float) -> None:
+        """The call's audio began at `wall` (a time.time())."""
+        if self._began is None:
+            self._began = wall
+
+    def reached(self, wall: float, seconds: float) -> None:
+        """At `wall` the recording was `seconds` long."""
+        self._walls.append(wall)
+        self._seconds.append(seconds)
+
+    def seconds_at(self, wall: float) -> float | None:
+        """Seconds into the call's audio at `wall`, or None before anything is known."""
+        if self._walls:
+            index = max(0, bisect_right(self._walls, wall) - 1)
+            seconds = self._seconds[index] + (wall - self._walls[index])
+            if index + 1 < len(self._seconds):
+                seconds = min(seconds, self._seconds[index + 1])
+        elif self._began is not None:
+            seconds = wall - self._began
+        else:
+            return None
+        return round(max(0.0, seconds), 2)
+
+
 class CallManager:
     def __init__(self, store: Store, bus: EventBus):
         self.store = store
@@ -53,6 +95,8 @@ class CallManager:
         self._voicemail: dict[str, Callable[[], Awaitable[None]]] = {}
         # Settings made for one phone call before it connects (a call list's), by call.
         self._agents: dict[str, AgentSettings] = {}
+        # Where each running call's transcript lines fall in its audio, by call.
+        self._clocks: dict[str, CallClock] = {}
 
     # Records
 
@@ -110,11 +154,33 @@ class CallManager:
         if call:
             self._publish_call(call)
 
-    def add_message(self, call_id: str, role: MessageRole, text: str) -> None:
+    def keep_time(self, call_id: str, clock: CallClock) -> None:
+        """Place the call's transcript lines in its audio with `clock` while it runs."""
+        self._clocks[call_id] = clock
+
+    def stop_keeping_time(self, call_id: str) -> None:
+        self._clocks.pop(call_id, None)
+
+    def add_message(
+        self,
+        call_id: str,
+        role: MessageRole,
+        text: str,
+        *,
+        said_at: float | None = None,
+        at_seconds: float | None = None,
+    ) -> None:
+        """Add a line to the call's transcript. `said_at` is when it began to be said (a
+        time.time()); it is now when not given. A running call's line keeps where that
+        falls in the call's audio. `at_seconds` places a line in the recording directly
+        (the part of a call after it was put through, app/put_through.py)."""
         text = text.strip()
         if not text:
             return
-        message = self.store.add_message(call_id, role, text)
+        clock = self._clocks.get(call_id)
+        if at_seconds is None and clock:
+            at_seconds = clock.seconds_at(time.time() if said_at is None else said_at)
+        message = self.store.add_message(call_id, role, text, at_seconds=at_seconds)
         self.bus.publish({"type": "message", "message": message})
 
     def add_search(self, call_id: str, query: str, sources: list[dict]) -> None:

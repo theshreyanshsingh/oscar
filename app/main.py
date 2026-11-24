@@ -59,7 +59,7 @@ from app.tables import (
     TableError,
     read_table,
 )
-from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
+from app.notify import SAMPLE_CALL, SAMPLE_MESSAGES, WebhookRefused, send_summary, summary_payload, webhook_url
 from app.config import (
     ROOT_DIR,
     Config,
@@ -543,7 +543,8 @@ def create_app(
         url = store.get_summary_webhook()["url"]
         if not url:
             raise HTTPException(status_code=400, detail="Save an address first.")
-        problem = await send_summary(url, summary_payload(SAMPLE_CALL, agent_name=store.get_agent().name))
+        sample = summary_payload(SAMPLE_CALL, agent_name=store.get_agent().name, messages=SAMPLE_MESSAGES)
+        problem = await send_summary(url, sample)
         store.record_summary_webhook_result(problem or "sent")
         return {"sent": not problem, "problem": problem, **store.get_summary_webhook()}
 

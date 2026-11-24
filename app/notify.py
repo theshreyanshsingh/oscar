@@ -8,7 +8,9 @@ When a call ends and its summary has been written, Oscar posts it as JSON:
 "content" what Discord's do, so the message reads well in any of them. Zapier,
 Make, n8n or your own server can use the details in "call" instead: who
 called, when, for how long, what it cost, the summary, the caller's name and
-number, the to-do and the research notes.
+number, the to-do, the research notes and the transcript, line by line
+("transcript", each line with who said it and when in the call) and as text
+("transcript_text").
 
 A call where only Oscar spoke, and a summary written again from the
 dashboard, are not sent.
@@ -42,6 +44,7 @@ CALL_FIELDS = (
     "follow_up",
     "details",
     "research",
+    "recording_seconds",
 )
 
 
@@ -105,9 +108,43 @@ def _cost(dollars: object) -> str:
     return f"${dollars:.3f}" if dollars < 1 else f"${dollars:.2f}"
 
 
-def summary_payload(call: dict, *, agent_name: str) -> dict:
+def _clock(seconds: float) -> str:
+    whole = int(seconds)
+    return f"{whole // 60}:{whole % 60:02d}"
+
+
+def transcript_lines(messages: list[dict], *, kind: str, agent_name: str) -> list[dict]:
+    """The call's transcript as the webhook sends it: who said each line, what, and when
+    in the call (seconds from the start of its recording; None when not known). A line
+    that is not speech, such as a search Oscar made, has the speaker "note", and what
+    the person the caller was put through to said, "Person put through to"."""
+    other = "Person called" if kind == "phone_outbound" else "Caller"
+    speakers = {"agent": agent_name, "note": "note", "person": "Person put through to"}
+    lines = []
+    for message in messages:
+        speaker = speakers.get(message.get("role"), other)
+        lines.append({"speaker": speaker, "text": message.get("text", ""), "at_seconds": message.get("at_seconds")})
+    return lines
+
+
+def transcript_text(lines: list[dict]) -> str:
+    """The transcript as plain text, one line each: "[0:07] Caller: ..."."""
+    out = []
+    for line in lines:
+        at = line["at_seconds"]
+        when = f"[{_clock(at)}] " if isinstance(at, (int, float)) else ""
+        said = f"({line['text']})" if line["speaker"] == "note" else f"{line['speaker']}: {line['text']}"
+        out.append(when + said)
+    return "\n".join(out)
+
+
+def summary_payload(call: dict, *, agent_name: str, messages: list[dict] | None = None) -> dict:
     text = summary_message(call, agent_name=agent_name)
-    return {"text": text, "content": text, "call": {field: call.get(field) for field in CALL_FIELDS}}
+    details = {field: call.get(field) for field in CALL_FIELDS}
+    lines = transcript_lines(messages or [], kind=call.get("kind", ""), agent_name=agent_name)
+    details["transcript"] = lines
+    details["transcript_text"] = transcript_text(lines)
+    return {"text": text, "content": text, "call": details}
 
 
 async def send_summary(url: str, payload: dict, client: httpx.AsyncClient | None = None) -> str:
@@ -189,4 +226,12 @@ SAMPLE_CALL = {
     "follow_up": "Nothing: this is only a test.",
     "details": {},
     "research": [],
+    "recording_seconds": 125.0,
 }
+# Its transcript (what a real call's lines look like).
+SAMPLE_MESSAGES = [
+    {"role": "agent", "text": "Hi, thanks for calling. How can I help?", "at_seconds": 0.4},
+    {"role": "user", "text": "Hi, it's Sam. Could someone call me back about a quote?", "at_seconds": 3.2},
+    {"role": "agent", "text": "Of course, Sam. I'll pass that on. Is this the best number?", "at_seconds": 7.9},
+    {"role": "user", "text": "Yes, it is. Thanks.", "at_seconds": 12.1},
+]

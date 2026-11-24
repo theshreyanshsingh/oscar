@@ -147,7 +147,7 @@ def transcript_text(messages: list[dict], *, kind: CallKind, agent_name: str) ->
             # Something Oscar did, such as a web search, not something said.
             lines.append(f"[{message['text']}]")
         else:
-            speaker = agent_name if message["role"] == "agent" else other
+            speaker = {"agent": agent_name, "person": "Person the caller was put through to"}.get(message["role"], other)
             lines.append(f"{speaker}: {numbers_as_digits(message['text'])}")
     return "\n".join(lines)
 
@@ -449,7 +449,8 @@ async def send_to_owner(calls: CallManager, call: dict, agent: AgentSettings) ->
     url = calls.store.get_summary_webhook()["url"]
     if not url:
         return
-    problem = await send_summary(url, summary_payload(call, agent_name=agent.name))
+    messages = calls.store.get_messages(call["id"])
+    problem = await send_summary(url, summary_payload(call, agent_name=agent.name, messages=messages))
     if problem:
         logger.warning(f"Call {call['id']}: its summary could not be sent: {problem}")
     calls.store.record_summary_webhook_result(problem or "sent")

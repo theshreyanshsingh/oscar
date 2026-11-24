@@ -11,7 +11,8 @@ the transport and the audio sample rates differ.
 import asyncio
 import copy
 import threading
-from collections import defaultdict
+import time
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import date, datetime
@@ -35,7 +36,7 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
-from app.calls import CallManager
+from app.calls import CallClock, CallManager
 from app.config import Config
 from app.costs import CostMeter
 from app.recording import CallRecorder, recordings_folder
@@ -422,6 +423,14 @@ def turn_detectors() -> tuple[SileroVADAnalyzer, LocalSmartTurnAnalyzerV3]:
     return voice_activity, end_of_turn
 
 
+def wall_time(timestamp: str) -> float | None:
+    """A time pipecat gives as ISO 8601 text, as a time.time(); None when there is none."""
+    try:
+        return datetime.fromisoformat(timestamp).timestamp() if timestamp else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def run_call(
     *,
     transport: BaseTransport,
@@ -446,6 +455,9 @@ async def run_call(
     connected = False
     watchdog: asyncio.Task | None = None
     recorder: CallRecorder | None = None
+    # Where each transcript line falls in the call's audio (its recording).
+    clock = CallClock()
+    calls.keep_time(call_id, clock)
     try:
         context = LLMContext()
         # Everything this call asks OpenRouter for is counted toward it.
@@ -476,7 +488,7 @@ async def run_call(
         in_rate, out_rate = sample_rates
         # Both sides of the call, as the caller heard it (app/recording.py).
         if agent.record_calls:
-            recorder = CallRecorder(recordings_folder(cfg.db_path), call_id, in_rate)
+            recorder = CallRecorder(recordings_folder(cfg.db_path), call_id, in_rate, clock)
         recording = [recorder.processor] if recorder else []
         pipeline = Pipeline(
             [transport.input(), *listening, user, voice, transport.output(), *recording, assistant]
@@ -491,6 +503,7 @@ async def run_call(
         async def on_client_connected(transport, client):
             nonlocal connected
             connected = True
+            clock.began(time.time())
             calls.set_status_if_open(call_id, "live")
             if agent.greeting:
                 await worker.queue_frames([GreetingFrame(agent.greeting)])
@@ -504,12 +517,38 @@ async def run_call(
         # are written down a moment after their turn (they are transcribed on
         # the side), so a search note that is ready sooner waits for them.
         words_pending = False
-        notes_waiting: list[str] = []
+        # Each note with when it happened: (text, time.time()).
+        notes_waiting: list[tuple[str, float]] = []
+        # Each turn of the caller's written down, with when they began it, until its
+        # words go into the transcript (they can come as one line with the next turn's).
+        caller_words: deque[tuple[str, float]] = deque()
 
         def add_waiting_notes():
-            for note in notes_waiting:
-                calls.add_message(call_id, "note", note)
+            for note, when in notes_waiting:
+                calls.add_message(call_id, "note", note, said_at=when)
             notes_waiting.clear()
+
+        def note(text: str):
+            notes_waiting.append((text, time.time()))
+
+        def caller_began(line: str) -> float | None:
+            """When the caller began the words of this line: the first of its turns."""
+            for skipped, (words, _) in enumerate(caller_words):
+                if words in line:
+                    break
+            else:
+                return None
+            for _ in range(skipped):
+                caller_words.popleft()  # turns whose words never reached the transcript
+            began = caller_words[0][1]
+            while caller_words and caller_words[0][0] in line:
+                caller_words.popleft()
+            return began
+
+        @voice.event_handler("on_caller_words")
+        async def on_caller_words(service, words, began):
+            if began is not None:
+                caller_words.append((words, began))
 
         @user.event_handler("on_user_turn_started")
         async def on_user_turn_started(aggregator, strategy):
@@ -520,7 +559,7 @@ async def run_call(
         async def on_user_turn_message_added(aggregator, message):
             nonlocal words_pending
             words_pending = False
-            calls.add_message(call_id, "user", message.content)
+            calls.add_message(call_id, "user", message.content, said_at=caller_began(message.content))
             add_waiting_notes()
 
         @assistant.event_handler("on_assistant_turn_stopped")
@@ -529,16 +568,18 @@ async def run_call(
             text = message.content.strip()
             if text and message.interrupted:
                 text += " [interrupted]"
-            calls.add_message(call_id, "agent", text)
+            # The turn begins as its audio starts to play (the voice service announces
+            # the reply just before its first sound).
+            calls.add_message(call_id, "agent", text, said_at=wall_time(message.timestamp))
 
         @voice.event_handler("on_web_search")
         async def on_web_search(service, query, problem, sources):
             if problem:
                 logger.warning(f"Call {call_id}: web search failed: {problem}")
                 calls.note_error(call_id, f"Web search failed: {problem}")
-                notes_waiting.append(f"Could not search the web. {problem}")
+                note(f"Could not search the web. {problem}")
             else:
-                notes_waiting.append(f"Searched the web for: {query}")
+                note(f"Searched the web for: {query}")
                 # The caller hears a sentence or two of what was found. The pages
                 # are kept for the notes written when the call ends (app/research.py).
                 calls.add_search(call_id, query, [asdict(source) for source in sources])
@@ -556,10 +597,10 @@ async def run_call(
             if problem:
                 logger.warning(f"Call {call_id}: could not answer from the spreadsheets: {problem}")
                 calls.note_error(call_id, f"Could not answer from the spreadsheets: {problem}")
-                notes_waiting.append(f"Could not look in the spreadsheets. {problem}")
+                note(f"Could not look in the spreadsheets. {problem}")
             else:
                 shown = ", ".join(f"{name} ({rows} row{'' if rows == 1 else 's'})" for name, rows in found)
-                notes_waiting.append(f"Looked in the spreadsheets for: {words}. Read: {shown or 'nothing'}")
+                note(f"Looked in the spreadsheets for: {words}. Read: {shown or 'nothing'}")
             if not words_pending:
                 add_waiting_notes()
 
@@ -657,6 +698,7 @@ async def run_call(
         if not error and not connected:
             error = "The call never connected."
         calls.finish(call_id, error)
+        calls.stop_keeping_time(call_id)  # what is noted from here on was not said on the call
         # What the call was about, for the dashboard. Written now so that it
         # never delays a reply or the hang-up.
         call = calls.store.get_call(call_id)

@@ -446,6 +446,8 @@ class OpenRouterVoiceService(AIService):
         self._register_event_handler("on_tables_looked_up")
         self._register_event_handler("on_script_lost")
         self._register_event_handler("on_farewell_said")
+        # The caller's words of one turn are written down: (text, when the turn began).
+        self._register_event_handler("on_caller_words")
         # The kind of closing line being said ("goodbye", "transfer", "voicemail"),
         # "" until then: after it, no more replies.
         self._closing = ""
@@ -477,6 +479,8 @@ class OpenRouterVoiceService(AIService):
         self._preroll = bytearray()
         # The caller's audio for the turn in progress; None between turns.
         self._turn_audio: bytearray | None = None
+        # When that audio began (a time.time()), for the transcript.
+        self._turn_began: float | None = None
         # Audio of the turns Oscar has not answered yet. Usually that is one
         # turn. When the caller carries on talking before Oscar answers, their
         # earlier turns stay here and go out again with the next one, so the
@@ -613,16 +617,19 @@ class OpenRouterVoiceService(AIService):
         if self._turn_audio is None:
             self._turn_audio = bytearray(self._preroll)
             self._preroll.clear()
+            # The turn's audio begins with what was heard just before it.
+            self._turn_began = time.time() - len(self._turn_audio) / (2 * self._in_rate)
 
     async def _turn_stopped(self) -> None:
         audio = bytes(self._turn_audio or b"")
         self._turn_audio = None
+        began, self._turn_began = self._turn_began, None
         if self._closing:
             return  # goodbye has been said: nothing more is answered
         if len(audio) < self._in_rate // 5:  # under a tenth of a second: nothing to hear
             return
 
-        transcript = self._transcribe_in_background(audio)
+        transcript = self._transcribe_in_background(audio, began)
 
         if not self._unanswered:
             self._history_length = len(self._context.get_messages())
@@ -1329,14 +1336,15 @@ class OpenRouterVoiceService(AIService):
 
     # The caller's words, for the transcript
 
-    def _transcribe_in_background(self, audio: bytes) -> asyncio.Task:
-        task = self.create_task(self._transcribe(audio))
+    def _transcribe_in_background(self, audio: bytes, began: float | None = None) -> asyncio.Task:
+        task = self.create_task(self._transcribe(audio, began))
         self._transcript_tasks.add(task)
         task.add_done_callback(self._transcript_tasks.discard)
         return task
 
-    async def _transcribe(self, audio: bytes) -> str | None:
-        """Write down what the caller said. Returns it too, or None when nothing was made out."""
+    async def _transcribe(self, audio: bytes, began: float | None = None) -> str | None:
+        """Write down what the caller said. Returns it too, or None when nothing was made out.
+        `began` is when the turn began (a time.time()), for the transcript."""
         payload = {
             "model": TRANSCRIPT_MODEL,
             "language": TRANSCRIPT_LANGUAGE,
@@ -1365,6 +1373,7 @@ class OpenRouterVoiceService(AIService):
             self._meter.charge(body)
         if not isinstance(text, str) or not text.strip():
             return None
+        await self._call_event_handler("on_caller_words", text.strip(), began)
         await self.push_frame(
             TranscriptionFrame(text.strip(), "", time_now_iso8601()), FrameDirection.UPSTREAM
         )

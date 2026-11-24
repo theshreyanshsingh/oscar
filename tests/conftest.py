@@ -140,3 +140,4 @@ def no_real_twilio(monkeypatch):
 
     monkeypatch.setattr(numbers, "twilio_client", client)
     monkeypatch.setattr(phone, "_twilio_client", client)
+    # app/put_through.py reaches Twilio through numbers.twilio_client, replaced above.

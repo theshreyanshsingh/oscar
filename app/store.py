@@ -86,8 +86,9 @@ AccentId = Literal[
 
 CallKind = Literal["browser", "phone_inbound", "phone_outbound"]
 # Who a transcript line is from. A "note" is not speech: it records something
-# Oscar did during the call, such as a web search.
-MessageRole = Literal["user", "agent", "note"]
+# Oscar did during the call, such as a web search. A "person" is whoever the
+# caller was put through to (app/put_through.py).
+MessageRole = Literal["user", "agent", "note", "person"]
 CallStatus = Literal["connecting", "ringing", "live", "ended", "failed"]
 OPEN_STATUSES = ("connecting", "ringing", "live")
 # Where a call's summary has got to (app/summary.py). "" is a call without one:
@@ -335,7 +336,8 @@ class Store:
                     call_id TEXT NOT NULL REFERENCES calls (id),
                     role TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    at_seconds REAL
                 );
                 CREATE INDEX IF NOT EXISTS messages_call_id ON messages (call_id);
                 CREATE TABLE IF NOT EXISTS searches (
@@ -513,6 +515,9 @@ class Store:
             ("calls", "transfer_result", "TEXT NOT NULL DEFAULT ''"),
             # The call list it was made for (app/campaigns.py).
             ("calls", "campaign_id", "TEXT NOT NULL DEFAULT ''"),
+            # Where the line began in the call's audio, in seconds (app/calls.py, CallClock);
+            # NULL for a line said before Oscar kept these, or not placed in the audio.
+            ("messages", "at_seconds", "REAL"),
             *(("calls", column, "TEXT NOT NULL DEFAULT ''") for column in _SUMMARY_COLUMNS),
         ):
             columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
@@ -833,12 +838,14 @@ class Store:
 
     # Transcript
 
-    def add_message(self, call_id: str, role: MessageRole, text: str) -> dict:
+    def add_message(
+        self, call_id: str, role: MessageRole, text: str, *, at_seconds: float | None = None
+    ) -> dict:
         created_at = utc_now()
         with self._lock:
             cursor = self._db.execute(
-                "INSERT INTO messages (call_id, role, text, created_at) VALUES (?, ?, ?, ?)",
-                (call_id, role, text, created_at),
+                "INSERT INTO messages (call_id, role, text, created_at, at_seconds) VALUES (?, ?, ?, ?, ?)",
+                (call_id, role, text, created_at, at_seconds),
             )
         return {
             "id": cursor.lastrowid,
@@ -846,6 +853,7 @@ class Store:
             "role": role,
             "text": text,
             "created_at": created_at,
+            "at_seconds": at_seconds,
         }
 
     def caller_spoke(self, call_id: str) -> bool:

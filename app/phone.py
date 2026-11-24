@@ -8,7 +8,8 @@ WebSocket, where the voice agent takes over.
 On a call Oscar makes, Twilio listens for a voicemail (answering machine
 detection) and says what answered at /twilio/answered-by. A caller who asks for
 a person is handed to a <Dial> (put_call_through), and how that went comes to
-/twilio/put-through.
+/twilio/put-through. When calls are recorded, Twilio records that part and says
+when it is ready at /twilio/put-through-recording (app/put_through.py).
 
 Every request from Twilio is checked against its X-Twilio-Signature, and the
 media stream must present a one-time token minted for that call, so nobody
@@ -36,6 +37,7 @@ from app.config import Config
 from app.costs import KeyCredit
 from app.notify import not_put_through_payload
 from app.numbers import KEYS_REFUSED, keys_refused, twilio_client, twilio_message, twilio_refusal
+from app.put_through import forget_on_twilio, keep_put_through
 from app.store import OPEN_STATUSES, AgentSettings, Store
 from app.summary import alert_if_missed, alert_owner
 
@@ -254,15 +256,29 @@ async def hang_up_phone_call(cfg: Config, twilio_sid: str) -> None:
         raise PhoneCallError(f"Twilio could not hang up the call: {detail}.") from exc
 
 
-async def put_call_through(cfg: Config, call_id: str, twilio_sid: str, number: str) -> None:
+async def put_call_through(
+    cfg: Config, call_id: str, twilio_sid: str, number: str, *, record: bool = False
+) -> None:
     """Hand a call that is going on over to `number`: Twilio rings it and joins the caller to
-    whoever answers. Oscar's audio stream on the call ends."""
+    whoever answers. Oscar's audio stream on the call ends. With `record`, Twilio records
+    the two of them from the answer, each on a channel of their own (app/put_through.py)."""
     response = VoiceResponse()
+    recording = (
+        {
+            "record": "record-from-answer-dual",
+            "recording_status_callback": f"{cfg.public_url}/twilio/put-through-recording?call_id={call_id}",
+            "recording_status_callback_method": "POST",
+            "recording_status_callback_event": "completed",
+        }
+        if record
+        else {}
+    )
     response.dial(
         number,
         timeout=TRANSFER_RING_SECONDS,
         action=f"{cfg.public_url}/twilio/put-through?call_id={call_id}",
         method="POST",
+        **recording,
     )
     try:
         await asyncio.to_thread(_twilio_client(cfg).calls(twilio_sid).update, twiml=str(response))
@@ -451,6 +467,31 @@ def create_phone_router(
             response.hangup()
         return _twiml_response(str(response))
 
+    # Recordings already being kept: Twilio may tell of one more than once.
+    recordings_kept: set[str] = set()
+
+    @router.post("/put-through-recording")
+    async def put_through_recording(request: Request) -> Response:
+        """Twilio has recorded the part of a call after it was put through."""
+        form = await signed_form(request)
+        if form is None:
+            return Response(status_code=403)
+        call = store.get_call(request.query_params.get("call_id", ""))
+        sid = form.get("RecordingSid", "")
+        status = form.get("RecordingStatus", "")
+        if call is None:
+            # The call was deleted: none of it is kept, Twilio's copy included.
+            if sid and status == "completed":
+                calls.spawn(forget_on_twilio(cfg, sid))
+            return Response(status_code=204)
+        if status == "failed":
+            calls.add_message(call["id"], "note", "Twilio could not record the call after it was put through.")
+        if status != "completed" or not sid or sid in recordings_kept:
+            return Response(status_code=204)
+        recordings_kept.add(sid)
+        calls.spawn(keep_put_through(cfg, calls, call["id"], sid, form.get("RecordingUrl", "")))
+        return Response(status_code=204)
+
     @router.websocket("/media")
     async def media_stream(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -493,12 +534,13 @@ def create_phone_router(
             ),
         )
         calls.update(call_id, twilio_sid=start["callSid"])
+        agent = calls.agent_for(call_id) or store.get_agent()
 
         async def transfer(number: str) -> None:
             # Twilio carries on with the call: stopping Oscar's side must not hang it up.
             serializer._params.auto_hang_up = False
             try:
-                await put_call_through(cfg, call_id, start["callSid"], number)
+                await put_call_through(cfg, call_id, start["callSid"], number, record=agent.record_calls)
             except PhoneCallError:
                 serializer._params.auto_hang_up = True
                 raise
@@ -508,7 +550,7 @@ def create_phone_router(
             call_id=call_id,
             calls=calls,
             cfg=cfg,
-            agent=calls.agent_for(call_id) or store.get_agent(),
+            agent=agent,
             sample_rates=voice_agent.PHONE_SAMPLE_RATES,
             # A phone keeps its own speaker out of its microphone.
             barge_in=True,

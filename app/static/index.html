@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=25" />
+    <link rel="stylesheet" href="/static/style.css?v=27" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -993,7 +993,8 @@
             <h3 class="panel-title">Send each summary to you</h3>
             <p class="hint">
               When a call ends and its summary is written, Oscar posts it to this address: a
-              Slack, Discord or Google Chat webhook, or Zapier, Make or your own server.
+              Slack, Discord or Google Chat webhook, or Zapier, Make or your own server. The
+              post carries the call's transcript too, for an app to keep.
             </p>
           </div>
           <form id="notify-form" class="notify-form" novalidate>
@@ -1056,12 +1057,19 @@
       <p class="error" id="detail-error" role="alert" hidden></p>
       <p class="call-outcome" id="detail-outcome" hidden></p>
       <div class="recording" id="detail-recording" hidden>
-        <p class="recording-label">Recording <span id="detail-recording-length"></span></p>
-        <audio id="detail-audio" controls preload="none"></audio>
-        <a class="link" id="detail-download" href="#" download>Download</a>
+        <div class="recording-head">
+          <p class="recording-label">Recording <span id="detail-recording-length"></span></p>
+          <a class="link" id="detail-download" href="#" download>Download audio</a>
+        </div>
+        <audio id="detail-audio" controls preload="metadata"></audio>
       </div>
       <div class="call-summary" id="detail-summary" hidden></div>
       <button type="button" class="link" id="detail-summarise" hidden>Write a summary</button>
+      <div class="transcript-tools" id="detail-transcript-tools" hidden>
+        <p class="transcript-tools-label">Transcript</p>
+        <button type="button" class="link" id="detail-transcript-copy">Copy</button>
+        <button type="button" class="link" id="detail-transcript-download">Download</button>
+      </div>
       <div class="transcript" id="detail-transcript"></div>
     </aside>
 
@@ -1072,6 +1080,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=43"></script>
+    <script src="/static/app.js?v=45"></script>
   </body>
 </html>

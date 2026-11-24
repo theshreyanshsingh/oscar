@@ -70,7 +70,7 @@ def test_a_browser_call_has_no_number_and_says_only_what_it_has():
 def test_the_payload_suits_chat_apps_and_automations():
     payload = summary_payload(SAMPLE_CALL, agent_name="Oscar")
     assert payload["text"] == payload["content"] == summary_message(SAMPLE_CALL, agent_name="Oscar")
-    assert set(payload["call"]) == set(notify.CALL_FIELDS)
+    assert set(payload["call"]) == set(notify.CALL_FIELDS) | {"transcript", "transcript_text"}
     assert payload["call"]["follow_up"] == SAMPLE_CALL["follow_up"]
     json.dumps(payload)  # all of it can be sent
 

@@ -20,6 +20,8 @@ import numpy as np
 from loguru import logger
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 
+from app.calls import CallClock
+
 RECORDINGS_KEPT_DAYS = 90
 # Speech in AAC at 32 kbit/s: clear on a phone line and in a browser alike.
 RECORDING_BITRATE = 32000
@@ -45,7 +47,11 @@ def forget_recording(db_path: Path, call_id: str) -> None:
     folder = recordings_folder(db_path)
     if not re.fullmatch(r"[0-9a-f]{32}", call_id or ""):
         return
-    for path in (folder / f"{call_id}.m4a", folder / f".{call_id}.m4a.partial", *folder.glob(f".{call_id}.*.pcm")):
+    for path in (
+        folder / f"{call_id}.m4a",
+        *folder.glob(f".{call_id}.*.partial"),  # also the part put through, being kept (app/put_through.py)
+        *folder.glob(f".{call_id}.*.pcm"),
+    ):
         path.unlink(missing_ok=True)
 
 
@@ -75,12 +81,15 @@ def encode(raw: Path, target: Path, sample_rate: int) -> float:
 class CallRecorder:
     """Records one call: put `processor` in the pipeline after the audio output."""
 
-    def __init__(self, folder: Path, call_id: str, sample_rate: int):
+    def __init__(self, folder: Path, call_id: str, sample_rate: int, clock: CallClock | None = None):
         self._folder = folder
         self._call_id = call_id
         self._rate = sample_rate
         self._raw = folder / f".{call_id}.{sample_rate}.pcm"
         self._file = None
+        # Told how far the recording has got with each write, to place transcript lines in it.
+        self._clock = clock
+        self._written = 0
         self.processor = AudioBufferProcessor(
             sample_rate=sample_rate,
             num_channels=1,
@@ -100,6 +109,9 @@ class CallRecorder:
             descriptor = os.open(self._raw, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             self._file = os.fdopen(descriptor, "ab")
         self._file.write(audio)
+        self._written += len(audio)
+        if self._clock is not None:
+            self._clock.reached(time.time(), self._written / (self._rate * 2))
 
     def finish(self) -> float:
         """Encode what was recorded (run it on a worker thread). Returns the seconds kept, 0 for none."""

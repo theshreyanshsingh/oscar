@@ -51,6 +51,8 @@ const state = {
   // The call opened from the history table.
   detailCallId: null,
   detailMessageIds: new Set(),
+  // Its transcript lines, in order, for copying and downloading.
+  detailMessages: [],
   // What that call's web searches found: [{ id, query, sources: [{ title, url }] }].
   detailSearches: [],
   // The browser call running in this tab.
@@ -179,6 +181,8 @@ function callNumber(call) {
 
 function speakerLabel(call, role) {
   if (role === "agent") return `${state.agentName}:`;
+  // Whoever the caller was put through to (app/put_through.py): known by their number.
+  if (role === "person") return call && call.transferred_to ? `${call.transferred_to}:` : "Put through to:";
   return call && call.kind === "browser" ? "You:" : "Caller:";
 }
 
@@ -186,16 +190,18 @@ function renderLine(container, call, message) {
   const empty = container.querySelector(".empty");
   if (empty) empty.remove();
   const line = document.createElement("p");
+  // Where the line begins in the call's recording (app/calls.py, CallClock).
+  if (typeof message.at_seconds === "number") line.dataset.at = String(message.at_seconds);
   if (message.role === "note") {
     // Not speech: something Oscar did during the call, such as a web search.
     line.className = "line note";
     line.textContent = message.text;
   } else {
-    line.className = message.role === "agent" ? "line from-agent" : "line from-caller";
+    line.className = `line ${{ agent: "from-agent", person: "from-person" }[message.role] || "from-caller"}`;
     const who = document.createElement("span");
     who.className = "who";
     who.textContent = speakerLabel(call, message.role);
-    const at = lineTime(call, message);
+    const at = lineTime(call, message, container.id === "detail-transcript");
     if (at) who.append(" ", at);
     line.append(who, document.createTextNode(message.text));
   }
@@ -1331,6 +1337,7 @@ async function openDetail(callId) {
   state.detailOpener = opener && opener !== document.body && !$("call-detail").contains(opener) ? opener : state.detailOpener;
   state.detailCallId = callId;
   state.detailMessageIds = new Set();
+  state.detailMessages = [];
   state.detailSearches = [];
   $("call-detail").hidden = false;
   $("detail-backdrop").hidden = false;
@@ -1346,6 +1353,7 @@ async function openDetail(callId) {
   renderDetailSummary(null);
   renderDetailRecording(null);
   renderDetailOutcome(null);
+  renderTranscriptTools();
   const container = $("detail-transcript");
   resetTranscript(container, "Loading…");
   renderCalls();
@@ -1359,10 +1367,13 @@ async function openDetail(callId) {
       `${KIND_LABELS[call.kind]} call · ${formatTime(call.started_at)} · ` +
       `${STATUS_LABELS[call.status]}`;
     resetTranscript(container, "Nothing was said on this call.");
+    renderDetailRecording(call); // first, so the lines' times can play it
     for (const message of messages) {
       state.detailMessageIds.add(message.id);
+      state.detailMessages.push(message);
       renderLine(container, call, message);
     }
+    renderTranscriptTools();
     renderDetailSummary(call);
     renderDetailActions(call);
     renderDetailRecording(call);
@@ -1384,6 +1395,7 @@ function closeDetail({ restoreFocus = true } = {}) {
   document.documentElement.classList.remove("drawer-open");
   document.removeEventListener("keydown", onDrawerKey);
   $("detail-audio").pause(); // a recording playing must not go on behind the closed panel
+  markPlayingLine(null);
   renderCalls();
   const opener = state.detailOpener;
   state.detailOpener = null;
@@ -1551,8 +1563,10 @@ function onMessage(message) {
   if (message.call_id === state.focusCallId) addFocusMessage(message);
   if (message.call_id === state.detailCallId && !state.detailMessageIds.has(message.id)) {
     state.detailMessageIds.add(message.id);
+    state.detailMessages.push(message);
     const container = $("detail-transcript");
     renderLine(container, state.calls.get(message.call_id), message);
+    renderTranscriptTools();
   }
 }
 
@@ -2393,15 +2407,30 @@ function onCallDeleted(callId) {
 }
 
 // How far into the call a line was said ("1:05"), with the time of day on hover.
-function lineTime(call, message) {
+// When in the call a line was said. A line Oscar placed in the call's audio says
+// where (at_seconds), and in Call history it plays the recording from there;
+// older lines only know when they were written down.
+function lineTime(call, message, seekable = false) {
   const said = Date.parse(message.created_at);
+  const at = typeof message.at_seconds === "number" ? message.at_seconds : null;
+  const label = at !== null ? formatDuration(Math.floor(at)) : null;
+  if (seekable && at !== null) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "said-at";
+    button.dataset.at = String(at);
+    button.textContent = label;
+    button.setAttribute("aria-label", `Play the recording from ${label}`);
+    button.disabled = !$("detail-transcript").classList.contains("playable");
+    return button;
+  }
   const began = call ? Date.parse(call.started_at) : NaN;
-  if (Number.isNaN(said) || Number.isNaN(began)) return null;
+  if (label === null && (Number.isNaN(said) || Number.isNaN(began))) return null;
   const time = document.createElement("time");
   time.className = "said-at";
   time.dateTime = message.created_at;
-  time.textContent = formatDuration(Math.max(0, Math.floor((said - began) / 1000)));
-  time.title = new Date(said).toLocaleTimeString();
+  time.textContent = label ?? formatDuration(Math.max(0, Math.floor((said - began) / 1000)));
+  if (!Number.isNaN(said)) time.title = new Date(said).toLocaleTimeString();
   return time;
 }
 
@@ -3365,6 +3394,7 @@ function renderDetailRecording(call) {
   const audio = $("detail-audio");
   if (!call || !(call.recording_seconds > 0)) {
     box.hidden = true;
+    setPlayable(false);
     if (audio.getAttribute("src")) {
       audio.pause();
       audio.removeAttribute("src");
@@ -3372,6 +3402,7 @@ function renderDetailRecording(call) {
     }
     return;
   }
+  setPlayable(true);
   const source = `/api/calls/${call.id}/recording`;
   // Not set again on each update of the call: that would stop it playing.
   if (audio.getAttribute("src") !== source) {
@@ -3381,6 +3412,171 @@ function renderDetailRecording(call) {
   $("detail-recording-length").textContent = formatDuration(Math.floor(call.recording_seconds));
   $("detail-download").href = `${source}?download=1`;
   box.hidden = false;
+}
+
+// ---------- the transcript, played along with the recording ----------
+
+// Play a line from a moment before it begins, so its first word is heard whole.
+const LINE_LEAD_SECONDS = 0.4;
+// After the owner scrolls the panel themselves, the playing line is not kept in view for this long.
+const OWN_SCROLL_MS = 4000;
+const follow = { line: null, scrolledAt: 0 };
+
+// The lines' times play the recording once there is one.
+function setPlayable(playable) {
+  const container = $("detail-transcript");
+  container.classList.toggle("playable", playable);
+  for (const button of container.querySelectorAll("button.said-at")) button.disabled = !playable;
+  if (!playable) {
+    container.classList.remove("is-following");
+    markPlayingLine(null);
+  }
+}
+
+function playFrom(seconds) {
+  const audio = $("detail-audio");
+  if (!audio.getAttribute("src")) return;
+  audio.currentTime = Math.max(0, seconds - LINE_LEAD_SECONDS);
+  follow.scrolledAt = 0; // the owner chose this line: follow on from it
+  audio.play().catch(() => {});
+}
+
+function markPlayingLine(line) {
+  if (follow.line === line) return;
+  if (follow.line) follow.line.classList.remove("is-playing");
+  if (line) line.classList.add("is-playing");
+  follow.line = line;
+}
+
+// The line being said at this moment of the recording: the last to have begun.
+function lineAt(seconds) {
+  let found = null;
+  let foundAt = -1;
+  for (const line of $("detail-transcript").querySelectorAll(".line[data-at]:not(.note)")) {
+    const at = Number(line.dataset.at);
+    if (at <= seconds && at >= foundAt) {
+      found = line;
+      foundAt = at;
+    }
+  }
+  return found;
+}
+
+function followRecording() {
+  const audio = $("detail-audio");
+  const line = lineAt(audio.currentTime + 0.15);
+  const changed = line !== follow.line;
+  markPlayingLine(line);
+  if (changed && line && !audio.paused && Date.now() - follow.scrolledAt > OWN_SCROLL_MS) keepInView(line);
+}
+
+// Scroll the panel so the playing line shows below the title and the player, which stay put.
+function keepInView(line) {
+  const drawer = $("call-detail");
+  const panel = drawer.getBoundingClientRect();
+  const player = $("detail-recording").getBoundingClientRect();
+  const top = Math.max(panel.top, player.bottom) + 12;
+  const box = line.getBoundingClientRect();
+  if (box.top >= top && box.bottom <= panel.bottom - 24) return;
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  drawer.scrollBy({ top: box.top - top - (panel.bottom - top) / 4, behavior: reduce ? "auto" : "smooth" });
+}
+
+function onTranscriptClick(event) {
+  const button = event.target.closest("button.said-at");
+  if (button && !button.disabled) playFrom(Number(button.dataset.at));
+}
+
+function setUpPlayAlong() {
+  const audio = $("detail-audio");
+  const container = $("detail-transcript");
+  audio.addEventListener("timeupdate", followRecording);
+  audio.addEventListener("seeked", followRecording);
+  audio.addEventListener("play", () => container.classList.add("is-following"));
+  audio.addEventListener("pause", () => container.classList.remove("is-following"));
+  audio.addEventListener("ended", () => {
+    container.classList.remove("is-following");
+    markPlayingLine(null);
+  });
+  container.addEventListener("click", onTranscriptClick);
+  const drawer = $("call-detail");
+  const ownScroll = () => (follow.scrolledAt = Date.now());
+  drawer.addEventListener("wheel", ownScroll, { passive: true });
+  drawer.addEventListener("touchmove", ownScroll, { passive: true });
+  drawer.addEventListener("keydown", (event) => {
+    if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", " "].includes(event.key) && event.target !== audio) {
+      ownScroll();
+    }
+  });
+  // The player sits just under the panel's title, however many lines the title takes.
+  const head = drawer.querySelector(".detail-head");
+  if (head && window.ResizeObserver) {
+    new ResizeObserver(() => drawer.style.setProperty("--detail-head-height", `${head.offsetHeight}px`)).observe(head);
+  }
+  $("detail-transcript-copy").addEventListener("click", copyTranscript);
+  $("detail-transcript-download").addEventListener("click", downloadTranscript);
+}
+
+// ---------- the transcript as text: copied, or downloaded as a .txt ----------
+
+function renderTranscriptTools() {
+  const has = state.detailMessages.length > 0;
+  $("detail-transcript-tools").hidden = !has;
+  $("detail-transcript-copy").hidden = !navigator.clipboard;
+}
+
+function transcriptText(call, messages) {
+  const number = callNumber(call);
+  const started = new Date(call.started_at);
+  const when = Number.isNaN(started.getTime())
+    ? call.started_at
+    : started.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const length = typeof call.duration_seconds === "number" ? ` · ${formatDuration(call.duration_seconds)}` : "";
+  const out = [
+    `${state.agentName} · ${KIND_LABELS[call.kind] || ""} call${number && number !== "—" ? ` with ${number}` : ""}`,
+    `${when}${length}`,
+  ];
+  if (call.summary) out.push("", `Summary: ${call.summary}`);
+  out.push("");
+  for (const message of messages) {
+    const at = typeof message.at_seconds === "number" ? `[${formatDuration(Math.floor(message.at_seconds))}] ` : "";
+    out.push(message.role === "note" ? `${at}(${message.text})` : `${at}${speakerLabel(call, message.role)} ${message.text}`);
+  }
+  return out.join("\n") + "\n";
+}
+
+function transcriptFileName(call) {
+  const started = new Date(call.started_at);
+  if (Number.isNaN(started.getTime())) return "call-transcript.txt";
+  const two = (value) => String(value).padStart(2, "0");
+  const day = `${started.getFullYear()}-${two(started.getMonth() + 1)}-${two(started.getDate())}`;
+  return `call-${day}-${two(started.getHours())}${two(started.getMinutes())}-transcript.txt`;
+}
+
+function downloadTranscript() {
+  const call = state.calls.get(state.detailCallId);
+  if (!call) return;
+  const blob = new Blob([transcriptText(call, state.detailMessages)], { type: "text/plain;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = transcriptFileName(call);
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function copyTranscript() {
+  const call = state.calls.get(state.detailCallId);
+  const button = $("detail-transcript-copy");
+  if (!call) return;
+  try {
+    await navigator.clipboard.writeText(transcriptText(call, state.detailMessages));
+    button.textContent = "Copied";
+  } catch {
+    button.textContent = "Couldn't copy";
+  }
+  setTimeout(() => (button.textContent = "Copy"), 1500);
 }
 
 function callOutcome(call) {
@@ -4521,6 +4717,7 @@ async function init() {
   $("detail-callback").addEventListener("click", callBack);
   $("detail-copy").addEventListener("click", copyNumber);
   $("detail-link").addEventListener("click", copyCallLink);
+  setUpPlayAlong();
   $("detail-block").addEventListener("click", blockCaller);
   $("blocked-form").addEventListener("submit", saveBlocked);
   $("detail-delete").addEventListener("click", askToDelete);

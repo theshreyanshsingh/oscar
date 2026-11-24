@@ -449,6 +449,15 @@ async def test_a_call_is_summed_up_when_it_ends(server, monkeypatch):
         assert seconds == pytest.approx(call["recording_seconds"], abs=0.5) and seconds > 5
         assert np.abs(samples).max() > 0.05  # sound, not silence: the caller and Oscar
 
+        # Each line knows where it begins in the recording, for Call history to play it from.
+        at = {(m["role"], m["text"]): m["at_seconds"] for m in (await http.get(f"/api/calls/{call_id}")).json()["messages"]}
+        greeting_at = at[("agent", DEFAULT_AGENT.greeting)]
+        caller_at = at[("user", f"{HEARD_FIRST} {HEARD}")]
+        reply_at = at[("agent", REPLY)]
+        assert 0 <= greeting_at < 1.5
+        assert caller_at == pytest.approx(3.5, abs=1.0)  # the caller began after 3.5 s of silence
+        assert caller_at + 2.0 < reply_at < call["recording_seconds"]
+
         # And the summary was sent to the owner, once.
         ((sent_summary),) = delivered
         assert sent_summary["url"] == "https://hooks.example.test/oscar"
