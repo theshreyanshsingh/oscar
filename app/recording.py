@@ -145,6 +145,16 @@ def finish_raw(raw: Path, target: Path, sample_rate: int) -> float:
         raw.unlink(missing_ok=True)
 
 
+def finish_leftover(folder: Path, call_id: str) -> float | None:
+    """Encode one call's raw recording left by a server that stopped mid-call. Returns the
+    seconds kept, or None when it left none."""
+    for raw in folder.glob(f".{call_id}.*.pcm"):
+        match = _RAW_NAME.fullmatch(raw.name)
+        if match and match["call_id"] == call_id:
+            return finish_raw(raw, folder / f"{call_id}.m4a", int(match["rate"]))
+    return None
+
+
 def finish_leftovers(folder: Path, is_open) -> dict[str, float]:
     """Encode raw recordings left by a server that stopped mid-call. `is_open(call_id)` says
     whether the call is still going (its recording is not left over). Returns {call_id: seconds}."""

@@ -429,6 +429,9 @@ async def _write_and_save(
         _research_fields(cfg, call, agent, messages, calls.store.get_searches(call["id"]), meter),
     )
     opted_out = summary.pop("_do_not_call", False)
+    now = calls.store.get_call(call["id"]) or {}
+    if summary.get("follow_up") and summary["follow_up"] == now.get("follow_up"):
+        summary.pop("follow_up_done_at", None)  # the same to-do: ticked off, it stays ticked off
     done = calls.update(call["id"], **summary, **research)
     if opted_out and done:
         note_do_not_call(calls, done)

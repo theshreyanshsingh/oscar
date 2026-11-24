@@ -400,12 +400,18 @@ def create_app(
         so Oscar answers from the sheet as it is now (app/google_sheets.py)."""
         while True:
             await asyncio.sleep(SHEET_REFRESH_MINUTES * 60)
-            for table in [table for table in store.list_lookup_tables() if table["source_url"]]:
-                try:
-                    await refresh_table(store, table)
-                except Exception:
-                    logger.exception(f"Reading the spreadsheet {table['id']} from Google Sheets failed")
-            tables_changed()
+            try:
+                linked = [table for table in await asyncio.to_thread(store.list_lookup_tables) if table["source_url"]]
+                for table in linked:
+                    try:
+                        await refresh_table(store, table)
+                    except Exception:
+                        logger.exception(f"Reading the spreadsheet {table['id']} from Google Sheets failed")
+                if linked:
+                    tables_changed()
+            except Exception:
+                # A pass that fails (the database busy, say) is tried again next time.
+                logger.exception("Reading the spreadsheets from Google Sheets failed")
 
     async def keep_backing_up() -> None:
         """A copy of the database each day (app/backup.py), checked for every hour. Recordings
@@ -426,7 +432,7 @@ def create_app(
 
     async def tidy_recordings() -> None:
         folder = recordings_folder(cfg.db_path)
-        open_ids = set(calls.active_call_ids)
+        open_ids = set(calls.active_call_ids) | calls.keeping_recordings
         finished = await asyncio.to_thread(finish_leftovers, folder, lambda call_id: call_id in open_ids)
         for call_id, seconds in finished.items():
             if seconds and store.get_call(call_id):
@@ -1175,7 +1181,7 @@ def create_app(
     @app.post("/api/tables/{table_id}/refresh")
     async def refresh_lookup_table(table_id: str) -> dict:
         """Read a spreadsheet from its Google Sheet again now."""
-        table = table_or_404(table_id)
+        table = await asyncio.to_thread(table_or_404, table_id)
         if not table["source_url"]:
             raise HTTPException(status_code=400, detail="This spreadsheet came from a file, not a Google Sheets link.")
         table = await refresh_table(store, table)
@@ -1192,18 +1198,22 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
     ) -> dict:
         """A page of a spreadsheet's rows, those with every word of `q` in them when it is given."""
-        table = await asyncio.to_thread(table_or_404, table_id)
-        words = [word.casefold() for word in q.split()]
-        rows = table["rows"]
-        if words:
-            rows = [row for row in rows if all(word in " ".join(row).casefold() for word in words)]
-        return {
-            "headings": table["headings"],
-            "rows": rows[offset : offset + limit],
-            "found": len(rows),
-            "total": table["row_count"],
-            "offset": offset,
-        }
+
+        def page() -> dict:
+            table = table_or_404(table_id)
+            words = [word.casefold() for word in q.split()]
+            rows = table["rows"]
+            if words:
+                rows = [row for row in rows if all(word in " ".join(row).casefold() for word in words)]
+            return {
+                "headings": table["headings"],
+                "rows": rows[offset : offset + limit],
+                "found": len(rows),
+                "total": table["row_count"],
+                "offset": offset,
+            }
+
+        return await asyncio.to_thread(page)
 
     @app.get("/api/tables/{table_id}.xlsx")
     async def download_lookup_table(table_id: str) -> Response:

@@ -6,8 +6,8 @@ recorded, Twilio records it instead, from when the person answers, with the
 caller on one channel and the person on the other. Twilio says when the
 recording is ready at /twilio/put-through-recording, and Oscar then:
 
-1. fetches it, and deletes Twilio's copy (Oscar keeps its own, as it does the
-   rest of the call);
+1. fetches it, and once it is safely in the call's recording deletes Twilio's
+   copy (Oscar keeps its own, as it does the rest of the call);
 2. adds it to the end of the call's recording after a moment's silence, so the
    whole call plays as one in Call history;
 3. finds where each of the two spoke (Silero voice detection, a channel at a
@@ -37,7 +37,7 @@ from app.calls import CallManager
 from app.config import Config
 from app.costs import USAGE, CostMeter
 from app.openrouter import auth_headers, describe_failure, new_client
-from app.recording import encode, recording_path, recordings_folder
+from app.recording import encode, finish_leftover, recording_path, recordings_folder
 from app.speech import TRANSCRIPT_LANGUAGE, TRANSCRIPT_MODEL, wav_file
 
 # Silence between Oscar's part of the recording and the part put through.
@@ -64,12 +64,19 @@ LONGEST_STRETCH_SECONDS = 30.0
 # One speaker's lines this close together read as one line.
 SAME_LINE_GAP_SECONDS = 1.5
 TRANSCRIBING_AT_ONCE = 4
+# Finding speech is plain Python a window at a time: it lets other threads (the calls going
+# on) run this often, every so many windows (about 1.6 seconds of audio).
+YIELD_EVERY_WINDOWS = 50
 
 ROLES = ("user", "person")  # the caller's channel, then the person's
 
 
 class PutThroughFailed(Exception):
     """The part put through could not be kept. The message says why, for the transcript."""
+
+
+class NotWrittenDown(Exception):
+    """The part put through is in the recording, but none of it could be written down."""
 
 
 def _twilio_client(cfg: Config):
@@ -141,7 +148,7 @@ def read_audio(path: Path, rate: int, channels: int) -> np.ndarray:
         pieces.extend(out.to_ndarray() for out in resampler.resample(None))
     if not pieces:
         return np.zeros((channels, 0), dtype=np.int16)
-    return np.concatenate(pieces, axis=1).astype(np.int16)
+    return np.concatenate(pieces, axis=1).astype(np.int16, copy=False)
 
 
 def channel_count(path: Path) -> int:
@@ -176,6 +183,8 @@ def speech_stretches(samples: np.ndarray, rate: int) -> list[tuple[int, int]]:
     last_speech = 0
     quiet = 0
     for index in range(len(audio) // window):
+        if index % YIELD_EVERY_WINDOWS == 0:
+            time.sleep(0.001)  # let the calls' threads and event loop have their turn
         scored = detector.voice_confidence(audio[index * window : (index + 1) * window].tobytes())
         confidence = float(np.ravel(scored)[0])
         if start is None:
@@ -262,7 +271,9 @@ def join_recordings(target: Path, scratch: Path, added: np.ndarray, rate: int) -
     (where the added audio begins, the recording's new length), in seconds."""
     before = read_audio(target, rate, 1)[0] if target.exists() else np.zeros(0, dtype=np.int16)
     gap = np.zeros(int(GAP_SECONDS * rate) if before.size else 0, dtype=np.int16)
-    scratch.write_bytes(np.concatenate([before, gap, added]).astype(np.int16).tobytes())
+    with scratch.open("wb") as out:  # a part at a time: a long call is never copied whole again
+        for part in (before, gap, added):
+            part.astype(np.int16, copy=False).tofile(out)
     try:
         length = encode(scratch, target, rate)
     finally:
@@ -271,9 +282,16 @@ def join_recordings(target: Path, scratch: Path, added: np.ndarray, rate: int) -
 
 
 def mixed(channels: np.ndarray) -> np.ndarray:
-    """Both sides of the conversation in one track, as the rest of the recording is."""
-    total = channels.astype(np.int32).sum(axis=0)
-    return np.clip(total, -32768, 32767).astype(np.int16)
+    """Both sides of the conversation in one track, as the rest of the recording is (a
+    million samples at a time, so a long call never sits in memory twice over)."""
+    if channels.shape[0] == 1:
+        return channels[0]
+    out = np.empty(channels.shape[1], dtype=np.int16)
+    step = 1 << 20
+    for start in range(0, channels.shape[1], step):
+        total = channels[:, start : start + step].astype(np.int32).sum(axis=0)
+        out[start : start + step] = np.clip(total, -32768, 32767)
+    return out
 
 
 async def _wait_for(condition, seconds: float, every: float = 1.0) -> bool:
@@ -300,71 +318,100 @@ async def keep_put_through(
     client: httpx.AsyncClient | None = None,
 ) -> None:
     """Keep Twilio's recording of the part of the call put through: its audio at the end
-    of the call's recording, and what was said in the transcript."""
+    of the call's recording, and what was said in the transcript. Twilio's copy is deleted
+    only once it is in the call's recording: until then, anything that stops this (a full
+    disk, a restart) leaves it on Twilio."""
     folder = recordings_folder(cfg.db_path)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     download = folder / f".{call_id}.put-through.wav.partial"
     scratch = folder / f".{call_id}.put-through.pcm.partial"
-    fetched = False
+    kept = False
+    left_on_twilio = " Twilio still has its recording of it (Monitor > Call recordings)."
+
+    def note(text: str, **at) -> None:
+        if calls.store.get_call(call_id):  # not for a call deleted meanwhile
+            calls.add_message(call_id, "note", text, **at)
+
+    calls.keeping_recordings.add(call_id)
     try:
         if not recording_url_ok(cfg, recording_url, recording_sid):
             raise PutThroughFailed("Twilio gave an address for the recording that Oscar does not fetch from.")
         await fetch_recording(cfg, recording_url, download, client)
-        fetched = True
-        await _forget_on_twilio(cfg, recording_sid)
 
-        # Oscar's part is encoded a moment after the call is handed over.
-        await _wait_for(lambda: not _encoding(folder, call_id), WAIT_FOR_RECORDING_SECONDS)
+        # Oscar's part is encoded a moment after the call is handed over; one left unfinished
+        # by a server that stopped mid-call is finished now, before this is added to it.
+        if call_id not in calls.active_call_ids:
+            seconds = await asyncio.to_thread(finish_leftover, folder, call_id)
+            if seconds and calls.store.get_call(call_id):
+                calls.update(call_id, recording_seconds=round(seconds, 1))
+        if not await _wait_for(lambda: not _encoding(folder, call_id), WAIT_FOR_RECORDING_SECONDS):
+            raise PutThroughFailed("Oscar's own part of the recording was still being finished.")
         if calls.store.get_call(call_id) is None:
-            return  # deleted meanwhile: nothing of it is kept
+            await _forget_on_twilio(cfg, recording_sid)  # deleted meanwhile: none of it is kept
+            return
         target = recording_path(cfg.db_path, call_id)
         rate = await asyncio.to_thread(recording_rate, target) or 8000
         channels = await asyncio.to_thread(channel_count, download)
         audio = await asyncio.to_thread(read_audio, download, rate, 2 if channels >= 2 else 1)
-        offset, length = await asyncio.to_thread(join_recordings, target, scratch, mixed(audio), rate)
+        offset, length = await asyncio.to_thread(lambda: join_recordings(target, scratch, mixed(audio), rate))
         if calls.store.get_call(call_id) is None:
             target.unlink(missing_ok=True)
+            await _forget_on_twilio(cfg, recording_sid)
             return
         calls.update(call_id, recording_seconds=round(length, 1))
+        kept = True
+        if not await _forget_on_twilio(cfg, recording_sid):
+            note(
+                "Twilio's copy of the recording of the part put through could not be deleted. Delete it "
+                "in Twilio (Monitor > Call recordings) to stop paying to keep it: Oscar has it."
+            )
 
         if channels < 2:
-            calls.add_message(
-                call_id,
-                "note",
+            note(
                 "The recording of the call after it was put through came as one track, so who said "
                 "what could not be told apart. Listen to it in the recording.",
                 at_seconds=offset,
             )
             return
-        lines = await _transcribe(cfg, calls, call_id, audio, rate)
+        try:
+            lines = await _transcribe(cfg, calls, call_id, audio, rate)
+        except NotWrittenDown as exc:
+            note(f"The part after the call was put through is in the recording, but could not be written down. {exc}")
+            return
         if calls.store.get_call(call_id) is None:
             return  # deleted while it was being written down
         if not lines:
-            calls.add_message(call_id, "note", "Nothing was made out after the call was put through.", at_seconds=offset)
+            note("Nothing was made out after the call was put through.", at_seconds=offset)
         for start, role, words in lines:
             calls.add_message(call_id, role, words, at_seconds=round(offset + start, 2))
         await _summarise_again(cfg, calls, call_id)
+    except asyncio.CancelledError:
+        # Oscar stopped part-way through (a restart): say how far it got.
+        note(
+            "Oscar stopped before it had finished with the part after the call was put through."
+            + (" It is in the recording, but was not written down." if kept else left_on_twilio)
+        )
+        raise
     except PutThroughFailed as exc:
         logger.warning(f"Call {call_id}: the part put through could not be kept: {exc}")
-        where = "" if fetched else " Twilio still has its recording of it (Monitor > Call recordings)."
-        if calls.store.get_call(call_id):
-            calls.add_message(call_id, "note", f"The part after the call was put through could not be kept. {exc}{where}")
+        note(f"The part after the call was put through could not be kept. {exc}" + ("" if kept else left_on_twilio))
     except Exception:
         logger.exception(f"Call {call_id}: the part put through could not be kept")
-        if calls.store.get_call(call_id):
-            where = "" if fetched else " Twilio still has its recording of it (Monitor > Call recordings)."
-            calls.add_message(call_id, "note", f"The part after the call was put through could not be kept.{where}")
+        note("The part after the call was put through could not be kept." + ("" if kept else left_on_twilio))
     finally:
+        calls.keeping_recordings.discard(call_id)
         download.unlink(missing_ok=True)
         scratch.unlink(missing_ok=True)
 
 
-async def _forget_on_twilio(cfg: Config, recording_sid: str) -> None:
-    """Delete Twilio's copy: Oscar keeps the call's recording itself."""
+async def _forget_on_twilio(cfg: Config, recording_sid: str) -> bool:
+    """Delete Twilio's copy: Oscar keeps the call's recording itself. Returns whether it went."""
     try:
         await asyncio.to_thread(_twilio_client(cfg).recordings(recording_sid).delete)
     except Exception as exc:
         logger.warning(f"Twilio's copy of recording {recording_sid} could not be deleted: {exc}")
+        return False
+    return True
 
 
 async def forget_on_twilio(cfg: Config, recording_sid: str) -> None:
@@ -380,7 +427,7 @@ async def _transcribe(
     stretches = []
     for role, channel in zip(ROLES, audio, strict=False):
         for begin, end in await asyncio.to_thread(speech_stretches, channel, rate):
-            stretches.append((role, begin, end, channel[begin:end].tobytes()))
+            stretches.append((role, begin, end, channel))  # its audio is taken when it is written down
     meter = CostMeter(
         lambda dollars: calls.add_cost(call_id, dollars),
         api_key=cfg.openrouter_api_key,
@@ -392,10 +439,10 @@ async def _transcribe(
     problems: list[str] = []
     async with new_client(timeout=FETCH_TIMEOUT) as client:
 
-        async def one(role: str, begin: int, end: int, pcm: bytes) -> None:
+        async def one(role: str, begin: int, end: int, channel: np.ndarray) -> None:
             async with limit:
                 try:
-                    words = await write_down(client, cfg, meter, pcm, rate)
+                    words = await write_down(client, cfg, meter, channel[begin:end].tobytes(), rate)
                 except (PutThroughFailed, httpx.HTTPError) as exc:
                     problems.append(str(exc) or type(exc).__name__)
                     return
@@ -404,8 +451,8 @@ async def _transcribe(
 
         await asyncio.gather(*(one(*stretch) for stretch in stretches))
     if problems and not heard:
-        raise PutThroughFailed(problems[0])
-    if problems:
+        raise NotWrittenDown(problems[0])
+    if problems and calls.store.get_call(call_id):
         calls.add_message(
             call_id,
             "note",
@@ -425,6 +472,9 @@ async def _summarise_again(cfg: Config, calls: CallManager, call_id: str) -> Non
 
     await _wait_for(written, WAIT_FOR_SUMMARY_SECONDS, every=2.0)
     call = calls.store.get_call(call_id)
-    if call is None or call["summary_status"] == "writing":
+    if call is None:
+        return
+    if call["summary_status"] == "writing":
+        logger.warning(f"Call {call_id}: its first summary was still being written, so it was not written again")
         return
     start_summary(cfg, calls, call, calls.store.get_agent(), notify=False)

@@ -97,6 +97,9 @@ class CallManager:
         self._agents: dict[str, AgentSettings] = {}
         # Where each running call's transcript lines fall in its audio, by call.
         self._clocks: dict[str, CallClock] = {}
+        # Calls whose recording is being encoded or added to now (app/agent.py keep_recording,
+        # app/put_through.py): the hourly tidy-up leaves their files alone.
+        self.keeping_recordings: set[str] = set()
 
     # Records
 

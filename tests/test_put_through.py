@@ -296,3 +296,53 @@ async def test_part_written_down_is_kept_and_the_rest_explained(setup, monkeypat
     said = [(m["role"], m["text"]) for m in store.get_messages(call["id"])]
     assert said[0][0] == "note" and "1 of 2 parts" in said[0][1]
     assert said[1] == ("user", CALLER_SAID)
+
+
+async def test_twilios_copy_stays_until_the_part_put_through_is_kept(setup, monkeypatch):
+    cfg, store, calls, call, twilio, _ = setup
+    oscars_part(cfg, call["id"], 3.0)
+    wav = two_channel_wav(caller=placed(0.5, clip_8k(), 4.0), person=np.zeros(32000, dtype=np.int16))
+
+    def full_disk(*args):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(put_through, "join_recordings", full_disk)
+    async with twilio_serving(wav, []) as client:
+        await keep_put_through(cfg, calls, call["id"], SID, URL, client=client)
+    assert twilio.recordings.deleted == []  # nothing lost: Twilio still has it
+    (note,) = store.get_messages(call["id"])
+    assert "Twilio still has its recording of it" in note["text"]
+
+
+async def test_a_part_put_through_none_of_which_could_be_written_down_is_said_to_be_in_the_recording(setup, monkeypatch):
+    cfg, store, calls, call, twilio, summaries = setup
+    oscars_part(cfg, call["id"], 3.0)
+    wav = two_channel_wav(caller=placed(0.5, clip_8k(), 4.0), person=np.zeros(32000, dtype=np.int16))
+
+    async def write_down(client, cfg, meter, pcm, rate):
+        raise put_through.PutThroughFailed("It could not be written down: OpenRouter is busy.")
+
+    monkeypatch.setattr(put_through, "write_down", write_down)
+    async with twilio_serving(wav, []) as client:
+        await keep_put_through(cfg, calls, call["id"], SID, URL, client=client)
+    (note,) = store.get_messages(call["id"])
+    assert note["text"].startswith("The part after the call was put through is in the recording, but could not be written down.")
+    assert store.get_call(call["id"])["recording_seconds"] == pytest.approx(8.0, abs=0.3)
+    assert twilio.recordings.deleted == [SID]
+    assert summaries == []
+
+
+async def test_oscars_part_left_unfinished_by_a_stopped_server_is_finished_first(setup):
+    cfg, store, calls, call, twilio, _ = setup
+    folder = recordings_folder(cfg.db_path)
+    folder.mkdir()
+    t = np.arange(4 * 8000) / 8000
+    (folder / f".{call['id']}.8000.pcm").write_bytes((np.sin(2 * np.pi * 300 * t) * 3000).astype(np.int16).tobytes())
+    wav = two_channel_wav(caller=placed(0.5, clip_8k(), 4.0, volume=0.3), person=np.zeros(32000, dtype=np.int16))
+    async with twilio_serving(wav, []) as client:
+        await keep_put_through(cfg, calls, call["id"], SID, URL, client=client)
+    # Oscar's 4 seconds, a moment's silence, then the 4 seconds put through.
+    assert store.get_call(call["id"])["recording_seconds"] == pytest.approx(9.0, abs=0.3)
+    (line,) = store.get_messages(call["id"])
+    assert line["role"] == "user" and line["at_seconds"] == pytest.approx(5.0 + 0.5, abs=0.5)
+    assert not list(folder.glob(".*.pcm"))

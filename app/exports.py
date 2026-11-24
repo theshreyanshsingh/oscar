@@ -22,7 +22,7 @@ from openpyxl.utils import get_column_letter
 from app.analytics import OUTCOMES, outcome
 
 # Characters Excel does not allow in a cell (control characters, bar tab and new lines).
-_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 KIND_NAMES = {"browser": "Browser", "phone_inbound": "Incoming", "phone_outbound": "Outgoing"}
 OUTCOME_NAMES = dict(OUTCOMES) | {"on_now": "Going on now"}
 SPEAKERS = {"agent": None, "user": "Caller", "person": "Person put through to", "note": "Note"}
@@ -50,20 +50,14 @@ class _Sheet:
     """One sheet written row by row (openpyxl's write-only mode, so a long history fits)."""
 
     def __init__(self, book: Workbook, title: str, headings: list[str], widths: list[int], wrapped: set[int] = frozenset()):
-        self.sheet = book.create_sheet(title)
+        self.sheet = book.create_sheet(sheet_title(title))
         self.wrapped = wrapped
         for index, width in enumerate(widths, start=1):
             self.sheet.column_dimensions[get_column_letter(index)].width = width
         self.sheet.freeze_panes = "A2"
-        cells = []
-        for heading in headings:
-            cell = WriteOnlyCell(self.sheet, value=heading)
-            cell.font = HEADING_FONT
-            cell.fill = HEADING_FILL
-            cells.append(cell)
-        self.sheet.append(cells)
+        self.rows = 0
+        self.heading(headings)
         self.columns = len(headings)
-        self.rows = 1
 
     def add(self, values: list, formats: dict[int, str] | None = None) -> None:
         cells = []
@@ -84,7 +78,11 @@ class _Sheet:
         """A row that names what follows it, styled as the sheet's own headings."""
         cells = []
         for value in values:
-            cell = WriteOnlyCell(self.sheet, value=value)
+            # A heading can come from someone else's sheet: words, never a formula.
+            text = isinstance(value, str)
+            cell = WriteOnlyCell(self.sheet, value=_text(value) if text else value)
+            if text:
+                cell.data_type = "s"
             cell.font = HEADING_FONT
             cell.fill = HEADING_FILL
             cells.append(cell)
@@ -98,6 +96,16 @@ class _Sheet:
     def filter(self) -> None:
         if self.rows > 1:
             self.sheet.auto_filter.ref = f"A1:{get_column_letter(self.columns)}{self.rows}"
+
+
+def sheet_title(name: str) -> str:
+    """A name Excel takes for a sheet: no [ ] : * ? / \\ or control characters, no ' at
+    either end, at most 31 characters, and not "History" (which Excel keeps for itself)."""
+    title = _ILLEGAL.sub("", re.sub(r"[\[\]:*?/\\]+", " ", name or ""))
+    title = re.sub(r"\s+", " ", title).strip().strip("'").strip()[:31].strip()
+    if not title:
+        return "Sheet"
+    return f"{title[:23]} (sheet)" if title.casefold() == "history" else title
 
 
 def _number(call: dict) -> str:
@@ -279,8 +287,7 @@ def calls_workbook(
 def table_workbook(table: dict) -> bytes:
     """A spreadsheet Oscar answers from, as it reads it: its headings, then its rows."""
     book = Workbook(write_only=True)
-    # A sheet's name in Excel: at most 31 characters, none of [ ] : * ? / \
-    title = re.sub(r"\s+", " ", re.sub(r"[\[\]:*?/\\]+", " ", table["name"])).strip()[:31] or "Sheet"
+    title = sheet_title(table["name"])
     sheet = _Sheet(book, title, table["headings"], [min(40, max(12, len(heading) + 4)) for heading in table["headings"]])
     for row in table["rows"]:
         sheet.add(list(row))

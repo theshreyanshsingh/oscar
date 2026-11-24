@@ -56,7 +56,14 @@ def workbook_answer(data: bytes, name: str = "Harbour prices") -> httpx.Response
     [
         (VIEW, VIEW, ""),
         (f"{VIEW}?usp=sharing", VIEW, ""),
-        (f"{VIEW}#gid=0", f"{VIEW}#gid=0", ""),
+        # Tab 0 is the first one made, which is not always the first one now: read it by its id too.
+        (f"{VIEW}#gid=0", f"{VIEW}#gid=0", f"https://docs.google.com/spreadsheets/d/{KEY}/export?format=csv&gid=0"),
+        # A signed-in user with several Google accounts gets links with /u/1/ in them.
+        (f"https://docs.google.com/spreadsheets/u/1/d/{KEY}/edit#gid=5", f"{VIEW}#gid=5",
+         f"https://docs.google.com/spreadsheets/d/{KEY}/export?format=csv&gid=5"),
+        (f"https://docs.google.com/spreadsheets/d/e/{KEY}/pubhtml?gid=9&single=true",
+         f"https://docs.google.com/spreadsheets/d/e/{KEY}/pubhtml?gid=9&single=true",
+         f"https://docs.google.com/spreadsheets/d/e/{KEY}/pub?gid=9&single=true&output=csv"),
         (f"{VIEW}#gid=12345", f"{VIEW}#gid=12345", f"https://docs.google.com/spreadsheets/d/{KEY}/export?format=csv&gid=12345"),
         (f"https://docs.google.com/spreadsheets/d/{KEY}/htmlview?gid=77", f"{VIEW}#gid=77",
          f"https://docs.google.com/spreadsheets/d/{KEY}/export?format=csv&gid=77"),
@@ -79,6 +86,8 @@ def test_a_link_is_made_plain(link, view, tab):
         f"https://docs.google.com/document/d/{KEY}/edit",
         f"https://someone@docs.google.com/spreadsheets/d/{KEY}/edit",
         f"https://docs.google.com:8443/spreadsheets/d/{KEY}/edit",
+        f"https://docs.google.com:99999/spreadsheets/d/{KEY}/edit",  # not a port at all
+        f"https://docs.google.com:abc/spreadsheets/d/{KEY}/edit",
     ],
 )
 def test_only_a_google_sheet_is_taken(link):
@@ -263,3 +272,76 @@ def test_a_spreadsheet_downloads_as_excel(client):
     assert sheet.title == "Prices 2026 27"
     assert [list(row) for row in sheet.iter_rows(values_only=True)] == [["Product", "Price"], ["Gate", "=1+1"]]
     assert sheet["B2"].data_type == "s"  # written as words, not a formula
+
+
+async def test_a_sheet_not_shared_is_sent_to_sign_in_and_says_how_to_share_it():
+    asked: list[str] = []
+    answers = {EXPORT: httpx.Response(302, headers={"location": "https://accounts.google.com/ServiceLogin?continue=x"})}
+    async with google(answers, asked) as client:
+        with pytest.raises(SheetError, match="Anyone with the link"):
+            await read_link(VIEW, client=client)
+    assert asked == [EXPORT]  # the sign-in page itself is never fetched
+
+
+async def test_two_tabs_alike_read_the_one_in_the_link():
+    tab = f"https://docs.google.com/spreadsheets/d/{KEY}/export?format=csv&gid=2026"
+    last_year = ("2025", [["Month", "Sales"], ["Jan", 10]])
+    this_year = ("2026", [["Month", "Sales"], ["Jan", 10]])  # the same so far: no telling them apart
+    answers = {
+        EXPORT: workbook_answer(xlsx(last_year, this_year)),
+        tab: httpx.Response(200, text="Month,Sales\r\nJan,10\r\nFeb,12\r\n", headers={"content-type": "text/csv"}),
+    }
+    async with google(answers) as client:
+        read = await read_link(f"{VIEW}#gid=2026", client=client)
+    # Rows 2 and 3 of the tab tell it from 2025's; its own rows are read, whatever its name.
+    assert read["sheet"] == "" and read["linked_tab"] == ""
+    assert read["csv"].splitlines() == ["Month,Sales", "Jan,10", "Feb,12"]
+    assert read["sheets"] == ["2025", "2026"] and read["rows"] == 3
+
+
+async def test_a_tab_renamed_in_google_is_still_read_by_its_link():
+    tab = f"https://docs.google.com/spreadsheets/d/{KEY}/export?format=csv&gid=999"
+    answers = {
+        EXPORT: workbook_answer(xlsx(PRICES, ("Stock 2026", STOCK[1]))),
+        tab: httpx.Response(200, text="Item,In stock\r\nGate,4\r\n", headers={"content-type": "text/csv"}),
+    }
+    async with google(answers) as client:
+        read = await read_link(f"{VIEW}#gid=999", "Stock", client=client)  # "Stock" is now "Stock 2026"
+    assert read["sheet"] == "Stock 2026" and read["linked_tab"] == "Stock 2026"
+
+
+async def test_something_that_is_not_a_workbook_says_so():
+    answers = {EXPORT: httpx.Response(200, content=b"not a workbook", headers={"content-type": XLSX})}
+    async with google(answers) as client:
+        with pytest.raises(SheetError, match="did not send a workbook"):
+            await read_link(f"{VIEW}#gid=3", client=client)
+
+
+async def test_what_was_read_is_dropped_when_the_sheet_changed_meanwhile(tmp_path):
+    store = Store(tmp_path / "oscar.db")
+    table = store.add_lookup_table(
+        name="Prices", description="", private=False, file_name="Harbour prices",
+        headings=["Product", "Price"], rows=[["Gate", "310"]], source_url=VIEW, source_sheet="Prices",
+    )
+
+    def handler(request):
+        # The owner puts a file in its place while Google's copy is on its way.
+        store.update_lookup_table(table["id"], headings=["Product", "Price"], rows=[["Fence", "99"]],
+                                  file_name="prices.xlsx", source_url="", source_sheet="", refreshed_at="")
+        return workbook_answer(xlsx(("Prices", [["Product", "Price"], ["Gate", 330]])))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        after = await refresh_table(store, table, client)
+    assert after["rows"] == [["Fence", "99"]] and after["source_url"] == "" and after["refreshed_at"] == ""
+    store.close()
+
+
+def test_a_spreadsheets_headings_download_as_words(client):
+    added = client.post(
+        "/api/tables", json={"name": "History", "rows_csv": '"=HYPERLINK(""http://x"")",Price\nGate,5\n'}
+    ).json()["table"]
+    response = client.get(f"/api/tables/{added['id']}.xlsx")
+    assert response.status_code == 200
+    sheet = load_workbook(io.BytesIO(response.content)).worksheets[0]
+    assert sheet.title == "History (sheet)"  # Excel keeps "History" for itself
+    assert sheet["A1"].value == '=HYPERLINK("http://x")' and sheet["A1"].data_type == "s"

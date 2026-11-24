@@ -711,12 +711,15 @@ async def run_call(
 
 async def keep_recording(calls: CallManager, call_id: str, recorder: CallRecorder) -> None:
     """Encode the call's recording (on a worker thread) and note how long it is."""
+    calls.keeping_recordings.add(call_id)
     try:
         seconds = await asyncio.to_thread(recorder.finish)
     except Exception:
         logger.exception(f"Call {call_id}: its recording could not be kept")
         recorder.discard()
         return
+    finally:
+        calls.keeping_recordings.discard(call_id)
     if seconds and calls.store.get_call(call_id):
         calls.update(call_id, recording_seconds=round(seconds, 1))
     elif seconds:

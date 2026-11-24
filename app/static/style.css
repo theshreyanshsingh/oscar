@@ -4740,3 +4740,10 @@ details.stat-table summary {
     gap: 14px;
   }
 }
+
+/* A card's button while its change is on its way: it does nothing, but keeps the keyboard's
+   focus (a disabled one would drop it to the page when the card is drawn again). */
+button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}

@@ -125,8 +125,10 @@ def totals(calls: list[dict]) -> dict:
 
 
 def _buckets(first: date, last: date, weekly: bool) -> list[date]:
+    """The first day of each bar: every day, or every seven days from the first, so that
+    over a year (52 whole weeks, app.analytics.span) no bar holds only part of a week."""
     step = 7 if weekly else 1
-    start = first - timedelta(days=first.weekday()) if weekly else first
+    start = first
     buckets = []
     while start <= last:
         buckets.append(start)
@@ -145,7 +147,7 @@ def over_time(calls: list[dict], zone, first: date, last: date) -> dict:
         if when is None:
             continue
         day = when.date()
-        start = day - timedelta(days=day.weekday()) if weekly else day
+        start = first + timedelta(days=(day - first).days // 7 * 7) if weekly else day
         row = rows.get(start)
         if row is None:
             continue
@@ -287,6 +289,12 @@ def call_lists(store: Store, calls: list[dict], since: str, *, everything: bool)
     return found
 
 
+def span(days: int) -> int:
+    """How many days a period covers: a year is shown as 52 whole weeks (364 days), each
+    the same length, ending today."""
+    return 364 if days == 365 else days
+
+
 def analytics(
     store: Store, *, days: int, kind: str = "all", zone_name: str = "", now: datetime | None = None
 ) -> dict:
@@ -296,9 +304,9 @@ def analytics(
     zone = time_zone(zone_name)
     now = (now or datetime.now(timezone.utc)).astimezone(zone)
     last = now.date()
-    first = last - timedelta(days=days - 1)
+    first = last - timedelta(days=span(days) - 1)
     since = _stamp(datetime.combine(first, time(), zone))
-    before = _stamp(datetime.combine(first - timedelta(days=days), time(), zone))
+    before = _stamp(datetime.combine(first - timedelta(days=span(days)), time(), zone))
 
     wanted = KINDS.get(kind)
     found = [call for call in store.calls_for_analytics(before) if wanted is None or call["kind"] == wanted]

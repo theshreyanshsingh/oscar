@@ -1422,7 +1422,11 @@ async function openDetail(callId) {
       `${STATUS_LABELS[call.status]}`;
     resetTranscript(container, "Nothing was said on this call.");
     renderDetailRecording(call); // first, so the lines' times can play it
-    for (const message of messages) {
+    // A live call's lines may have come by the event stream while this loaded: each once, in order.
+    const lines = new Map([...state.detailMessages, ...messages].map((message) => [message.id, message]));
+    state.detailMessageIds = new Set();
+    state.detailMessages = [];
+    for (const message of [...lines.values()].sort((a, b) => a.id - b.id)) {
       state.detailMessageIds.add(message.id);
       state.detailMessages.push(message);
       renderLine(container, call, message);
@@ -2910,7 +2914,13 @@ function setUpColumns(name, container) {
     const chart = stats.charts[name];
     if (slot && chart && Number(slot.dataset.index) !== chart.active) showColumn(name, container, Number(slot.dataset.index));
   });
-  container.addEventListener("pointerleave", () => {
+  // A tap on a phone shows that day (a finger has no hover).
+  container.addEventListener("click", (event) => {
+    const slot = event.target.closest(".col-slot");
+    if (slot) showColumn(name, container, Number(slot.dataset.index), { announce: true });
+  });
+  container.addEventListener("pointerleave", (event) => {
+    if (event.pointerType !== "mouse") return; // a lifted finger leaves: what it tapped stays shown
     if (document.activeElement !== container) showColumn(name, container, -1);
   });
   container.addEventListener("focus", () => {
@@ -3104,7 +3114,7 @@ function renderHours(data) {
 
 function setUpHeatmap() {
   const map = $("stat-hours");
-  map.addEventListener("pointermove", (event) => {
+  const show = (event) => {
     const tip = map.querySelector(".heat-tip");
     const cell = event.target.closest(".heat-cell");
     for (const lit of map.querySelectorAll(".heat-cell.active")) if (lit !== cell) lit.classList.remove("active");
@@ -3120,8 +3130,11 @@ function setUpHeatmap() {
     const half = tip.offsetWidth / 2;
     tip.style.left = `${Math.min(Math.max(middle, half), map.clientWidth - half)}px`;
     tip.style.top = `${cell.offsetTop - 6}px`;
-  });
-  map.addEventListener("pointerleave", () => {
+  };
+  map.addEventListener("pointermove", show);
+  map.addEventListener("click", show); // a tap on a phone
+  map.addEventListener("pointerleave", (event) => {
+    if (event.pointerType !== "mouse") return;
     const tip = map.querySelector(".heat-tip");
     if (tip) tip.hidden = true;
     for (const lit of map.querySelectorAll(".heat-cell.active")) lit.classList.remove("active");
@@ -3173,6 +3186,8 @@ function renderActions(data) {
 }
 
 function showNumberInHistory(number) {
+  const every = document.querySelector('.chip[data-show="all"]');
+  if (every && every.getAttribute("aria-pressed") !== "true") every.click(); // not only its to-dos, say
   const search = $("history-search");
   search.value = number;
   search.dispatchEvent(new Event("input"));
@@ -3934,18 +3949,18 @@ async function readWorkbook(file, sheet = "") {
   return api("/api/campaigns/sheet", { method: "POST", body: form });
 }
 
-function showSheets(sheets, chosen) {
-  const select = $("list-sheet");
-  select.replaceChildren(
-    ...sheets.map((name) => {
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      return option;
-    }),
-  );
+// The sheets to choose from. "" is the tab a Google Sheets link points to, read as Google
+// gives it when it could not be told which sheet that is (app/google_sheets.py).
+function fillSheetChoice(select, sheets, chosen) {
+  const names = chosen === "" && sheets.length ? ["", ...sheets] : sheets;
+  select.replaceChildren(...names.map((name) => new Option(name || "The tab in the link", name)));
   select.value = chosen;
-  $("list-sheet-row").hidden = sheets.length < 2;
+  select.disabled = false; // a sheet still being read when these came is no longer the one shown
+  return names.length;
+}
+
+function showSheets(sheets, chosen) {
+  $("list-sheet-row").hidden = fillSheetChoice($("list-sheet"), sheets, chosen) < 2;
 }
 
 function useListRows(text) {
@@ -4250,14 +4265,16 @@ function renderDetailRecording(call) {
     return;
   }
   setPlayable(true);
-  const source = `/api/calls/${call.id}/recording`;
+  // The length is in the address: when the part put through is added to the end, the player
+  // (and the browser's copy) take the longer recording.
+  const source = `/api/calls/${call.id}/recording?v=${call.recording_seconds}`;
   // Not set again on each update of the call: that would stop it playing.
   if (audio.getAttribute("src") !== source) {
     audio.setAttribute("src", source);
     audio.setAttribute("aria-label", `Recording of the ${callLabel(call)}`);
   }
   $("detail-recording-length").textContent = formatDuration(Math.floor(call.recording_seconds));
-  $("detail-download").href = `${source}?download=1`;
+  $("detail-download").href = `${source}&download=1`;
   box.hidden = false;
 }
 
@@ -4311,7 +4328,7 @@ function lineAt(seconds) {
 
 function followRecording() {
   const audio = $("detail-audio");
-  const line = lineAt(audio.currentTime + 0.15);
+  const line = lineAt(audio.currentTime + LINE_LEAD_SECONDS + 0.05);
   const changed = line !== follow.line;
   markPlayingLine(line);
   if (changed && line && !audio.paused && Date.now() - follow.scrolledAt > OWN_SCROLL_MS) keepInView(line);
@@ -4985,6 +5002,8 @@ const sheets = {
   link: null, // the Google Sheet chosen instead of a file: { source, sheet }
   pages: new Map(), // card -> the rows it shows: { q, rows, found, total, loading, error }
   typed: new Map(), // card -> what is typed in its row search (kept while its rows are drawn again)
+  drafts: new Map(), // card -> its Edit form as typed so far: { name, description, private }
+  listAsked: 0, // a list of spreadsheets that comes after a newer one was asked for is dropped
 };
 
 function tableError(id, message) {
@@ -5006,13 +5025,19 @@ function tableErrorLine(id) {
 const SHEET_DROP_NOTE = "or drop one here: a row for each thing, with headings on top";
 
 async function loadTables() {
+  const asked = ++sheets.listAsked;
   const data = await api("/api/tables");
+  if (asked !== sheets.listAsked) return; // a newer list was asked for since
+  const before = new Map(sheets.list.map((table) => [table.id, table.updated_at]));
   sheets.list = data.tables;
   sheets.most = data.most;
   renderTables();
-  // Rows shown may have changed (read again from Google Sheets, or replaced).
-  for (const id of sheets.open) {
-    if (sheets.list.some((table) => table.id === id)) loadTableRows(id, (sheets.pages.get(id) || {}).q || "");
+  // Rows shown are read again only where they changed (read again from Google Sheets with
+  // something new, or replaced): rows shown further down stay where they are.
+  for (const table of sheets.list) {
+    if (sheets.open.has(table.id) && before.has(table.id) && before.get(table.id) !== table.updated_at) {
+      loadTableRows(table.id, (sheets.pages.get(table.id) || {}).q || "");
+    }
   }
 }
 
@@ -5063,10 +5088,7 @@ async function chooseTableFile(file) {
   sheets.fileName = file.name;
   sheets.workbook = read.sheets.length ? file : null;
   sheets.link = null;
-  const select = $("table-sheet");
-  select.replaceChildren(...read.sheets.map((name) => new Option(name, name)));
-  select.value = read.sheet;
-  $("table-sheet-row").hidden = read.sheets.length < 2;
+  $("table-sheet-row").hidden = fillSheetChoice($("table-sheet"), read.sheets, read.sheet) < 2;
   $("table-file-name").textContent = file.name;
   $("table-drop-note").textContent = "Choose another file, or drop one here";
   $("table-drop").classList.add("chosen");
@@ -5092,12 +5114,11 @@ async function chooseTableLink() {
     sheets.csv = read.csv;
     sheets.fileName = read.title || "Google Sheet";
     sheets.workbook = null;
-    sheets.link = { source: read.source, sheet: read.sheet };
+    // The tab the link points to is kept as the link itself (by its id), so that renaming it
+    // in Google does not stop Oscar reading it; another tab chosen is kept by its name.
+    sheets.link = { source: read.source, sheet: read.sheet, linked: read.linked_tab };
     $("table-file").value = "";
-    const select = $("table-sheet");
-    select.replaceChildren(...read.sheets.map((name) => new Option(name, name)));
-    select.value = read.sheet;
-    $("table-sheet-row").hidden = read.sheets.length < 2;
+    $("table-sheet-row").hidden = fillSheetChoice($("table-sheet"), read.sheets, read.sheet) < 2;
     $("table-file-name").textContent = `${sheets.fileName} (Google Sheets)`;
     $("table-drop-note").textContent = "Or choose a file instead";
     $("table-drop").classList.add("chosen");
@@ -5241,7 +5262,7 @@ async function addTable(event) {
         file_name: sheets.fileName,
         rows_csv: sheets.csv,
         source_url: sheets.link ? sheets.link.source : "",
-        source_sheet: sheets.link ? sheets.link.sheet : "",
+        source_sheet: sheets.link && sheets.link.sheet !== sheets.link.linked ? sheets.link.sheet : "",
       }),
     });
     sheets.list = [...sheets.list.filter((other) => other.id !== table.id), table];
@@ -5253,7 +5274,7 @@ async function addTable(event) {
   } catch (error) {
     showError("table-error", error.message);
   } finally {
-    button.disabled = false;
+    button.disabled = sheets.list.length >= sheets.most; // at the limit it stays off
   }
 }
 
@@ -5298,8 +5319,12 @@ function tableCard(table) {
     element.className = className;
     element.textContent = label;
     element.dataset.key = `${key}-${table.id}`;
-    element.disabled = busy;
-    element.addEventListener("click", handler);
+    // Busy, a card's buttons do nothing, but stay focusable: a disabled button drops the
+    // keyboard's focus to the page when the card is drawn again.
+    element.setAttribute("aria-disabled", String(busy));
+    element.addEventListener("click", (event) => {
+      if (element.getAttribute("aria-disabled") !== "true") handler(event);
+    });
     return element;
   };
 
@@ -5444,73 +5469,115 @@ function tableCard(table) {
 
 const TABLE_PAGE_ROWS = 25;
 
-// The card's rows: a page at a time, those with every word searched for.
+// The card's rows: a page at a time, those with every word searched for. The search box is
+// made once and kept; only what is under it is drawn again as rows come (so typing in it is
+// never interrupted, and a phone's keyboard stays up).
 function tableRowsBrowser(table) {
-  const page = sheets.pages.get(table.id) || { q: "", rows: table.sample, found: table.row_count, total: table.row_count };
   const box = document.createElement("div");
   box.className = "table-browser";
-  if (table.row_count > TABLE_PAGE_ROWS) {
-    const searchId = `table-rows-search-${table.id}`;
-    const label = document.createElement("label");
-    label.className = "visually-hidden";
-    label.htmlFor = searchId;
-    label.textContent = `Search the rows of ${table.name}`;
-    const search = document.createElement("input");
-    search.type = "search";
-    search.id = searchId;
-    search.className = "table-rows-search";
-    search.placeholder = `Search ${table.row_count.toLocaleString()} rows`;
-    search.value = sheets.typed.has(table.id) ? sheets.typed.get(table.id) : page.q;
-    search.dataset.key = `rows-search-${table.id}`;
-    search.addEventListener("input", () => {
-      sheets.typed.set(table.id, search.value);
-      clearTimeout(search.timer);
-      search.timer = setTimeout(() => loadTableRows(table.id, search.value.trim()), 250);
-    });
-    box.append(label, search);
-  }
+  if (table.row_count > TABLE_PAGE_ROWS) box.append(...tableRowsSearch(table));
+  box.append(tableRowsBody(table));
+  return box;
+}
+
+function tableRowsSearch(table) {
+  const page = sheets.pages.get(table.id);
+  const searchId = `table-rows-search-${table.id}`;
+  const label = document.createElement("label");
+  label.className = "visually-hidden";
+  label.htmlFor = searchId;
+  label.textContent = `Search the rows of ${table.name}`;
+  const search = document.createElement("input");
+  search.type = "search";
+  search.id = searchId;
+  search.className = "table-rows-search";
+  search.placeholder = `Search ${table.row_count.toLocaleString()} rows`;
+  search.value = sheets.typed.has(table.id) ? sheets.typed.get(table.id) : (page && page.q) || "";
+  search.dataset.key = `rows-search-${table.id}`;
+  search.addEventListener("input", () => {
+    sheets.typed.set(table.id, search.value);
+    clearTimeout(search.timer);
+    search.timer = setTimeout(() => loadTableRows(table.id, search.value.trim()), 250);
+  });
+  return [label, search];
+}
+
+function tableRowsBody(table) {
+  const page = sheets.pages.get(table.id) || { q: "", rows: table.sample, found: table.row_count, total: table.row_count };
+  const body = document.createElement("div");
+  body.className = "table-rows-body";
   if (page.error) {
     const error = document.createElement("p");
     error.className = "error";
     error.textContent = page.error;
-    box.append(error);
+    body.append(error);
   }
-  if (page.rows.length) {
-    const rows = rowsTable(table.headings, page.rows, { caption: `Rows of ${table.name}` });
+  // While a search or a first page is on its way, the rows shown before stay.
+  const shown = page.loading && !page.rows.length ? page.before || table.sample : page.rows;
+  if (shown.length) {
+    const rows = rowsTable(table.headings, shown, { caption: `Rows of ${table.name}` });
     rows.classList.add("table-card-rows");
-    box.append(rows);
+    body.append(rows);
   }
   const count = document.createElement("p");
   count.className = "hint table-more";
   count.setAttribute("aria-live", "polite");
-  count.textContent = page.q
-    ? page.found
+  if (page.loading && !page.rows.length) {
+    count.textContent = page.q ? `Looking for "${page.q}"…` : "Loading rows…";
+  } else if (page.q) {
+    count.textContent = page.found
       ? `${page.found.toLocaleString()} of ${page.total.toLocaleString()} rows have "${page.q}"${page.rows.length < page.found ? `; showing ${page.rows.length.toLocaleString()}` : ""}.`
-      : `No row has "${page.q}".`
-    : page.rows.length < page.found
+      : `No row has "${page.q}".`;
+  } else {
+    count.textContent = page.rows.length < page.found
       ? `Showing ${page.rows.length.toLocaleString()} of ${page.found.toLocaleString()} rows.`
       : `All ${page.found.toLocaleString()} row${page.found === 1 ? "" : "s"}.`;
-  box.append(count);
-  if (page.rows.length < page.found) {
+  }
+  body.append(count);
+  if (page.rows.length && page.rows.length < page.found) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "link";
     more.textContent = page.loading ? "Loading…" : "Show more rows";
-    more.disabled = Boolean(page.loading);
+    // Not disabled while loading: a disabled button cannot keep the keyboard's focus.
+    more.setAttribute("aria-disabled", String(Boolean(page.loading)));
     more.dataset.key = `rows-more-${table.id}`;
-    more.addEventListener("click", () => loadTableRows(table.id, page.q, page.rows.length));
-    box.append(more);
+    more.addEventListener("click", () => {
+      if (!page.loading) loadTableRows(table.id, page.q, page.rows.length, page);
+    });
+    body.append(more);
   }
-  return box;
+  return body;
 }
 
-async function loadTableRows(id, q = "", offset = 0) {
+// Draw a card's rows again where they are (its search box stays), or the whole list when the
+// card is not drawn yet.
+function redrawTableRows(id) {
+  const table = sheets.list.find((one) => one.id === id);
+  const card = document.querySelector(`[data-table-id="${CSS.escape(id)}"]`);
+  const body = card && card.querySelector(".table-rows-body");
+  if (!table || !body) {
+    renderTables();
+    return;
+  }
+  keepFocus(card, () => body.replaceWith(tableRowsBody(table)));
+}
+
+// `from` is the page "Show more rows" was pressed on: its rows go on only while it is still
+// the page shown (not after a newer search).
+async function loadTableRows(id, q = "", offset = 0, from = null) {
   const before = sheets.pages.get(id);
-  const page = { q, rows: offset && before ? before.rows : [], found: before ? before.found : 0, total: before ? before.total : 0 };
-  page.loading = true;
-  page.asked = (before && before.asked ? before.asked : 0) + 1;
+  if (from && before !== from) return;
+  const page = {
+    q,
+    rows: offset && before ? before.rows : [],
+    before: before ? before.rows : null, // shown until the new rows come
+    found: before ? before.found : 0,
+    total: before ? before.total : 0,
+    loading: true,
+  };
   sheets.pages.set(id, page);
-  if (offset) renderTables();
+  redrawTableRows(id);
   const params = new URLSearchParams({ offset: String(offset), limit: String(TABLE_PAGE_ROWS) });
   if (q) params.set("q", q);
   try {
@@ -5525,7 +5592,8 @@ async function loadTableRows(id, q = "", offset = 0) {
     page.error = error.message;
   }
   page.loading = false;
-  renderTables();
+  page.before = null;
+  redrawTableRows(id);
 }
 
 async function refreshTable(id) {
@@ -5573,13 +5641,20 @@ function tableEditForm(table, button) {
     wrap.append(words, input);
     return [wrap, input];
   };
-  const [nameField, name] = field("Name", "edit-name", table.name, 80);
-  const [aboutField, about] = field("What it holds", "edit-about", table.description, 500);
+  // What is typed is kept as it is typed, so the form drawn again (rows coming in elsewhere,
+  // a change from another tab, a save that failed) shows it, not the saved values.
+  const draft = sheets.drafts.get(table.id) || { name: table.name, description: table.description, private: table.private };
+  sheets.drafts.set(table.id, draft);
+  const [nameField, name] = field("Name", "edit-name", draft.name, 80);
+  const [aboutField, about] = field("What it holds", "edit-about", draft.description, 500);
+  name.addEventListener("input", () => (draft.name = name.value));
+  about.addEventListener("input", () => (draft.description = about.value));
   const privacy = document.createElement("label");
   privacy.className = "check";
   const box = document.createElement("input");
   box.type = "checkbox";
-  box.checked = table.private;
+  box.checked = draft.private;
+  box.addEventListener("change", () => (draft.private = box.checked));
   privacy.append(box, document.createTextNode(" Private: about people"));
   const actions = document.createElement("div");
   actions.className = "list-actions";
@@ -5587,6 +5662,7 @@ function tableEditForm(table, button) {
   save.type = "submit";
   const cancel = button("Cancel", "edit-cancel", () => {
     sheets.editing = null;
+    sheets.drafts.delete(table.id);
     renderTables();
     focusKey(`edit-${table.id}`);
   });
@@ -5605,8 +5681,9 @@ function tableEditForm(table, button) {
       name.focus();
       return;
     }
-    const done = await changeTable(table.id, { name: name.value, description: about.value, private: box.checked });
+    const done = await changeTable(table.id, { name: draft.name, description: draft.description, private: draft.private });
     if (done) {
+      sheets.drafts.delete(table.id);
       sheets.editing = null;
       renderTables();
       focusKey(`edit-${table.id}`);
@@ -5652,7 +5729,7 @@ async function replaceTableFile(file) {
   }
   sheets.replacing = null;
   await changeTable(id, { rows_csv: read.csv, file_name: file.name, source_url: "" });
-  if (sheets.open.has(id)) loadTableRows(id);
+  if (sheets.open.has(id)) loadTableRows(id, (sheets.typed.get(id) ?? (sheets.pages.get(id) || {}).q ?? "").trim());
 }
 
 async function deleteTable(id) {

@@ -914,7 +914,7 @@ Two things to know:
 - **Filters:** All, To do (with how many are still open), Incoming, Outgoing,
   Browser and Failed. They go together with a search.
 - **To-dos** can be ticked off in the list or in the call itself. Writing a
-  call's summary again starts its to-do afresh.
+  call's summary again starts its to-do afresh, unless the to-do comes out the same.
 - **Opening a call** shows it in a panel beside the list: its summary, research
   notes, cost and transcript. Escape closes it. **Copy number** copies the
   number to call back on. With phone calls set up, **Call back** puts it in

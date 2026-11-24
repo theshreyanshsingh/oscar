@@ -139,3 +139,29 @@ def test_a_time_from_pipecat_reads_as_a_clock_time():
     from app.agent import wall_time
 
     assert wall_time("2026-11-24T08:00:01.250+00:00") == pytest.approx(1795507201.25)
+
+
+async def test_a_summary_written_again_keeps_a_to_do_ticked_off_when_it_is_the_same(tmp_path, monkeypatch):
+    from app import summary as summary_module
+    from tests.conftest import make_config
+
+    cfg = make_config(tmp_path)
+    store = Store(cfg.db_path)
+    calls = CallManager(store, EventBus())
+    call = calls.create("phone_inbound", status="ended", from_number="+61400000001")
+    store.add_message(call["id"], "user", "Can someone call me back?")
+    calls.update(call["id"], summary_status="ready", follow_up="Call Sam back.", follow_up_done_at="2026-11-24T10:00:00+00:00")
+
+    async def fields(cfg, call, agent, messages, meter):
+        return {"summary_status": "ready", "summary": "Sam wants a call back.", "caller_name": "Sam",
+                "callback_number": "", "follow_up": "Call Sam back.", "details": "", "follow_up_done_at": "",
+                "summary_error": ""}
+
+    async def research(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(summary_module, "_summary_fields", fields)
+    monkeypatch.setattr(summary_module, "_research_fields", research)
+    await summary_module._write_and_save(cfg, calls, store.get_call(call["id"]), store.get_agent(), store.get_messages(call["id"]))
+    assert store.get_call(call["id"])["follow_up_done_at"] == "2026-11-24T10:00:00+00:00"
+    store.close()

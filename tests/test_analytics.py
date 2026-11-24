@@ -106,8 +106,12 @@ def test_a_year_is_shown_week_by_week(store):
     seed(store, "phone_inbound", timedelta(days=200), frm="+61400000001")
     data = report(store, days=365)
     assert data["over_time"]["bucket"] == "week"
-    assert 52 <= len(data["over_time"]["points"]) <= 54
-    assert all(datetime.fromisoformat(point["date"]).weekday() == 0 for point in data["over_time"]["points"])
+    # 52 whole weeks, the last ending today: no bar holds only part of a week.
+    points = [datetime.fromisoformat(point["date"]).date() for point in data["over_time"]["points"]]
+    assert len(points) == 52
+    assert points[0].isoformat() == data["first_day"]
+    assert all((later - earlier).days == 7 for earlier, later in zip(points, points[1:]))
+    assert (datetime.fromisoformat(data["last_day"]).date() - points[-1]).days == 6
     assert sum(point["incoming"] for point in data["over_time"]["points"]) == 1
 
 
