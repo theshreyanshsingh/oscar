@@ -58,6 +58,12 @@ SESSION_SECONDS = 30 * 24 * 60 * 60
 # Wrong passwords allowed from one address in FAILURE_WINDOW_SECONDS; then it waits.
 FAILURES_ALLOWED = 10
 FAILURE_WINDOW_SECONDS = 15 * 60
+# Wrong passwords from everyone together in that time, after which every sign-in waits. Behind
+# a proxy on the same machine every visitor has the proxy's address, and a visitor can name
+# any address they like in X-Forwarded-For (which Oscar does not believe): guessing stays
+# slow however the addresses come.
+EVERYONE = "*"
+EVERYONE_FAILURES_ALLOWED = 100
 # Addresses whose wrong passwords are remembered at once, so a flood of them cannot fill the memory.
 ADDRESSES_REMEMBERED = 10_000
 # Said once this few tries are left before sign-in waits.
@@ -306,14 +312,14 @@ class FailedSignIns:
             times.popleft()
         return times
 
-    def wait_seconds(self, key: str) -> int:
+    def wait_seconds(self, key: str, allowed: int = FAILURES_ALLOWED) -> int:
         """How long `key` must wait before trying again (0: it may try now)."""
         times = self._recent(key)
-        if len(times) < FAILURES_ALLOWED:
+        if len(times) < allowed:
             return 0
-        return max(1, math.ceil(times[-FAILURES_ALLOWED] + FAILURE_WINDOW_SECONDS - steady_clock()))
+        return max(1, math.ceil(times[-allowed] + FAILURE_WINDOW_SECONDS - steady_clock()))
 
-    def failed(self, key: str) -> int:
+    def failed(self, key: str, allowed: int = FAILURES_ALLOWED) -> int:
         """Counts a wrong password; says how many tries are left before `key` has to wait."""
         times = self._recent(key)
         times.append(steady_clock())
@@ -322,7 +328,7 @@ class FailedSignIns:
         if len(self._failures) > ADDRESSES_REMEMBERED:
             for old in list(self._failures)[: len(self._failures) - ADDRESSES_REMEMBERED]:
                 del self._failures[old]
-        return max(0, FAILURES_ALLOWED - len(times))
+        return max(0, allowed - len(times))
 
     def succeeded(self, key: str) -> None:
         self._failures.pop(key, None)
@@ -447,12 +453,17 @@ class SignIn:
         )
 
 
-def sent_from_here(scope: Scope) -> bool:
-    """Whether a form was sent from Oscar's own page: its Origin, when the browser says one, is this address."""
+def sent_from_here(scope: Scope, public_host: str = "") -> bool:
+    """Whether a form was sent from Oscar's own page: its Origin, when the browser says one, is
+    this address, or PUBLIC_URL's (a proxy in front may send Oscar another Host, such as
+    127.0.0.1:7860, as nginx does unless told otherwise)."""
     origin = header(scope, b"origin")
     if not origin:
         return True
-    return urlsplit(origin).netloc.lower() == header(scope, b"host").strip().lower()
+    parts = urlsplit(origin)
+    if parts.netloc.lower() == header(scope, b"host").strip().lower():
+        return True
+    return bool(public_host) and parts.scheme == "https" and (parts.hostname or "") == public_host and parts.port is None
 
 
 class RequireSignIn:
@@ -525,7 +536,7 @@ def create_sign_in_router(gate: SignIn) -> APIRouter:
             return RedirectResponse("/", status_code=303)
         if gate.mode == "locked":
             return locked_page()
-        if not sent_from_here(request.scope):
+        if not sent_from_here(request.scope, gate.public_host):
             return sign_in_page(message=NOT_FROM_HERE, status=403)
         form = await _form(request)
         if form is None:
@@ -533,10 +544,13 @@ def create_sign_in_router(gate: SignIn) -> APIRouter:
         next_path = safe_next(form.get("next", ""))
         who = sign_in_key(client_address(request.scope))
         wait = gate.failures.wait_seconds(who)
-        if wait:
+        everyone_wait = gate.failures.wait_seconds(EVERYONE, EVERYONE_FAILURES_ALLOWED)
+        if wait or everyone_wait:
+            whose = "from your connection" if wait else "lately"
+            wait = max(wait, everyone_wait)
             return sign_in_page(
                 next_path=next_path,
-                message=f"Too many wrong passwords from your connection. Try again in {_minutes(wait)}.",
+                message=f"Too many wrong passwords {whose}. Try again in {_minutes(wait)}.",
                 status=429,
                 headers={"Retry-After": str(wait)},
             )
@@ -545,6 +559,7 @@ def create_sign_in_router(gate: SignIn) -> APIRouter:
             return sign_in_page(next_path=next_path, message=NO_PASSWORD_TYPED, status=400)
         if not gate.password_matches(given):
             left = gate.failures.failed(who)
+            gate.failures.failed(EVERYONE, EVERYONE_FAILURES_ALLOWED)
             logger.warning(f"A wrong dashboard password was typed from {client_address(request.scope)}")
             message = WRONG_PASSWORD
             if left == 0:
@@ -561,7 +576,7 @@ def create_sign_in_router(gate: SignIn) -> APIRouter:
     async def sign_out(request: Request) -> Response:
         if gate.mode == "open":
             return RedirectResponse("/", status_code=303)
-        if not sent_from_here(request.scope):
+        if not sent_from_here(request.scope, gate.public_host):
             return PlainTextResponse(NOT_FROM_HERE, status_code=403)
         session = gate.session_of(request.scope)
         if session is not None:

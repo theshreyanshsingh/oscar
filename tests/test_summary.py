@@ -848,3 +848,27 @@ async def test_a_request_not_to_be_called_again_comes_through_the_check():
     assert note.do_not_call is True
     note = await written(call, {**SAMS_NOTE, "caller_name": "", "callback_number": ""})
     assert note.do_not_call is False
+
+
+def test_a_summary_may_name_a_number_from_a_note_but_a_callback_must_be_the_callers():
+    from app.summary import CallSummary, only_what_was_said
+
+    messages = [
+        {"role": "agent", "text": "Our office is on 02 9555 0147."},
+        {"role": "user", "text": "Thanks. Can someone call me? My mobile is 0412 345 678."},
+        {"role": "user", "text": "Or my office, 02 5550 0142."},
+        {"role": "note", "text": "Put the caller through to +61 2 9555 0199."},
+    ]
+    summary = CallSummary(
+        summary="Sam was put through to +61 2 9555 0199.", caller_name="", callback_number="0295550147",
+        follow_up="Call Sam back.", details={}, do_not_call=False,
+    )
+    kept = only_what_was_said(summary, messages)  # no SummaryFailed: the number is in a note
+    assert kept.summary == "Sam was put through to +61 2 9555 0199."
+    assert kept.callback_number == ""  # Oscar's office number, not one the caller gave
+    for number in ("0412345678", "0255500142"):
+        given = CallSummary(summary="", caller_name="", callback_number=number, follow_up="", details={}, do_not_call=False)
+        assert only_what_was_said(given, messages).callback_number == number
+    # Two numbers given in two turns are not run into one.
+    joined = CallSummary(summary="", caller_name="", callback_number="04123456780255500142", follow_up="", details={}, do_not_call=False)
+    assert only_what_was_said(joined, messages).callback_number == ""

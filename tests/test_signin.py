@@ -581,3 +581,36 @@ def test_the_sign_in_page_asks_for_the_dashboards_own_stylesheet():
     index = (Path(__file__).resolve().parent.parent / "app" / "static" / "index.html").read_text()
     wanted = re.search(r"/static/style\.css\?v=\d+", index).group(0)
     assert wanted in sign_in_page().body.decode()
+
+
+def test_guessing_from_many_addresses_soon_waits_for_everyone(tmp_path, monkeypatch):
+    """A visitor naming a new address on every try (X-Forwarded-For, or many machines) still waits."""
+    monkeypatch.setattr(signin, "EVERYONE_FAILURES_ALLOWED", 25)
+    with app_client(tmp_path) as client:
+        for tried in range(25):
+            guesser = TestClient(client.app, base_url="https://oscar.example.test", client=(f"203.0.113.{tried}", 1))
+            assert try_password(guesser, f"guess-{tried}", headers={"X-Forwarded-For": f"10.0.0.{tried}"}).status_code == 401
+        waiting = try_password(client, DASHBOARD_PASSWORD)
+        assert waiting.status_code == 429
+        assert "Too many wrong passwords lately." in waiting.text
+
+
+def test_a_proxy_that_sends_its_own_host_still_lets_the_owner_sign_in(tmp_path):
+    # nginx's default sends Host 127.0.0.1:7860; the browser's Origin is PUBLIC_URL's.
+    with app_client(
+        tmp_path, base_url="http://127.0.0.1:7860", client=("127.0.0.1", 5), public_url="https://oscar.example.test"
+    ) as client:
+        signed = client.post(
+            "/login",
+            data={"password": DASHBOARD_PASSWORD, "next": "/"},
+            headers={"Origin": "https://oscar.example.test"},
+            follow_redirects=False,
+        )
+        assert signed.status_code == 303
+        other = client.post(
+            "/login",
+            data={"password": DASHBOARD_PASSWORD, "next": "/"},
+            headers={"Origin": "https://evil.example"},
+            follow_redirects=False,
+        )
+        assert other.status_code == 403

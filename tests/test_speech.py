@@ -1993,7 +1993,9 @@ async def test_the_caller_cannot_cut_a_closing_line_short():
         chat=slowly(FAREWELL, gap=0.05),
     )
     assert call.text == FAREWELL  # all of it, though the caller (or a beep) spoke over it
-    assert call.of(InterruptionFrame) == []  # held back: passed on, it would silence the line
+    # Only Oscar's own, sent before the message to drop what was still to play of a reply;
+    # the caller's (or the beep's) is held back: passed on, it would silence the line.
+    assert len(call.of(InterruptionFrame)) == 1
 
 
 async def test_a_message_made_for_one_person_is_not_kept(tmp_path):
@@ -2119,3 +2121,60 @@ async def test_spreadsheets_that_cannot_be_read_are_apologised_for_and_reported(
     assert call.text == f"{HOLD_LINE} {FACTS_FAILED_LINE}"
     assert call.tables_looked_up == [("pool fence panel", [], problem)]
     assert call.errors == []
+
+
+# Found in a review (2026-11-24): silences, cut-off recordings, and lines that collide
+
+
+def _empty_stream(request):
+    return httpx.Response(200, content=b"data: [DONE]\n\n", headers={"content-type": "text/event-stream"})
+
+
+def stops_part_way(text: str):
+    """A chat endpoint whose answer simply stops part-way: no error, no finish, no [DONE]."""
+    chunks = [chunk for chunk in answer_stream(text) if '"finish_reason": "stop"' not in chunk and "[DONE]" not in chunk]
+    body = "".join(chunks[:-2])  # its words and most of its audio, then nothing
+    return lambda request: httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+
+async def test_an_answer_with_no_speech_in_it_is_asked_for_again():
+    call = await run_voice([*caller_turn(), SleepFrame(1.0)], chat=failing_first(_empty_stream))
+    assert len(call.chat) == 2  # the empty one, then again
+    assert call.text == REPLY
+
+
+async def test_a_greeting_cut_off_without_an_error_is_not_kept(tmp_path):
+    call = await run_voice(
+        [GreetingFrame(GREETING), SleepFrame(0.5)], chat=stops_part_way(GREETING), recordings=Recordings(tmp_path)
+    )
+    assert call.audio
+    assert list(tmp_path.glob("greeting-*.pcm")) == []  # replayed, it would be cut off on every call
+
+
+async def test_a_caller_is_put_through_even_when_the_line_saying_so_fails():
+    lookup = Lookup(TRANSFER, can_search=False, can_transfer=True)
+
+    def respond(request):
+        body = json.loads(request.content)
+        if requested_line(body) == TRANSFER_LINE:
+            return httpx.Response(503, json={"error": {"message": "busy"}})
+        return spoken()(request)
+
+    call = await run_voice([*caller_turn(), SleepFrame(2.5)], chat=respond, lookup=lookup)
+    assert call.closed == ["transfer"]  # not silence until the call's time limit
+
+
+def test_keeping_one_line_never_removes_another_whose_name_starts_the_same(tmp_path):
+    recordings = Recordings(tmp_path)
+    recordings.put("transfer-failed", Recordings.key("a"), b"\x00\x01" * 10)
+    recordings.put("transfer", Recordings.key("b"), b"\x00\x01" * 10)
+    recordings.put("transfer", Recordings.key("c"), b"\x00\x01" * 10)  # the newer "transfer" replaces its older self
+    names = sorted(path.name.split("-")[0] + ("-failed" if "failed" in path.name else "") for path in tmp_path.glob("*.pcm"))
+    assert names == ["transfer", "transfer-failed"]
+
+
+def test_ranges_of_hours_or_years_are_not_read_out_as_numbers():
+    from app.search import long_numbers
+
+    for text in ("Open 0900 - 1700", "from 2024 - 2025", "0900-1700"):
+        assert long_numbers(text) == [], text

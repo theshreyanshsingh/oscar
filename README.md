@@ -366,7 +366,9 @@ spending, the agent's settings and Save, starting calls) and every
 connection for live updates and browser calls needs you to sign in at
 `/login` first. Signing in lasts 30 days on that browser; **Sign out** at the
 top of the dashboard ends it there. Changing the password signs everyone out.
-After 10 wrong passwords from one connection in 15 minutes, sign-in waits.
+After 10 wrong passwords from one connection in 15 minutes, sign-in waits, and
+after 100 from everyone together it waits for everyone (so guessing stays slow
+behind a proxy, where every visitor has the proxy's address).
 
 - **No password, and other computers can reach Oscar** (`HOST=0.0.0.0`, or
   `PUBLIC_URL` set): Oscar still starts, but stays **locked**. Every page
@@ -848,7 +850,13 @@ stock, orders, bookings, a menu, branches and their hours. Up to 10 sheets of
 - **Private** is for sheets about people (customers, orders, bookings). A caller
   is only told about the rows that have the number they are calling from (or,
   on a call Oscar makes, the number it called), and someone on WhatsApp only
-  about the rows with their own number. Calls from the dashboard see every row.
+  about the rows with their own number. The whole number has to match, however
+  the sheet writes it (+61 2 9555 0147, (02) 9555 0147, 0061…): a number that
+  only ends the same way is someone else's. Calls from the dashboard see every
+  row. With Oscar on your own WhatsApp number, what you ask it yourself sees
+  every row only in your chat with yourself; in a chat with one person, that
+  person's rows; in a group, none. The model that decides when to look in a
+  sheet is shown a private sheet's columns, never its rows.
 - **Try a question** on the Data page answers as a call from the dashboard
   would, and shows the rows Oscar read.
 - **Phone numbers** in a sheet are read out one digit at a time, exactly as
@@ -1341,7 +1349,11 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
   so changing the password ends every session; **Sign out** ends its own. The
   password is compared in constant time. Ten wrong passwords from one address
   in 15 minutes make it wait (the address is Cloudflare's `CF-Connecting-IP`
-  only when the request came from one of Cloudflare's own addresses).
+  only when the request came from one of Cloudflare's own addresses, and never
+  `X-Forwarded-For`, which a visitor can write themselves), and 100 from all
+  addresses together make every sign-in wait. Behind a proxy that sends its own
+  Host (nginx's default), a form sent from `PUBLIC_URL`'s page still counts as
+  sent from Oscar's own.
   Without a session, pages go to `/login`, `/api/` routes answer 401 and
   WebSockets are closed with 1008. When other computers can reach Oscar and
   there is no password, everything but `/healthz` and `/twilio/` is refused.

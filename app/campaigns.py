@@ -47,6 +47,8 @@ FIELDS_MOST = 20
 FIELD_CHARS = 300
 
 # Where each number of a list has got to.
+# How many of a list's waiting people the dialer looks through for one not on a call already.
+CONTACTS_LOOKED_AT = 50
 CONTACT_STATUSES = ("waiting", "calling", "answered", "voicemail", "no_answer", "busy", "failed", "skipped")
 # What "Call again" puts back in line.
 CALL_AGAIN_STATUSES = ("voicemail", "no_answer", "busy", "failed")
@@ -123,6 +125,17 @@ def _as_written_in(code: str, digits: str) -> str:
     if not phonenumbers.is_valid_number(parsed):
         return ""
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164).removeprefix("+")
+
+
+def _real_number(raw: str, country_code: str) -> bool:
+    """Whether a cell is a phone number that could be someone's (libphonenumber says it is valid)."""
+    number = dialable(raw, country_code)
+    if not number:
+        return False
+    try:
+        return phonenumbers.is_valid_number(phonenumbers.parse(number, None))
+    except phonenumbers.NumberParseException:
+        return False
 
 
 def dialable(raw: str, country_code: str = "") -> str | None:
@@ -209,14 +222,14 @@ def parse_contacts(text: str, country_code: str = "") -> tuple[list[dict], list[
     else:
         width = max(len(row) for row in rows)
         sample = rows[:20]
-        column = next(
-            (
-                i
-                for i in range(width)
-                if sum(1 for row in sample if i < len(row) and dialable(row[i], "1")) > len(sample) / 2
-            ),
-            None,
-        )
+        # The column with the most real phone numbers in it (by libphonenumber), so a column of
+        # IDs or amounts (10000001) is never dialled; it has to be over half the rows.
+        counts = [
+            sum(1 for row in sample if i < len(row) and _real_number(row[i], country_code or "1"))
+            for i in range(width)
+        ]
+        best = max(range(width), key=lambda i: counts[i])
+        column = best if counts[best] > len(sample) / 2 else None
         if column is None:
             return [], [], ['No column of phone numbers was found. Give it a heading such as "Phone".']
         headings, body = [f"Column {i + 1}" for i in range(width)], numbered
@@ -461,10 +474,12 @@ class CampaignDialer:
             # no other call can take the line in between.
             if lines_busy(self._store, self._cfg) or self._store.count_open_calls() >= lines_for_lists:
                 return
-            waiting = self._store.campaign_contacts(campaign_id, status="waiting", limit=1)
-            if not waiting:
+            # The next person who is not on a call with Oscar already (on another list, or
+            # calling in): no one is rung twice at once. They are called once that call ends.
+            waiting = self._store.campaign_contacts(campaign_id, status="waiting", limit=CONTACTS_LOOKED_AT)
+            contact = next((one for one in waiting if not self._store.on_a_call(one["number"])), None)
+            if contact is None:
                 return
-            contact = waiting[0]
             digits = re.sub(r"\D", "", contact["number"])
             if digits in opted_out:
                 self._store.update_contact(contact["id"], status="skipped", detail="Asked not to be called again.")

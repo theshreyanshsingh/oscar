@@ -52,7 +52,7 @@ from app.whatsapp.chat import (
     is_too_old_to_answer,
     name_handle,
     oscar_label,
-    sender_number,
+    whose_rows,
 )
 
 logger = logging.getLogger("oscar.whatsapp")
@@ -525,10 +525,11 @@ class WhatsAppBridge:
 
             now = datetime.now().astimezone()
 
-            # The owner's spreadsheets, and whose rows a private one may give: the sender's
-            # (by their WhatsApp number), or every row for the owner writing on their own phone.
+            # The owner's spreadsheets, and whose rows a private one may give (whose_rows): the
+            # sender's, or for the owner writing on their own phone, those of the chat's one
+            # other person, all of them in their chat with themself, none in a group.
             tables = tables_from(self.store.lookup_tables_with_rows())
-            caller = None if message.from_me else sender_number(message)
+            caller = whose_rows(message, self.my_ids)
 
             def look_up_rows(words: str) -> str:
                 return "\n\n".join(part.text for part in look_up(tables, words, caller))

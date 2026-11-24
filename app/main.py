@@ -324,6 +324,14 @@ def create_app(
         refreshing = asyncio.create_task(keep_sheets_fresh())
         yield
         refreshing.cancel()
+        # Calls Oscar placed that are still ringing (no agent on them yet): hung up at Twilio,
+        # or whoever answers would hear nothing, the call's stream token being gone.
+        for ringing in await asyncio.to_thread(store.open_phone_calls):
+            if ringing["twilio_sid"] and ringing["id"] not in calls.active_call_ids:
+                try:
+                    await asyncio.wait_for(hang_up_phone_call(cfg, ringing["twilio_sid"]), 3)
+                except Exception as exc:
+                    logger.warning(f"Call {ringing['id']} could not be hung up as Oscar stopped: {exc!r}")
         watching.cancel()
         backing_up.cancel()
         dialing.cancel()

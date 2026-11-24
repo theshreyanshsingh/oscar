@@ -367,7 +367,8 @@ def test_a_busy_or_unreachable_twilio_leaves_the_person_to_be_called_a_minute_la
 
 def test_a_call_twilio_may_have_placed_is_settled_by_how_it_goes(dialer):
     # Twilio did not answer in time: the person is not failed (nor called again) until the call says.
-    call = dialer.calls.create("phone_outbound", status="connecting", to_number=NUMBERS[0])
+    # (The call Twilio may have placed, made here ahead of the dialling it stands for.)
+    call = dialer.calls.create("phone_outbound", status="connecting", to_number="")
     dialer.dialling.refuse = PhoneCallError("Twilio did not answer in time.", call_id=call["id"])
     campaign = dialer.make(NUMBERS[:1])
     dialer.tick()
@@ -628,3 +629,22 @@ def test_a_file_that_cannot_be_read_as_rows_says_so(client):
     assert response.json()["problems"][0].startswith("The file could not be read as rows")
     response = client.post("/api/campaigns", json={"name": "Huge", "contacts_csv": huge})
     assert response.status_code == 400
+
+
+
+def test_no_one_is_rung_while_they_are_on_a_call_already(dialer):
+    # On a call to Oscar (calling in, or from another list): the list waits for it to end.
+    busy = dialer.calls.create("phone_inbound", status="live", from_number=NUMBERS[0])
+    campaign = dialer.make(NUMBERS[:2], at_once=2)
+    dialer.tick()
+    assert [number for number, _, _ in dialer.dialling.placed] == [NUMBERS[1]]
+    dialer.calls.finish(busy["id"])
+    dialer.tick()
+    assert [number for number, _, _ in dialer.dialling.placed] == [NUMBERS[1], NUMBERS[0]]
+    assert campaign
+
+
+def test_without_headings_an_id_column_is_never_dialled():
+    contacts, _, problems = parse_contacts("10000001,Sam,+61412345678\n10000002,Lee,+61498765432\n", "+61")
+    assert [contact["number"] for contact in contacts] == ["+61412345678", "+61498765432"]
+    assert problems == []

@@ -301,3 +301,45 @@ def test_a_call_sees_the_spreadsheets_and_whose_rows_it_may_tell(cfg):
     assert caller_for(store, outgoing["id"]) == "+61498765432"
     assert caller_for(store, browser["id"]) is None
     store.close()
+
+
+def test_a_caller_is_only_given_rows_with_their_whole_number():
+    rows = [
+        ["Alice", "+1 312 555 0123", "Gate"],
+        ["Bea", "(02) 9555 0147", "Fence"],  # Sydney, written the local way
+        ["Cal", "0412 345 678 / 02 9555 0199", "Post"],  # two numbers in one cell
+    ]
+    table = Table(id="c", name="Customers", description="", headings=["Name", "Phone", "Order"], rows=rows, private=True)
+    assert own_rows(table, "+13125550123") == [0]
+    assert own_rows(table, "+12125550123") == []  # New York: the same last eight digits, someone else
+    assert own_rows(table, "+61295550147") == [1]
+    assert own_rows(table, "+61395550147") == []  # Melbourne: the same landline digits, another state
+    assert own_rows(table, "+919195550147") == []  # India, ending the same way
+    assert own_rows(table, "+61412345678") == [2]
+    assert own_rows(table, "+61295550199") == [2]
+
+
+def test_a_private_sheet_is_never_shown_by_example():
+    table = orders(10, private=True)
+    summary = tables_summary([table])
+    assert "Columns: Order, Name, Phone, Status, Delivery" in summary
+    assert "ORD-" not in summary and "+61" not in summary
+
+
+def test_headings_are_not_taken_from_a_row_of_data():
+    # Two note columns with no heading: the headings still head the sheet.
+    headings, rows = read_table("Name,Phone,Order,,\nAlice,+61400000001,ORD-1,paid,urgent\nBob,+61400000002,ORD-2,,\n")
+    assert headings[:3] == ["Name", "Phone", "Order"] and len(rows) == 2
+    # One early row fuller than the headings (a note in two more cells): nothing is lost.
+    headings, rows = read_table("Product,Price,Stock\nGate,$420,12,call first,ask Sam\nFence,$89,140\n")
+    assert headings[:3] == ["Product", "Price", "Stock"] and [row[0] for row in rows] == ["Gate", "Fence"]
+    # A title of one cell, or a CSV title with a comma in it, is passed over.
+    assert read_table("Prices\nProduct,Price\nGate,$5\n")[0] == ["Product", "Price"]
+
+
+def test_words_in_any_script_are_searched_whole():
+    assert words_of("राहुल शर्मा | 9876543210") == ["राहुल", "शर्मा", "9876543210"]
+    assert words_of("Crème brûlée") == ["creme", "brulee"]
+    table = Table(id="h", name="Products", description="", headings=["Name", "Price"],
+                  rows=[["गुलाब साबुन", "₹40"], ["नीम साबुन", "₹35"], ["Soap", "$2"]])
+    assert matching_rows(table, "गुलाब साबुन")[0] == 0

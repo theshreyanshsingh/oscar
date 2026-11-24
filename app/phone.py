@@ -47,6 +47,8 @@ from app.summary import alert_if_missed, alert_owner
 # entry cannot block every number that happens to end the same way.
 BLOCKED_DIGITS_LEAST = 8
 BLOCKED_NUMBERS_MOST = 500
+# The most of a request from Twilio read (its forms are a few kilobytes).
+TWILIO_FORM_MOST_BYTES = 64 * 1024
 
 
 def number_digits(number: str) -> str:
@@ -211,13 +213,22 @@ async def place_outbound_call(
     except Exception as exc:
         stops_lists = try_later = False
         refusal = twilio_refusal(exc)
+        if refusal is not None and refusal.status in (500, 502, 504):
+            # Twilio failed part-way: it may have placed the call. As with no answer in time
+            # (below), the call stays open for its updates, or its token's expiry, to settle.
+            logger.warning(f"Twilio answered {refusal.status} when placing a call: {exc!r}")
+            raise PhoneCallError(
+                "Twilio had a problem placing the call, so it may still go through: Call history shows how it went.",
+                call_id=call["id"],
+            ) from exc
         if refusal is not None:
             if keys_refused(refusal):
                 message = KEYS_REFUSED
             else:
                 message = f"Twilio refused the call: {twilio_message(refusal)}."
             stops_lists = keys_refused(refusal) or refusal.code in ACCOUNT_REFUSALS
-            try_later = refusal.status == 429 or refusal.code == TOO_MANY_REQUESTS
+            # Too many at once, or Twilio unavailable (503): not the person's doing; later.
+            try_later = refusal.status in (429, 503) or refusal.code == TOO_MANY_REQUESTS
         elif _never_reached(exc):
             # What went wrong on this server's side goes to the log, not the dashboard.
             logger.warning(f"Could not reach Twilio to place a call: {exc!r}")
@@ -312,6 +323,12 @@ def create_phone_router(
     async def signed_form(request: Request) -> dict[str, str] | None:
         """The posted form if the request really comes from Twilio, else None."""
         if validator is None or not cfg.phone_enabled:
+            return None
+        # Twilio sends a small form: anything else is refused before it is read (a body of
+        # files, or a huge one, from anyone, would otherwise be read in before the signature).
+        kind = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        length = request.headers.get("content-length", "")
+        if kind != "application/x-www-form-urlencoded" or not length.isdigit() or int(length) > TWILIO_FORM_MOST_BYTES:
             return None
         form = {key: str(value) for key, value in (await request.form()).items()}
         # Twilio signs the public URL it called, not the address we see behind the tunnel.
@@ -534,7 +551,8 @@ def create_phone_router(
             ),
         )
         calls.update(call_id, twilio_sid=start["callSid"])
-        agent = calls.agent_for(call_id) or store.get_agent()
+        listed = calls.agent_for(call_id)  # a call list's settings for this person
+        agent = listed or store.get_agent()
 
         async def transfer(number: str) -> None:
             # Twilio carries on with the call: stopping Oscar's side must not hang it up.
@@ -555,6 +573,8 @@ def create_phone_router(
             # A phone keeps its own speaker out of its microphone.
             barge_in=True,
             transfer=transfer,
+            # Lines said the same way on every call are said (and kept) by the owner's own settings.
+            line_agent=store.get_agent() if listed else None,
         )
 
     return router

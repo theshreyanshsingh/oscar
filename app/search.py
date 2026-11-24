@@ -475,8 +475,10 @@ def long_numbers(text: str) -> list[tuple[int, int]]:
             continue
         if not number.startswith("+") and max(map(len, groups)) < 4:
             continue
-        if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4}|\d{4}-\d{4}", number):
+        if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4}|\d{4} ?- ?\d{4}", number):
             continue  # a date, or a range of years or of times
+        if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2} \d{1,2}|\d{1,2}\.\d{1,2}\.(?:\d{2}|\d{4})", number):
+            continue  # a date with its hour after it (a sheet's "2026-11-24 14:30"), or 24.11.2026
         found.append((start, end))
     return found
 

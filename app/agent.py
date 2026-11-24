@@ -341,9 +341,13 @@ def build_voice(
     earlier: list[dict] = (),
     tables: list[Table] = (),
     caller: str | None = None,
+    line_agent: AgentSettings | None = None,
 ) -> OpenRouterVoiceService:
     """`earlier` is the caller's number's earlier calls (CallStore.earlier_calls); `tables`
-    the owner's spreadsheets, looked up for `caller` (the other person's number)."""
+    the owner's spreadsheets, looked up for `caller` (the other person's number).
+    `line_agent`: for a call list's call, the owner's own settings, which the lines said the
+    same way on every call (the hold line, goodbyes) are said and kept by; the person's
+    details in the list's instructions would otherwise make each call record its own."""
     today = date.today()
     lookup = build_lookup(cfg, agent, today, meter, tables, caller)
     return OpenRouterVoiceService(
@@ -358,13 +362,14 @@ def build_voice(
             earlier=earlier,
         ),
         reminder=accent_reminder(agent),
-        line_instructions=line_instruction(agent),
+        line_instructions=line_instruction(line_agent or agent),
         lookup=lookup,
         script=build_script(cfg, agent, meter),
         script_reminder=accent_kept(agent),
         context=context,
         # Next to the database: each machine records its own.
         recordings=Recordings(cfg.db_path.parent / "recordings"),
+        keep_greeting=line_agent is None or agent.greeting == line_agent.greeting,
         warm_up=True,
         meter=meter,
     )
@@ -441,6 +446,7 @@ async def run_call(
     sample_rates: tuple[int, int],
     barge_in: bool,
     transfer: Callable[[str], Awaitable[None]] | None = None,
+    line_agent: AgentSettings | None = None,
 ) -> None:
     """Run one call from connection to hang-up, logging it as it goes.
 
@@ -458,6 +464,9 @@ async def run_call(
     # Where each transcript line falls in the call's audio (its recording).
     clock = CallClock()
     calls.keep_time(call_id, clock)
+    # Each turn of the caller's written down, with when they began it, until its words go
+    # into the transcript (they can come as one line with the next turn's).
+    caller_words: deque[tuple[str, float]] = deque()
     try:
         context = LLMContext()
         # Everything this call asks OpenRouter for is counted toward it.
@@ -469,7 +478,14 @@ async def run_call(
         )
         tables = await asyncio.to_thread(tables_for, calls.store)
         voice = build_voice(
-            cfg, agent, context, meter, earlier_calls_for(calls.store, call_id), tables, caller_for(calls.store, call_id)
+            cfg,
+            agent,
+            context,
+            meter,
+            earlier_calls_for(calls.store, call_id),
+            tables,
+            caller_for(calls.store, call_id),
+            line_agent,
         )
         voice_activity, end_of_turn = await asyncio.to_thread(turn_detectors)
         aggregators = LLMContextAggregatorPair(
@@ -519,9 +535,6 @@ async def run_call(
         words_pending = False
         # Each note with when it happened: (text, time.time()).
         notes_waiting: list[tuple[str, float]] = []
-        # Each turn of the caller's written down, with when they began it, until its
-        # words go into the transcript (they can come as one line with the next turn's).
-        caller_words: deque[tuple[str, float]] = deque()
 
         def add_waiting_notes():
             for note, when in notes_waiting:
@@ -697,6 +710,10 @@ async def run_call(
         calls.unregister_worker(call_id)
         if not error and not connected:
             error = "The call never connected."
+        # Words written down as the caller hung up, too late for the conversation to take
+        # them ("…0412 345 678, bye"): they go in the transcript all the same.
+        for words, began in caller_words:
+            calls.add_message(call_id, "user", words, said_at=began)
         calls.finish(call_id, error)
         calls.stop_keeping_time(call_id)  # what is noted from here on was not said on the call
         # What the call was about, for the dashboard. Written now so that it

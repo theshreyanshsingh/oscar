@@ -42,6 +42,10 @@ def main() -> None:
         # (scripts/autostart.py).
         access_log=False,
         timeout_graceful_shutdown=3,
+        # Who connected is the address that connected (or the visitor Cloudflare names, app/signin.py):
+        # uvicorn would otherwise believe X-Forwarded-For from this machine, which a visitor
+        # can write themselves through a proxy here, to dodge the wrong-password wait.
+        proxy_headers=False,
     )
 
 

@@ -684,3 +684,42 @@ async def test_two_callers_at_once_cannot_both_take_the_last_line(tmp_path):
     streamed = [answer for answer in answers if "<Stream" in answer.text]
     assert len(streamed) == 1  # the other two were told the lines are busy
     app.state.store.close()
+
+
+@pytest.mark.parametrize("status, placed_maybe", [(503, False), (500, True), (502, True), (504, True)])
+def test_a_twilio_server_error_is_not_the_persons_doing(cfg, monkeypatch, status, placed_maybe):
+    import asyncio
+
+    from app.calls import CallManager
+    from app.events import EventBus
+
+    error = TwilioRestException(status=status, uri="/Calls", msg="Twilio is having trouble.")
+    monkeypatch.setattr(phone, "_twilio_client", lambda cfg: FakeTwilioClient(FakeTwilioCalls(error=error)))
+    store = Store(cfg.db_path)
+    calls = CallManager(store, EventBus())
+
+    async def place():
+        return await phone.place_outbound_call(cfg, calls, "+14155550123")
+
+    with pytest.raises(phone.PhoneCallError) as raised:
+        asyncio.run(place())
+    if placed_maybe:
+        # It may have gone through: the call stays open for Twilio's updates to settle.
+        assert raised.value.call_id and store.get_call(raised.value.call_id)["status"] == "connecting"
+    else:
+        # Twilio could not take it now: the list tries the person again later.
+        assert raised.value.try_later and not raised.value.call_id
+    store.close()
+
+
+def test_twilios_webhooks_read_only_a_small_form(client, cfg):
+    call = _put_through_call(cfg)
+    path = f"/twilio/put-through?call_id={call['id']}"
+    form = {"CallSid": INBOUND["CallSid"], "DialCallStatus": "completed"}
+    signature = RequestValidator(TWILIO_AUTH_TOKEN).compute_signature(PUBLIC_URL + path, form)
+    # A body of files, even signed for its fields, is refused before it is read.
+    files = client.post(path, data=form, files={"x": ("x.bin", b"0" * 1000)}, headers={"X-Twilio-Signature": signature})
+    assert files.status_code == 403
+    huge = client.post(path, data={**form, "Padding": "x" * (phone.TWILIO_FORM_MOST_BYTES + 1)}, headers={"X-Twilio-Signature": signature})
+    assert huge.status_code == 403
+    assert signed_post(client, path, form).status_code == 200

@@ -27,6 +27,11 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+try:  # in both of Oscar's environments; without it, numbers are matched as written
+    import phonenumbers
+except ImportError:  # pragma: no cover
+    phonenumbers = None
+
 # What one sheet may hold, and how many sheets an agent may have.
 TABLE_ROWS_MOST = 10_000
 TABLE_COLUMNS_MOST = 50
@@ -60,7 +65,6 @@ _COMMON = frozenset(
     know want need get got give any some much many there here just also not no yes if then than
     so too very one ones do don't is it's i'm im let us me there's thats that's""".split()
 )
-_WORD = re.compile(r"[^\W_]+", flags=re.UNICODE)
 
 
 class TableError(ValueError):
@@ -80,7 +84,7 @@ class Table:
     # Filled in on first use (index_of): each row's words, and how many rows have each word.
     _words: list[frozenset[str]] = field(default_factory=list, repr=False, compare=False)
     _rows_with: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
-    _digits: list[list[str]] = field(default_factory=list, repr=False, compare=False)
+    _digits: list[set[str]] = field(default_factory=list, repr=False, compare=False)
 
 
 def tables_from(records: list[dict]) -> list[Table]:
@@ -108,8 +112,8 @@ def _clean(cell: str) -> str:
 def read_table(text: str) -> tuple[list[str], list[list[str]]]:
     """(headings, rows) of a sheet given as CSV text (an Excel sheet comes as that too).
 
-    The headings are the first of the first ten rows filled in about as fully as
-    the fullest of them, so a title above them is passed over. A heading left empty becomes
+    The headings are the first row, passing over a title or two above them: a row
+    that fills a cell or two over a fuller row (or under half as many as the row under it). A heading left empty becomes
     "Column N", and one used twice gets a number. Raises TableError.
     """
     if len(text) > TABLE_TEXT_MOST:
@@ -129,8 +133,17 @@ def read_table(text: str) -> tuple[list[str], list[list[str]]]:
     if not rows:
         raise TableError("The sheet has no rows.")
     filled = [sum(1 for cell in row if cell) for row in rows[:HEADING_ROWS_LOOKED_AT]]
-    # A title ("Price list, November") fills a cell or two; the headings fill most.
-    at = next((i for i, n in enumerate(filled) if 4 * n >= 3 * max(filled)), 0)
+    # A title ("Price list, November") fills a cell where the row under it fills several:
+    # it is passed over. The headings are the first row that is not one (a row of data
+    # never is, however full the rows under it).
+    def title(n: int, under: int) -> bool:
+        # One cell, or two (a CSV title with a comma in it) over a row of four or more, or
+        # under half the row below.
+        return n < under and (n == 1 or (n == 2 and under >= 4) or 2 * n < under)
+
+    at = 0
+    while at + 1 < len(filled) and title(filled[at], filled[at + 1]):
+        at += 1
     headings, body = rows[at], rows[at + 1 :]
     width = max([len(headings)] + [len(row) for row in body])
     named: list[str] = []
@@ -153,11 +166,21 @@ def read_table(text: str) -> tuple[list[str], list[list[str]]]:
 # Finding rows
 
 
+# Accents on Latin letters (é, ü): taken off, so "creme" finds "crème". Other scripts' vowel
+# signs and marks are part of their words ("राहुल" is one word), and are kept.
+_ACCENTS = re.compile("[\u0300-\u036f]")
+
+
+def _word_characters(text: str) -> str:
+    return "".join(c if c.isalnum() or unicodedata.category(c).startswith("M") else " " for c in text)
+
+
 def words_of(text: str) -> list[str]:
-    """The words in `text`, as compared: lower case, without accents, a plural's "s" off."""
-    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode() or text
+    """The words in `text`, in any script, as compared: lower case, Latin accents off, a
+    plural's "s" off."""
+    plain = _ACCENTS.sub("", unicodedata.normalize("NFKD", text)).casefold()
     found = []
-    for word in _WORD.findall(plain.casefold()):
+    for word in _word_characters(plain).split():
         if len(word) > 3 and word.endswith("s") and not word.endswith("ss") and not word.isdigit():
             word = word[:-1]
         found.append(word)
@@ -168,6 +191,41 @@ def digits_of(text: str) -> str:
     return re.sub(r"\D", "", text)
 
 
+# A phone number written in a cell: digits, with spaces, dashes, dots or brackets between.
+_NUMBER_IN_CELL = re.compile(r"\+?\(?\d[\d\s().-]{5,}\d")
+
+
+def numbers_in(cell: str) -> set[str]:
+    """The digits of each number written in a cell ("0412 345 678 / 02 9555 0147" has two)."""
+    found = {digits_of(match) for match in _NUMBER_IN_CELL.findall(cell)}
+    whole = digits_of(cell)
+    if whole:
+        found.add(whole)
+    return {number for number in found if len(number) >= OWN_NUMBER_DIGITS}
+
+
+def number_forms(caller: str) -> set[str]:
+    """The ways a sheet may write the caller's number, as digits: whole with its country code
+    (61412345678), after an international prefix (0061…, 011…), or as it is dialled at
+    home, with or without the trunk 0 (0412345678, 412345678; 4155550123 in North America).
+    Every one is the whole number: two numbers that only end alike never match."""
+    digits = digits_of(caller or "")
+    if len(digits) < OWN_NUMBER_DIGITS:
+        return set()
+    forms = {digits, "00" + digits, "011" + digits}
+    if phonenumbers is not None:
+        try:
+            parsed = phonenumbers.parse("+" + digits, None)
+        except phonenumbers.NumberParseException:
+            parsed = None
+        if parsed is not None and parsed.country_code:
+            national = str(parsed.national_number)
+            if parsed.italian_leading_zero:
+                national = "0" * (parsed.number_of_leading_zeros or 1) + national
+            forms |= {national, "0" + national}
+    return {form for form in forms if len(form) >= OWN_NUMBER_DIGITS}
+
+
 def index_of(table: Table) -> Table:
     """The table with its rows' words worked out (once)."""
     if len(table._words) != len(table.rows):
@@ -176,7 +234,7 @@ def index_of(table: Table) -> Table:
         for words in table._words:
             for word in words:
                 table._rows_with[word] = table._rows_with.get(word, 0) + 1
-        table._digits = [[digits_of(cell) for cell in row] for row in table.rows]
+        table._digits = [set().union(*(numbers_in(cell) for cell in row)) for row in table.rows]
     return table
 
 
@@ -220,12 +278,23 @@ def matching_rows(table: Table, words: str, *, most: int = MATCHED_ROWS_MOST) ->
 
 
 def own_rows(table: Table, caller: str) -> list[int]:
-    """The rows with a cell holding the caller's number (its last eight digits)."""
+    """The rows with a cell holding the caller's whole number, however it is written there
+    (number_forms). A number that only ends the same way is someone else's."""
     index_of(table)
-    tail = digits_of(caller)[-OWN_NUMBER_DIGITS:]
-    if len(tail) < OWN_NUMBER_DIGITS:
+    forms = number_forms(caller)
+    if not forms:
         return []
-    return [i for i, cells in enumerate(table._digits) if any(len(c) >= OWN_NUMBER_DIGITS and c.endswith(tail) for c in cells)]
+    digits = digits_of(caller)
+    # A caller given the local way (0400 000 042: calls and WhatsApp give the whole number,
+    # but the dashboard's tries may not) is that number after a country code of 1-3 digits.
+    national = digits[1:] if digits.startswith("0") and not digits.startswith("00") else ""
+
+    def theirs(numbers: set[str]) -> bool:
+        if numbers & forms:
+            return True
+        return bool(national) and any(n.endswith(national) and 1 <= len(n) - len(national) <= 3 for n in numbers)
+
+    return [i for i, numbers in enumerate(table._digits) if theirs(numbers)]
 
 
 def rows_text(headings: list[str], rows: list[list[str]]) -> str:
@@ -311,7 +380,10 @@ def look_up(tables: list[Table], words: str, caller: str | None) -> list[Found]:
 
 
 def sample(table: Table) -> str:
-    """A row or two of the sheet, as "heading: value; ..." (cut short)."""
+    """A row or two of the sheet, as "heading: value; ..." (cut short). None of a private
+    sheet's: its rows are about people, and only each one's own may be told."""
+    if table.private:
+        return "  (Private: about people. No example rows.)"
     lines = []
     for row in table.rows[:SAMPLE_ROWS]:
         line = "; ".join(f"{h}: {v}" for h, v in zip(table.headings, row) if v)

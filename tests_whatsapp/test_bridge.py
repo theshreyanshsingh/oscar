@@ -1581,3 +1581,27 @@ async def test_the_model_is_offered_the_lookup_and_its_rows_go_back_to_it():
     assert reply == "ORD-2 is being packed." and looked_for == ["ORD-2"]
     assert [tool["function"]["name"] for tool in sent[0]["tools"]] == ["look_up_spreadsheets"]
     assert sent[1]["messages"][-1] == {"role": "tool", "tool_call_id": "t1", "content": "Order | Status\nORD-2 | Packing"}
+
+
+def _said(chat_id: str, *, from_me: bool, is_group: bool = False, phone: str = ""):
+    from app.whatsapp.chat import IncomingMessage
+
+    return IncomingMessage(
+        chat_id=chat_id, is_group=is_group, message_id="m1", sender_ids=frozenset({"x"}),
+        sender_name="Sam", timestamp=0.0, text="@oscar where is my order?", from_me=from_me, sender_phone=phone,
+    )
+
+
+def test_whose_private_rows_oscar_may_tell_in_a_reply():
+    from app.whatsapp.chat import whose_rows
+
+    mine = frozenset({"61400000001", "99887766"})  # the owner's number and private id
+    # Someone writing: their own rows, by their number (or none without one).
+    assert whose_rows(_said("61412345678@s.whatsapp.net", from_me=False, phone="61412345678"), mine) == "+61412345678"
+    assert whose_rows(_said("1234@lid", from_me=False), mine) == ""
+    # The owner on their own phone: every row only in their chat with themself...
+    assert whose_rows(_said("61400000001@s.whatsapp.net", from_me=True), mine) is None
+    # ...the other person's in a chat with one person, and none in a group.
+    assert whose_rows(_said("61412345678@s.whatsapp.net", from_me=True), mine) == "+61412345678"
+    assert whose_rows(_said("1203630@g.us", from_me=True, is_group=True), mine) == ""
+    assert whose_rows(_said("5555@lid", from_me=True), mine) == ""

@@ -906,6 +906,29 @@ class Store:
         ).fetchone()
         return int(row["open"])
 
+    def on_a_call(self, number: str) -> bool:
+        """Whether this number is on a call with Oscar now (calling in, or being called)."""
+        if not number:
+            return False
+        placeholders = ", ".join("?" for _ in OPEN_STATUSES)
+        with self._lock:
+            row = self._db.execute(
+                f"SELECT 1 FROM calls WHERE status IN ({placeholders}) AND (to_number = ? OR from_number = ?) "
+                "AND kind != 'browser' LIMIT 1",
+                (*OPEN_STATUSES, number, number),
+            ).fetchone()
+        return row is not None
+
+    def open_phone_calls(self) -> list[dict]:
+        """Phone calls connecting, ringing or going on now, by what the database says."""
+        placeholders = ", ".join("?" for _ in OPEN_STATUSES)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT id, twilio_sid FROM calls WHERE status IN ({placeholders}) AND kind != 'browser'",
+                OPEN_STATUSES,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def count_open_calls(self) -> int:
         """Calls connecting, ringing or going on now."""
         placeholders = ", ".join("?" for _ in OPEN_STATUSES)

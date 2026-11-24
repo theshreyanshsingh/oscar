@@ -338,8 +338,10 @@ class Recordings:
             partial = path.with_suffix(".partial")
             partial.write_bytes(audio)
             partial.replace(path)  # never a half-written recording
+            # Only this line's older recordings ("transfer-…", never "transfer-failed-…").
+            own = re.compile(re.escape(line) + r"-[0-9a-f]{24}\.pcm")
             for older in self.folder.glob(f"{line}-*.pcm"):
-                if older != path:
+                if older != path and own.fullmatch(older.name):
                     older.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning(f"Could not keep the recording of the {line}: {exc}")
@@ -414,6 +416,7 @@ class OpenRouterVoiceService(AIService):
         model: str = VOICE_MODEL,
         client: httpx.AsyncClient | None = None,
         recordings: Recordings | None = None,
+        keep_greeting: bool = True,
         warm_up: bool = False,
         meter: CostMeter | None = None,
         **kwargs,
@@ -434,6 +437,8 @@ class OpenRouterVoiceService(AIService):
         self._lookup = lookup
         # The "one moment" line as (audio at the model's rate, its words), once recorded.
         self._hold_line: tuple[bytes, str] | None = None
+        self._looking_up = False  # a lookup (search, fact sheet, spreadsheets) is under way
+        self._shutting_down = False  # the call is ending: words written down now only go in its transcript
         self._hold_line_task: asyncio.Task | None = None
         # The steps Oscar works through on the call, when the owner wrote a script.
         self._script = script
@@ -467,6 +472,9 @@ class OpenRouterVoiceService(AIService):
         self._transcript_client = client or new_client(timeout=REQUEST_TIMEOUT)
         # The greeting and the "one moment" line, kept between calls.
         self._recordings = recordings
+        # A call list's greeting is one person's ("Hi Sam…"): kept, it would replace the
+        # owner's own greeting recording, and no other call would say it.
+        self._keep_greeting = keep_greeting
         self._capture: _Capture | None = None
         # Opens the connections the first turn will use as the call starts.
         self._warm_up = warm_up
@@ -560,6 +568,13 @@ class OpenRouterVoiceService(AIService):
             if task and not task.done():
                 await self.cancel_task(task)
         self._hold_line_task = self._place_task = None
+        # What the caller said just before hanging up ("…0412 345 678, bye") is still being
+        # written down: it is waited for (briefly), so it reaches the transcript.
+        # Only for the transcript (on_caller_words): passed into the conversation now, they
+        # would start a reply to someone who has gone.
+        self._shutting_down = True
+        if self._transcript_tasks:
+            await asyncio.wait(set(self._transcript_tasks), timeout=TRANSCRIPT_WAIT_SECONDS)
         for task in list(self._transcript_tasks):
             await self.cancel_task(task)
 
@@ -581,7 +596,8 @@ class OpenRouterVoiceService(AIService):
         elif isinstance(frame, BotStoppedSpeakingFrame):
             if self._speaking_since is not None:  # said to the end, not cut off
                 self._speaking_since = None
-                self._unanswered.clear()
+                if not self._looking_up:  # the hold line is not the answer
+                    self._unanswered.clear()
             if self._closing and self._closing_started:
                 # Once: a reply cut short for the closing line stops before it starts.
                 self._closing_started = self._closing_audio_sent = False
@@ -592,7 +608,7 @@ class OpenRouterVoiceService(AIService):
         elif isinstance(frame, InterruptionFrame):
             # The caller spoke over Oscar (or over a reply still on its way).
             since, self._speaking_since = self._speaking_since, None
-            if since is not None and time.monotonic() - since >= ANSWERED_AFTER_SECONDS:
+            if since is not None and time.monotonic() - since >= ANSWERED_AFTER_SECONDS and not self._looking_up:
                 self._unanswered.clear()
             await self._abort_response()
         elif isinstance(frame, GreetingFrame):
@@ -681,7 +697,7 @@ class OpenRouterVoiceService(AIService):
             # Cut off (the caller spoke over it, or hung up), it is not kept,
             # and no later answer is collected.
             capture, self._capture = self._capture, None
-        if capture and capture.complete and capture.audio and same_words(capture.words, greeting):
+        if self._keep_greeting and capture and capture.complete and capture.audio and same_words(capture.words, greeting):
             self._keep("greeting", bytes(capture.audio), self._line_instructions, greeting)
 
     def _start_closing(self, kind: str) -> None:
@@ -689,6 +705,11 @@ class OpenRouterVoiceService(AIService):
         self._closing_audio_sent = self._closing_started = False
 
     async def _speak_farewell(self, frame: FarewellFrame) -> None:
+        if frame.kind == "voicemail":
+            # The reply to the machine's greeting may still be queued to play: it would land on
+            # the recording before the message ("...this is Oscar calling fr—").
+            await self._abort_response()
+            await self.push_frame(InterruptionFrame())
         self._start_closing(frame.kind)
         await self._abort_response()
         self._response_task = self.create_task(self._say_farewell(frame.text, frame.kind, keep=frame.keep))
@@ -719,6 +740,10 @@ class OpenRouterVoiceService(AIService):
         self._start_closing("transfer")
         if not said_so:
             await self._say_farewell(TRANSFER_LINE, "transfer")
+            if not self._closing_audio_sent:
+                # The line could not be said (the model failed): put them through all the same,
+                # rather than leave them in silence that nothing they say can end.
+                await self._call_event_handler("on_farewell_said", "transfer")
             return
         self._closing_audio_sent = True
         if self._speaking_since is not None:
@@ -945,14 +970,14 @@ class OpenRouterVoiceService(AIService):
             *earlier,
             {"role": "user", "content": asked.question},
         ]
-        await self.push_frame(SearchingFrame(active=True), FrameDirection.UPSTREAM)
+        await self._looking(True)
         try:
             answer, _ = await asyncio.gather(
                 self._read_the_facts(asked, earlier), self._hold_the_line(so_far)
             )
             await self._say_line([*so_far, {"role": "assistant", "content": HOLD_LINE}], answer)
         finally:
-            await self.push_frame(SearchingFrame(active=False), FrameDirection.UPSTREAM)
+            await self._looking(False)
 
     async def _answer_from_the_tables(self, history: list[dict], asked: TablesRequest) -> None:
         """Say what the owner's spreadsheets answer, as for the fact sheet: the rows are found
@@ -963,12 +988,12 @@ class OpenRouterVoiceService(AIService):
             *earlier,
             {"role": "user", "content": asked.question},
         ]
-        await self.push_frame(SearchingFrame(active=True), FrameDirection.UPSTREAM)
+        await self._looking(True)
         try:
             answer, _ = await asyncio.gather(self._read_the_tables(asked, earlier), self._hold_the_line(so_far))
             await self._say_line([*so_far, {"role": "assistant", "content": HOLD_LINE}], answer)
         finally:
-            await self.push_frame(SearchingFrame(active=False), FrameDirection.UPSTREAM)
+            await self._looking(False)
 
     async def _read_the_tables(self, asked: TablesRequest, earlier: list[dict]) -> str:
         """What to tell the caller: the spreadsheets' answer, or that it could not be checked."""
@@ -1006,7 +1031,7 @@ class OpenRouterVoiceService(AIService):
             await self._say_line(asked, STILL_LOOKING_LINE)
             said.append(STILL_LOOKING_LINE)
 
-        await self.push_frame(SearchingFrame(active=True), FrameDirection.UPSTREAM)
+        await self._looking(True)
         try:
             # The caller hears the "one moment" line while the search runs.
             answer, _ = await asyncio.gather(
@@ -1017,7 +1042,7 @@ class OpenRouterVoiceService(AIService):
             # and the finished answer to say.
             await self._say_line([*asked, {"role": "assistant", "content": " ".join(said)}], answer)
         finally:
-            await self.push_frame(SearchingFrame(active=False), FrameDirection.UPSTREAM)
+            await self._looking(False)
 
     async def _read_the_facts(self, asked: FactsRequest, earlier: list[dict]) -> str:
         """What to tell the caller: the fact sheet's answer, or that it could not be checked."""
@@ -1032,6 +1057,13 @@ class OpenRouterVoiceService(AIService):
         if problem:
             await self._call_event_handler("on_facts_failed", problem)
         return answer
+
+    async def _looking(self, active: bool) -> None:
+        """A lookup has begun or ended. While it runs, the hold line playing to its end does
+        not answer the caller's turn: their question is kept for a reply that starts over (a
+        "hello?" in the wait, on a phone, where the caller can talk over Oscar)."""
+        self._looking_up = active
+        await self.push_frame(SearchingFrame(active=active), FrameDirection.UPSTREAM)
 
     async def _hold_the_line(self, asked: list[dict]) -> None:
         if self._hold_line is None:
@@ -1204,7 +1236,8 @@ class OpenRouterVoiceService(AIService):
     async def _decision(self, deciding: asyncio.Task) -> Decision:
         """The lookup decision, waited for briefly. None means: go on without a lookup."""
         patience = SEARCH_DECISION_PATIENCE_SECONDS
-        if getattr(self._lookup, "has_facts", False):
+        if getattr(self._lookup, "has_facts", False) or getattr(self._lookup, "has_tables", False):
+            # The model's own reply knows no prices or stock: it would say it cannot help.
             patience = FACTS_DECISION_PATIENCE_SECONDS
         try:
             return await asyncio.wait_for(asyncio.shield(deciding), patience)
@@ -1213,7 +1246,7 @@ class OpenRouterVoiceService(AIService):
             return None
 
     async def _pieces(
-        self, response: httpx.Response, receipt: dict | None = None
+        self, response: httpx.Response, receipt: dict | None = None, ended: dict | None = None
     ) -> AsyncIterator[tuple[bytes, str]]:
         """The (speech, its text) pieces of a streamed answer, as they arrive.
 
@@ -1226,6 +1259,8 @@ class OpenRouterVoiceService(AIService):
                 continue  # keep-alive comments
             data = line[5:].strip()
             if data == "[DONE]":
+                if ended is not None:
+                    ended["done"] = True
                 break
             try:
                 chunk = json.loads(data)
@@ -1240,6 +1275,8 @@ class OpenRouterVoiceService(AIService):
             if chunk.get("error"):
                 raise _AnswerFailed(error_detail(chunk) or "the model's provider failed.")
             for choice in chunk.get("choices") or []:
+                if choice.get("finish_reason") and ended is not None:
+                    ended["done"] = True  # the model finished it (not a stream cut off)
                 delta = (choice.get("delta") or {}).get("audio") or {}
                 speech, text = delta.get("data"), delta.get("transcript")
                 try:
@@ -1266,8 +1303,9 @@ class OpenRouterVoiceService(AIService):
         if capture:
             capture.audio.clear()
             capture.words, capture.complete = "", False
+        ended: dict = {}
         try:
-            async for speech, text in self._pieces(response, receipt):
+            async for speech, text in self._pieces(response, receipt, ended):
                 if capture:
                     capture.audio += speech
                     capture.words += text
@@ -1303,8 +1341,14 @@ class OpenRouterVoiceService(AIService):
                 raise _NotAnswered(reason) from None
             await self.push_error(f"Oscar could not answer: {reason}")
         else:
+            if not sent_seconds:
+                # A stream with no speech in it (only "[DONE]", or only words): nothing was
+                # said, so it is asked for again like any other failed answer.
+                raise _NotAnswered("the model sent no speech.")
             if capture:
-                capture.complete = True
+                # Kept to replay on later calls only when the stream ended as finished: one
+                # cut off part-way would be replayed cut off on every call.
+                capture.complete = bool(ended.get("done"))
         # All the audio has been sent, so the rest of the text follows it.
         for text in words:
             await self._write(text)
@@ -1374,7 +1418,8 @@ class OpenRouterVoiceService(AIService):
         if not isinstance(text, str) or not text.strip():
             return None
         await self._call_event_handler("on_caller_words", text.strip(), began)
-        await self.push_frame(
-            TranscriptionFrame(text.strip(), "", time_now_iso8601()), FrameDirection.UPSTREAM
-        )
+        if not self._shutting_down:
+            await self.push_frame(
+                TranscriptionFrame(text.strip(), "", time_now_iso8601()), FrameDirection.UPSTREAM
+            )
         return text.strip()

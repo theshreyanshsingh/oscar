@@ -79,6 +79,22 @@ def sender_number(message: "IncomingMessage") -> str:
     return f"+{message.sender_phone}" if message.sender_phone else ""
 
 
+def whose_rows(message: "IncomingMessage", my_ids: frozenset[str]) -> str | None:
+    """Whose rows of a private spreadsheet Oscar may tell in its reply (app/tables.py): the
+    sender's, by their number. The owner writing on their own phone (Oscar on the owner's
+    number) gets every row (None) only in their chat with themself; in a chat with one
+    person, that person's rows; in a group, none (everyone in it would see them)."""
+    if not message.from_me:
+        return sender_number(message)
+    if message.is_group:
+        return ""
+    user = user_part(message.chat_id)
+    if user in my_ids:
+        return None
+    server = message.chat_id.split("@", 1)[-1]
+    return f"+{user}" if server == "s.whatsapp.net" and user.isdigit() else ""
+
+
 def user_part(jid: str) -> str:
     """'123:4@s.whatsapp.net' -> '123' (drops the server and device)."""
     return jid.split("@", 1)[0].split(":", 1)[0]

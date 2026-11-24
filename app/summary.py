@@ -247,9 +247,12 @@ def only_what_was_said(summary: CallSummary, messages: list[dict]) -> CallSummar
     Raises SummaryFailed when its sentences name a number that was never said.
     """
     said = " ".join(m["text"] for m in messages if m["role"] != "note")
+    # A number may be in a note the model was shown ("Put the caller through to +61…"):
+    # the summary can name it. A caller's name and number to call back must be said.
+    shown = " ".join(m["text"] for m in messages)
     # The transcript may have a number in digits or in words, and a caller may
     # give it over more than one turn.
-    digits_said = (digits_in(said), digits_in(said, spelt_out=True))
+    digits_said = (digits_in(shown), digits_in(shown, spelt_out=True))
 
     def was_said(number: str) -> bool:
         digits = digits_in(number)
@@ -282,23 +285,25 @@ def only_what_was_said(summary: CallSummary, messages: list[dict]) -> CallSummar
     )
 
 
-def numbers_given(messages: list[dict]) -> set[str]:
-    """The digits of every number someone said on the call, whole.
+def numbers_given(messages: list[dict], roles: tuple[str, ...] = ("user",)) -> set[str]:
+    """The digits of every number the caller (or the person called) gave on the call, whole:
+    not one Oscar read out, nor one from the person they were put through to.
 
     A number is one run of digits (in digits or in words), or runs said one after
-    another by the same speaker: with nothing but pauses and punctuation between
-    them in a turn ("0412, 345, 678"), or over their turns ("zero four nine one" ...
-    "five seven zero"). Words between runs in a turn ("or my office on") end it.
+    another: with nothing but pauses and punctuation between them in a turn
+    ("0412, 345, 678"), or over turns ("zero four nine one" ... "five seven zero").
+    Words between runs end it, in a turn ("or my office on") and before a turn's first
+    run ("Or my office, 02 5550 0142" is a number of its own).
     """
     given: set[str] = set()
-    for role in {m["role"] for m in messages if m["role"] != "note"}:
+    for role in roles:
         runs: list[tuple[str, bool]] = []  # (digits, follows the run before it with no words between)
         for message in messages:
             if message["role"] != role:
                 continue
-            end = None
+            end = 0
             for match in _SAID_NUMBER.finditer(message["text"]):
-                between = message["text"][end : match.start()] if end is not None else ""
+                between = message["text"][end : match.start()]
                 runs.append((digits_in(match.group(), spelt_out=True), not re.search(r"[^\W\d_]", between)))
                 end = match.end()
         for start in range(len(runs)):
@@ -433,7 +438,9 @@ async def _write_and_save(
     if summary.get("follow_up") and summary["follow_up"] == now.get("follow_up"):
         summary.pop("follow_up_done_at", None)  # the same to-do: ticked off, it stays ticked off
     done = calls.update(call["id"], **summary, **research)
-    if opted_out and done:
+    # Only from the summary written as the call ends: one written again later (from the
+    # dashboard, or with the part put through) must not put back a number the owner took off.
+    if opted_out and done and notify:
         note_do_not_call(calls, done)
     if notify and done and done["summary_status"] == "ready":
         await send_to_owner(calls, done, agent)

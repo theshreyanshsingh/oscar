@@ -1035,3 +1035,11 @@ def test_connections_to_openrouter_stay_open_between_turns():
     assert LIMITS.keepalive_expiry == KEEPALIVE_SECONDS >= 60
     client = new_client()
     assert client._transport._pool._keepalive_expiry == KEEPALIVE_SECONDS
+
+
+def test_dates_in_a_sheet_are_not_read_out_as_numbers():
+    from app.search import long_numbers
+
+    for text in ("Booked 2026-11-24 14:30", "on 24.11.2026", "due 11.12.26"):
+        assert long_numbers(text) == [], text
+    assert [("call 0412 345 678")[a:b] for a, b in long_numbers("call 0412 345 678")] == ["0412 345 678"]
