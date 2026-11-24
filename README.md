@@ -24,8 +24,13 @@ reading past calls.
   Call history, with the transcript playing along (each line plays the call
   from where it was said). A call put through to a person is recorded and
   written down to the end.
+- **Analytics:** how many calls, how they ended, when people call, who calls
+  most and what they called about, over 7, 30 or 90 days or a year, with a
+  workbook to download.
+- **Spreadsheets:** Excel or CSV files, or Google Sheets by their link (read
+  again every 15 minutes), for call lists and for Oscar to answer from.
 - **Dashboard:** live transcript, agent settings, call history with summaries
-  and transcripts.
+  and transcripts, as CSV or Excel.
 
 One OpenRouter key runs all of it, bar web search (on calls and in WhatsApp),
 which needs a Firecrawl key:
@@ -592,11 +597,14 @@ Twilio's pricing page).
 
 ## Call lists
 
-Under **Lists**, give Oscar an Excel workbook (.xlsx), a CSV file, or rows
-pasted in, with a column of phone numbers. Every other column is about the
+Under **Lists**, give Oscar an Excel workbook (.xlsx), a CSV file, a Google
+Sheets link, or rows pasted in, with a column of phone numbers. Every other column is about the
 person: a name, what they ordered, a date. Oscar is told each person's row on
 their call, so it can talk about it.
 
+- **Google Sheets:** **Use a Google Sheets link** takes the sheet's link (share
+  it as "Anyone with the link", Viewer). It is read once, like a workbook; a link
+  to one tab (`…#gid=…`) reads that tab.
 - **Excel:** the first sheet with rows is read; a workbook with several sheets
   shows a **Sheet** choice. Dates read as 2026-11-24, and phone numbers kept as
   numbers lose no digits. An old `.xls` (or a Numbers or OpenDocument file) is
@@ -804,9 +812,24 @@ needs no Firecrawl key.
 ## Spreadsheets Oscar answers from
 
 Under **Data** on the dashboard, give Oscar a spreadsheet: an Excel workbook
-(`.xlsx`, choosing the sheet when it has several) or a CSV, with a row for each
-thing and headings on top. A price list, your stock, orders, bookings, a menu,
-branches and their hours. Up to 10 sheets of 10,000 rows each.
+(`.xlsx`, choosing the sheet when it has several), a CSV, or a Google Sheet by
+its link, with a row for each thing and headings on top. A price list, your
+stock, orders, bookings, a menu, branches and their hours. Up to 10 sheets of
+10,000 rows each.
+
+- **Google Sheets:** **Use a Google Sheets link instead** takes the link of a
+  sheet shared as "Anyone with the link" (Viewer), or published to the web. A
+  link to one tab (`…#gid=…`) reads that tab; the **Sheet** choice reads
+  another. Oscar reads it again every 15 minutes (`app/google_sheets.py`), so
+  what it answers keeps up with the sheet; its card says when it was last read,
+  with **Read it again** and **Open in Google Sheets**. If Google cannot be
+  reached, or the sheet stops being shared, the card says why and Oscar answers
+  from the rows it read last. Only Google's own addresses are fetched.
+  **Replace file** is not offered for a linked sheet; deleting it and adding a
+  file stops the reading.
+- **Show rows** lists a sheet's rows, 25 at a time, with a search over them
+  (every word you type, anywhere in a row). **Download** saves the sheet as
+  Oscar reads it, as an Excel workbook.
 
 - **Name** it and say in a line **what it holds** ("Every product we sell, its
   colours, price and how many are in stock"). That line is how Oscar knows when
@@ -921,8 +944,55 @@ Two things to know:
   not only the pages shown) as a spreadsheet: when, type, numbers, length,
   cost, name, summary and to-do. Anything a caller said that starts like a
   spreadsheet formula is kept from running as one.
+- **Download as Excel** saves the same calls as a workbook (`app/exports.py`):
+  a **Calls** sheet (when, in your time zone; type, number, name, length, how
+  it ended, cost, summary, call-back number, to-do, who it was put through to,
+  the recording's length, and a column for each summary field) and a
+  **Transcripts** sheet, a row for each line said, with its time in the call
+  and who said it. What a caller said is always kept as words, never a formula.
 
-On a phone each call is a card, and the section links are under **Menu**.
+## Analytics
+
+**Analytics** on the dashboard shows how calls went over the last 7, 30 or 90
+days or 12 months, for all calls or only incoming, outgoing or browser ones,
+in your own time zone. It is worked out from what Oscar already keeps
+(`app/analytics.py`): nothing is sent anywhere, and no model is asked.
+
+- **The headline figures:** calls, conversations (the other side spoke, and
+  what share of calls they were), the average conversation and the time spent
+  talking, missed calls (incoming calls where no one spoke), to-dos still open,
+  and the cost. Each says how it changed on the period before.
+- **Calls, day by day** (week by week over a year), stacked by kind. Point at a
+  day, or use the arrow keys, for its calls, conversations and cost.
+- **How calls ended:** talked with Oscar, put through to a person (or no one
+  answered), a voicemail, no answer or busy, hung up before speaking, failed.
+- **When calls come in:** a week of hours, darker for more calls, with the
+  busiest hour.
+- **How long conversations lasted,** in bands from under 30 seconds to 10
+  minutes or more.
+- **What Oscar did:** web searches, spreadsheet look-ups, callers put through,
+  voicemails left, people who asked not to be called, summaries, recordings,
+  and how often Oscar was talked over.
+- **Who was on the calls:** how many numbers, how many were new, how many were
+  on more than one call, and the numbers on most calls (one opens their calls
+  in Call history).
+- **From the call summaries:** for each summary field in Agent settings (a
+  reason for calling, a budget), what callers said most, the same answer in
+  other capitals counted as one.
+- **Call lists** made or calling in the period: how many people, answered,
+  voicemail, no answer, failed and still to call.
+
+Every chart has **Show as a table**. **Download as Excel** saves it all as a
+workbook: an **Overview** of the figures beside the period before, the calls
+day by day, then every call of the period and what was said on it.
+
+On a phone each call is a compact card (what it was, the number, when, the
+summary, its length and cost, and **Transcript**), and the section links are
+under **Menu**. Everything you can tap is at least 44 pixels tall on a touch
+screen, text boxes never make an iPhone zoom in, and Analytics' tables scroll
+sideways inside their card, fading at the edge that has more. On a computer
+too narrow for the whole top bar, the status chips show their name and
+coloured dot, with the rest on hover.
 
 ## Call summaries
 
@@ -1309,6 +1379,9 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/sheets.py` | Excel workbooks for call lists, read into the same rows as a CSV |
 | `app/tables.py` | Spreadsheets Oscar answers from: reading them, finding the rows for a question, private rows |
 | `app/recording.py` | Call recordings: taken during the call, encoded when it ends, kept 90 days |
+| `app/analytics.py` | Analytics: how calls went over a period, worked out from the calls and their transcripts |
+| `app/exports.py` | Excel workbooks: Call history with transcripts, the Analytics report, a spreadsheet |
+| `app/google_sheets.py` | Google Sheets read from their link, and read again every 15 minutes |
 | `app/put_through.py` | The part of a call put through to a person: Twilio's recording added to the call's, and written down |
 | `app/backup.py` | The daily copy of the database |
 | `app/store.py` | SQLite storage and agent settings |

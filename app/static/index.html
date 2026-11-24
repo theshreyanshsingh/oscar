@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=27" />
+    <link rel="stylesheet" href="/static/style.css?v=37" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -39,6 +39,7 @@
           <a href="#data">Data</a>
           <a href="#whatsapp">WhatsApp</a>
           <a href="#history">History</a>
+          <a href="#analytics">Analytics</a>
         </div>
         <div class="status-row" aria-live="polite">
           <span class="pill" id="agent-pill">Agent: checking…</span>
@@ -349,9 +350,30 @@
                   <label class="field-label" for="list-sheet">Sheet</label>
                   <select id="list-sheet"></select>
                 </div>
-                <button type="button" class="link list-paste-toggle" id="list-paste-toggle" aria-expanded="false" aria-controls="list-paste">
-                  Paste the rows instead
-                </button>
+                <div class="list-alternatives">
+                  <button type="button" class="link list-paste-toggle" id="list-link-toggle" aria-expanded="false" aria-controls="list-link-box">
+                    Use a Google Sheets link
+                  </button>
+                  <button type="button" class="link list-paste-toggle" id="list-paste-toggle" aria-expanded="false" aria-controls="list-paste">
+                    Paste the rows instead
+                  </button>
+                </div>
+                <div class="sheet-link" id="list-link-box" hidden>
+                  <label class="visually-hidden" for="list-link">Google Sheets link</label>
+                  <div class="sheet-link-row">
+                    <input
+                      id="list-link"
+                      type="url"
+                      inputmode="url"
+                      maxlength="500"
+                      spellcheck="false"
+                      placeholder="https://docs.google.com/spreadsheets/d/…"
+                      aria-describedby="list-link-hint"
+                    />
+                    <button type="button" class="secondary" id="list-link-read">Read it</button>
+                  </div>
+                  <p class="hint" id="list-link-hint">Share the sheet as "Anyone with the link" (Viewer), then paste its link.</p>
+                </div>
                 <textarea
                   id="list-paste"
                   rows="5"
@@ -670,6 +692,28 @@
                     <span class="dropzone-note" id="table-drop-note">or drop one here: a row for each thing, with headings on top</span>
                   </span>
                 </label>
+                <button type="button" class="link list-paste-toggle" id="table-link-toggle" aria-expanded="false" aria-controls="table-link-box">
+                  Use a Google Sheets link instead
+                </button>
+                <div class="sheet-link" id="table-link-box" hidden>
+                  <label class="visually-hidden" for="table-link">Google Sheets link</label>
+                  <div class="sheet-link-row">
+                    <input
+                      id="table-link"
+                      type="url"
+                      inputmode="url"
+                      maxlength="500"
+                      spellcheck="false"
+                      placeholder="https://docs.google.com/spreadsheets/d/…"
+                      aria-describedby="table-link-hint"
+                    />
+                    <button type="button" class="secondary" id="table-link-read">Read it</button>
+                  </div>
+                  <p class="hint" id="table-link-hint">
+                    Share the sheet as "Anyone with the link" (Viewer). Oscar reads it again every
+                    15 minutes, so its answers keep up with the sheet.
+                  </p>
+                </div>
                 <div class="list-sheet" id="table-sheet-row" hidden>
                   <label class="field-label" for="table-sheet">Sheet</label>
                   <select id="table-sheet"></select>
@@ -982,6 +1026,7 @@
           <div class="history-foot">
             <p class="hint" id="history-count" aria-live="polite"></p>
             <div class="history-foot-actions">
+              <a class="button-link" id="history-export-xlsx" href="/api/calls.xlsx" download>Download as Excel</a>
               <a class="button-link" id="history-export" href="/api/calls.csv" download>Download as CSV</a>
               <button type="button" class="secondary" id="history-older" hidden>Show older calls</button>
             </div>
@@ -1021,6 +1066,122 @@
             <p class="hint" id="notify-status" aria-live="polite"></p>
             <p class="error" id="notify-error" role="alert" hidden></p>
           </form>
+        </div>
+      </section>
+
+      <section class="section" id="analytics" aria-labelledby="analytics-heading">
+        <div class="title-grid reveal">
+          <div>
+            <p class="eyebrow">Analytics</p>
+            <h2 class="title" id="analytics-heading">How calls<br />are going</h2>
+          </div>
+          <p class="title-side">
+            How many calls Oscar took and made, how they ended, when people call and who calls
+            most. Worked out from Oscar's own records on this server.
+          </p>
+        </div>
+
+        <div class="stats-tools reveal">
+          <div class="chips" role="group" aria-label="Period" id="stats-period">
+            <button type="button" class="chip" data-days="7" aria-pressed="false">7 days</button>
+            <button type="button" class="chip" data-days="30" aria-pressed="true">30 days</button>
+            <button type="button" class="chip" data-days="90" aria-pressed="false">90 days</button>
+            <button type="button" class="chip" data-days="365" aria-pressed="false">12 months</button>
+          </div>
+          <div class="chips" role="group" aria-label="Which calls" id="stats-kind">
+            <button type="button" class="chip" data-kind="all" aria-pressed="true">All calls</button>
+            <button type="button" class="chip" data-kind="incoming" aria-pressed="false">Incoming</button>
+            <button type="button" class="chip" data-kind="outgoing" aria-pressed="false">Outgoing</button>
+            <button type="button" class="chip" data-kind="browser" aria-pressed="false">Browser</button>
+          </div>
+          <a class="button-link stats-export" id="stats-export" href="/api/analytics.xlsx" download>Download as Excel</a>
+        </div>
+        <p class="error" id="stats-error" role="alert" hidden></p>
+
+        <div class="stats" id="stats" aria-busy="true">
+          <div class="stat-tiles" id="stat-tiles" aria-live="polite"></div>
+
+          <figure class="panel panel-outline stat-panel stat-wide">
+            <div class="stat-head">
+              <figcaption class="stat-title" id="stat-days-title">Calls, day by day</figcaption>
+              <ul class="stat-legend" id="stat-days-legend" aria-label="Kinds of call"></ul>
+            </div>
+            <div class="col-chart" id="stat-days" tabindex="0" role="group"
+              aria-labelledby="stat-days-title" aria-describedby="stat-days-help"></div>
+            <p class="visually-hidden" id="stat-days-help">Use the left and right arrow keys to read each day.</p>
+            <p class="visually-hidden" id="stat-days-live" aria-live="polite"></p>
+            <details class="stat-table">
+              <summary>Show as a table</summary>
+              <div class="table-wrap keep-table"><table id="stat-days-table"></table></div>
+            </details>
+          </figure>
+
+          <div class="stat-grid">
+            <figure class="panel panel-outline stat-panel">
+              <div class="stat-head">
+                <figcaption class="stat-title">How calls ended</figcaption>
+              </div>
+              <div class="meter-list" id="stat-outcomes"></div>
+            </figure>
+
+            <figure class="panel panel-outline stat-panel">
+              <div class="stat-head">
+                <figcaption class="stat-title" id="stat-hours-title">When calls come in</figcaption>
+                <div class="heat-scale" aria-hidden="true">
+                  <span>Fewer</span><i></i><i></i><i></i><i></i><i></i><span>More</span>
+                </div>
+              </div>
+              <p class="stat-note" id="stat-hours-note"></p>
+              <div class="heatmap" id="stat-hours" role="img" aria-labelledby="stat-hours-title stat-hours-note"></div>
+              <details class="stat-table">
+                <summary>Show as a table</summary>
+                <div class="table-wrap keep-table"><table id="stat-hours-table"></table></div>
+              </details>
+            </figure>
+
+            <figure class="panel panel-outline stat-panel">
+              <div class="stat-head">
+                <figcaption class="stat-title" id="stat-lengths-title">How long conversations lasted</figcaption>
+              </div>
+              <div class="col-chart col-chart-short" id="stat-lengths" tabindex="0" role="group"
+                aria-labelledby="stat-lengths-title" aria-describedby="stat-lengths-help"></div>
+              <p class="visually-hidden" id="stat-lengths-help">Use the left and right arrow keys to read each length.</p>
+              <p class="visually-hidden" id="stat-lengths-live" aria-live="polite"></p>
+              <details class="stat-table">
+                <summary>Show as a table</summary>
+                <div class="table-wrap keep-table"><table id="stat-lengths-table"></table></div>
+              </details>
+            </figure>
+
+            <figure class="panel panel-outline stat-panel">
+              <div class="stat-head">
+                <figcaption class="stat-title">What Oscar did on calls</figcaption>
+              </div>
+              <dl class="stat-figures" id="stat-actions"></dl>
+            </figure>
+
+            <figure class="panel panel-outline stat-panel">
+              <div class="stat-head">
+                <figcaption class="stat-title">Who was on the calls</figcaption>
+              </div>
+              <dl class="stat-figures stat-figures-three" id="stat-people"></dl>
+              <div class="table-wrap keep-table stat-people-table" id="stat-top-wrap"><table id="stat-top"></table></div>
+            </figure>
+
+            <figure class="panel panel-outline stat-panel">
+              <div class="stat-head">
+                <figcaption class="stat-title">From the call summaries</figcaption>
+              </div>
+              <div id="stat-fields"></div>
+            </figure>
+          </div>
+
+          <figure class="panel panel-outline stat-panel stat-wide" id="stat-lists-panel" hidden>
+            <div class="stat-head">
+              <figcaption class="stat-title">Call lists</figcaption>
+            </div>
+            <div class="table-wrap keep-table"><table id="stat-lists"></table></div>
+          </figure>
         </div>
       </section>
     </main>
@@ -1080,6 +1241,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=45"></script>
+    <script src="/static/app.js?v=54"></script>
   </body>
 </html>

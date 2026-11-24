@@ -30,6 +30,9 @@ from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
 from app.signin import SET_PASSWORD, HttpsOnly, RequireSignIn, SignIn, create_sign_in_router
 from app.calls import CallManager, lines_busy
+from app.analytics import KINDS as ANALYTICS_KINDS
+from app.analytics import PERIODS as ANALYTICS_PERIODS
+from app.analytics import analytics, time_zone
 from app.backup import back_up
 from app.campaigns import (
     CALL_AGAIN_STATUSES,
@@ -50,6 +53,8 @@ from app.numbers import NumbersError, TwilioNumbers, calls_from
 from app.preview import PreviewFailed, voice_sample
 from app.recording import finish_leftovers, forget_recording, prune, recording_path, recordings_folder
 from app.search import LookupFailed, TablesRequest, WebLookup
+from app.google_sheets import REFRESH_MINUTES as SHEET_REFRESH_MINUTES
+from app.google_sheets import read_link, refresh_table, sheet_link
 from app.sheets import SHEET_MOST_BYTES, SheetError, other_spreadsheet, read_sheet
 from app.tables import (
     TABLE_DESCRIPTION_CHARS,
@@ -69,6 +74,7 @@ from app.config import (
     load_config,
 )
 from app.events import EventBus
+from app.exports import calls_workbook, table_workbook
 from app.phone import (
     BLOCKED_NUMBERS_MOST,
     NO_NUMBER_TO_CALL_FROM,
@@ -154,6 +160,9 @@ class LookupTableIn(BaseModel):
     private: bool = False
     file_name: str = Field(default="", max_length=200)
     rows_csv: str = Field(min_length=1, max_length=TABLE_TEXT_MOST)
+    # The Google Sheet it was read from (app/google_sheets.py): it is read again now and then.
+    source_url: str = Field(default="", max_length=500)
+    source_sheet: str = Field(default="", max_length=31)
 
 
 class LookupTableChange(BaseModel):
@@ -166,6 +175,18 @@ class LookupTableChange(BaseModel):
     private: bool | None = None
     file_name: str | None = Field(default=None, max_length=200)
     rows_csv: str | None = Field(default=None, min_length=1, max_length=TABLE_TEXT_MOST)
+    # "" stops reading it from Google Sheets (a file replaced its rows).
+    source_url: str | None = Field(default=None, max_length=500)
+    source_sheet: str | None = Field(default=None, max_length=31)
+
+
+class SheetLinkRequest(BaseModel):
+    """A Google Sheets link to read, and the tab to read ("" for the linked one, or the first)."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    url: str = Field(min_length=1, max_length=500)
+    sheet: str = Field(default="", max_length=31)
 
 
 class LookupTableRows(BaseModel):
@@ -300,7 +321,9 @@ def create_app(
         backing_up = asyncio.create_task(keep_backing_up())
         dialing = asyncio.create_task(keep_dialing())
         connecting = asyncio.create_task(connect_numbers())
+        refreshing = asyncio.create_task(keep_sheets_fresh())
         yield
+        refreshing.cancel()
         watching.cancel()
         backing_up.cancel()
         dialing.cancel()
@@ -371,6 +394,18 @@ def create_app(
             except Exception:
                 logger.exception("Checking whether the OpenRouter key is running low failed")
             await asyncio.sleep(CREDIT_WATCH_SECONDS)
+
+    async def keep_sheets_fresh() -> None:
+        """Read each spreadsheet that came from a Google Sheets link again every few minutes,
+        so Oscar answers from the sheet as it is now (app/google_sheets.py)."""
+        while True:
+            await asyncio.sleep(SHEET_REFRESH_MINUTES * 60)
+            for table in [table for table in store.list_lookup_tables() if table["source_url"]]:
+                try:
+                    await refresh_table(store, table)
+                except Exception:
+                    logger.exception(f"Reading the spreadsheet {table['id']} from Google Sheets failed")
+            tables_changed()
 
     async def keep_backing_up() -> None:
         """A copy of the database each day (app/backup.py), checked for every hour. Recordings
@@ -572,6 +607,18 @@ def create_app(
     async def save_agent(agent: AgentSettings) -> AgentSettings:
         return store.save_agent(agent)
 
+    @app.get("/api/analytics")
+    async def get_analytics(
+        days: int = Query(default=30),
+        kind: Literal["all", "incoming", "outgoing", "browser"] = "all",
+        tz: str = Query(default="", max_length=64),
+    ) -> dict:
+        """How calls went over the last `days` days, in the owner's time zone (app/analytics.py)."""
+        if days not in ANALYTICS_PERIODS:
+            raise HTTPException(status_code=400, detail="Show 7, 30, 90 or 365 days.")
+        async with slow_reads:
+            return await asyncio.to_thread(analytics, store, days=days, kind=kind, zone_name=tz)
+
     @app.get("/api/calls")
     async def list_calls(
         limit: int = Query(default=100, ge=1, le=200),
@@ -626,6 +673,85 @@ def create_app(
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="oscar-calls-{day}.csv"'},
         )
+
+    def workbook_response(content: bytes, name: str) -> Response:
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
+    @app.get("/api/calls.xlsx")
+    async def export_calls_excel(
+        q: str = Query(default="", max_length=200),
+        show: Literal["all", "todo", "incoming", "outgoing", "browser", "failed"] = "all",
+        tz: str = Query(default="", max_length=64),
+    ) -> Response:
+        """Call history as an Excel workbook: the calls the search and filter show, newest
+        first, and what was said on them (app/exports.py)."""
+
+        def build() -> bytes:
+            found: list[dict] = []
+            after = ""
+            while True:
+                page, more = store.find_calls(limit=CSV_PAGE_CALLS, before_id=after, query=q, show=show)
+                found.extend(page)
+                if not more or not page:
+                    break
+                after = page[-1]["id"]
+            agent = store.get_agent()
+            return calls_workbook(
+                found,
+                store.transcripts_for([call["id"] for call in found]),
+                zone=time_zone(tz),
+                agent_name=agent.name,
+                asked=agent.summary_fields,
+            )
+
+        async with slow_reads:
+            content = await asyncio.to_thread(build)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return workbook_response(content, f"oscar-calls-{day}.xlsx")
+
+    @app.get("/api/analytics.xlsx")
+    async def export_analytics(
+        days: int = Query(default=30),
+        kind: Literal["all", "incoming", "outgoing", "browser"] = "all",
+        tz: str = Query(default="", max_length=64),
+    ) -> Response:
+        """Analytics as an Excel workbook: its figures, calls day by day, then every call of
+        the period and what was said on it."""
+        if days not in ANALYTICS_PERIODS:
+            raise HTTPException(status_code=400, detail="Show 7, 30, 90 or 365 days.")
+
+        def build() -> bytes:
+            report = analytics(store, days=days, kind=kind, zone_name=tz)
+            zone = time_zone(tz)
+            first = datetime.fromisoformat(report["first_day"]).replace(tzinfo=zone)
+            wanted = ANALYTICS_KINDS[kind]
+            found = [
+                call
+                for call in store.calls_since(first.astimezone(timezone.utc).isoformat(timespec="seconds"))
+                if wanted is None or call["kind"] == wanted
+            ]
+            found.reverse()  # newest first, as in Call history
+            agent = store.get_agent()
+            which = "all calls" if kind == "all" else f"{kind} calls"
+            period = f"{report['first_day']} to {report['last_day']}, {which}"
+            return calls_workbook(
+                found,
+                store.transcripts_for([call["id"] for call in found]),
+                zone=zone,
+                agent_name=agent.name,
+                asked=agent.summary_fields,
+                report=report,
+                period=period,
+            )
+
+        async with slow_reads:
+            content = await asyncio.to_thread(build)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return workbook_response(content, f"oscar-analytics-{day}.xlsx")
 
     @app.delete("/api/calls/{call_id}")
     async def delete_call(call_id: str) -> dict:
@@ -1005,6 +1131,8 @@ def create_app(
             file_name=request.file_name,
             headings=headings,
             rows=rows,
+            source_url=google_link(request.source_url),
+            source_sheet=request.source_sheet if request.source_url else "",
         )
         tables_changed()
         return {"table": table_view(table)}
@@ -1013,11 +1141,78 @@ def create_app(
     async def change_lookup_table(table_id: str, request: LookupTableChange) -> dict:
         table_or_404(table_id)
         changes = request.model_dump(exclude_none=True, exclude={"rows_csv"})
+        if request.source_url is not None:
+            changes["source_url"] = google_link(request.source_url)
+            if not changes["source_url"]:
+                # Read from a file now: no longer from Google Sheets.
+                changes.update(source_sheet="", refreshed_at="", refresh_error="")
+            else:
+                changes["refreshed_at"], changes["refresh_error"] = utc_now(), ""
         if request.rows_csv is not None:
             changes["headings"], changes["rows"] = await asyncio.to_thread(rows_of, request.rows_csv)
         table = store.update_lookup_table(table_id, **changes) if changes else table_or_404(table_id)
         tables_changed()
         return {"table": table_view(table)}
+
+    def google_link(url: str) -> str:
+        """A Google Sheets link made plain ("" for none). Anything else is refused."""
+        if not url:
+            return ""
+        try:
+            return sheet_link(url).view_url
+        except SheetError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @app.post("/api/sheets/link")
+    async def read_google_sheet(request: SheetLinkRequest) -> dict:
+        """A Google Sheet's rows by its link, as an uploaded workbook's (for call lists and
+        spreadsheets alike), with its name and plain link (app/google_sheets.py)."""
+        try:
+            return await read_link(request.url, request.sheet)
+        except SheetError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @app.post("/api/tables/{table_id}/refresh")
+    async def refresh_lookup_table(table_id: str) -> dict:
+        """Read a spreadsheet from its Google Sheet again now."""
+        table = table_or_404(table_id)
+        if not table["source_url"]:
+            raise HTTPException(status_code=400, detail="This spreadsheet came from a file, not a Google Sheets link.")
+        table = await refresh_table(store, table)
+        tables_changed()
+        if table is None:
+            raise HTTPException(status_code=404, detail="That spreadsheet is not there any more.")
+        return {"table": table_view(table)}
+
+    @app.get("/api/tables/{table_id}/rows")
+    async def lookup_table_rows(
+        table_id: str,
+        q: str = Query(default="", max_length=200),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict:
+        """A page of a spreadsheet's rows, those with every word of `q` in them when it is given."""
+        table = await asyncio.to_thread(table_or_404, table_id)
+        words = [word.casefold() for word in q.split()]
+        rows = table["rows"]
+        if words:
+            rows = [row for row in rows if all(word in " ".join(row).casefold() for word in words)]
+        return {
+            "headings": table["headings"],
+            "rows": rows[offset : offset + limit],
+            "found": len(rows),
+            "total": table["row_count"],
+            "offset": offset,
+        }
+
+    @app.get("/api/tables/{table_id}.xlsx")
+    async def download_lookup_table(table_id: str) -> Response:
+        """A spreadsheet as Oscar reads it, as an Excel workbook."""
+        table = await asyncio.to_thread(table_or_404, table_id)
+        content = await asyncio.to_thread(table_workbook, table)
+        # Plain letters only: a download's name travels in a header, which takes no others.
+        name = re.sub(r"[^A-Za-z0-9 ._-]+", "", table["name"]).strip() or "spreadsheet"
+        return workbook_response(content, f"{name}.xlsx")
 
     @app.delete("/api/tables/{table_id}")
     async def delete_lookup_table(table_id: str) -> dict:

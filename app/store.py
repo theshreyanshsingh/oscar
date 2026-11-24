@@ -409,7 +409,11 @@ class Store:
                     rows TEXT NOT NULL,
                     row_count INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    source_url TEXT NOT NULL DEFAULT '',
+                    source_sheet TEXT NOT NULL DEFAULT '',
+                    refreshed_at TEXT NOT NULL DEFAULT '',
+                    refresh_error TEXT NOT NULL DEFAULT ''
                 );
                 -- Numbers disconnected from Oscar in the dashboard: Oscar does not connect them
                 -- again by itself (when it starts, or on choosing one to call from) until
@@ -518,6 +522,12 @@ class Store:
             # Where the line began in the call's audio, in seconds (app/calls.py, CallClock);
             # NULL for a line said before Oscar kept these, or not placed in the audio.
             ("messages", "at_seconds", "REAL"),
+            # A spreadsheet read from a Google Sheets link, read again now and then
+            # (app/google_sheets.py): its link and tab, when it was last read, and why not.
+            ("lookup_tables", "source_url", "TEXT NOT NULL DEFAULT ''"),
+            ("lookup_tables", "source_sheet", "TEXT NOT NULL DEFAULT ''"),
+            ("lookup_tables", "refreshed_at", "TEXT NOT NULL DEFAULT ''"),
+            ("lookup_tables", "refresh_error", "TEXT NOT NULL DEFAULT ''"),
             *(("calls", column, "TEXT NOT NULL DEFAULT ''") for column in _SUMMARY_COLUMNS),
         ):
             columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
@@ -784,6 +794,97 @@ class Store:
                 (stamp,),
             ).fetchall()
         return [(row["started_at"], float(row["cost"])) for row in rows]
+
+    # What Analytics counts (app/analytics.py): read on the calling thread's own connection.
+    _ANALYTICS_COLUMNS = (
+        "id, kind, status, error, from_number, to_number, started_at, ended_at, cost, summary_status, "
+        "caller_name, follow_up, follow_up_done_at, recording_seconds, answered_by, transferred_to, "
+        "transfer_result, campaign_id, details"
+    )
+
+    def calls_for_analytics(self, since: str) -> list[dict]:
+        """Every call started at or after `since` (UTC, as stored), with what its transcript
+        shows: how many lines each side said, and what Oscar did on it (from its notes)."""
+        reader = self._reader()
+        rows = reader.execute(
+            f"SELECT {self._ANALYTICS_COLUMNS} FROM calls WHERE started_at >= ? ORDER BY started_at", (since,)
+        ).fetchall()
+        lines = reader.execute(
+            """
+            SELECT m.call_id,
+                SUM(m.role = 'user') AS caller_lines,
+                SUM(m.role = 'agent') AS agent_lines,
+                SUM(m.role = 'person') AS person_lines,
+                SUM(m.role = 'note' AND m.text LIKE 'Searched the web for:%') AS web_searches,
+                SUM(m.role = 'note' AND m.text LIKE 'Looked in the spreadsheets for:%') AS sheet_lookups,
+                SUM(m.role = 'note' AND m.text LIKE 'Asked not to be called again:%') AS do_not_call,
+                SUM(m.role = 'note' AND m.text LIKE 'A voicemail answered. Left this message:%') AS voicemails_left,
+                SUM(m.role = 'agent' AND m.text LIKE '% [interrupted]') AS interrupted
+            FROM messages m JOIN calls c ON c.id = m.call_id
+            WHERE c.started_at >= ?
+            GROUP BY m.call_id
+            """,
+            (since,),
+        ).fetchall()
+        said = {row["call_id"]: dict(row) for row in lines}
+        calls = []
+        for row in rows:
+            call = dict(row)
+            call["duration_seconds"] = _duration_seconds(call["started_at"], call["ended_at"])
+            call["details"] = json.loads(call["details"]) if call.get("details") else {}
+            counts = said.get(call["id"], {})
+            for key in (
+                "caller_lines", "agent_lines", "person_lines", "web_searches", "sheet_lookups",
+                "do_not_call", "voicemails_left", "interrupted",
+            ):
+                call[key] = int(counts.get(key) or 0)
+            calls.append(call)
+        return calls
+
+    def calls_since(self, since: str) -> list[dict]:
+        """Every call started at or after `since` (UTC, as stored), oldest first, whole."""
+        rows = self._reader().execute(
+            "SELECT * FROM calls WHERE started_at >= ? ORDER BY started_at, rowid", (since,)
+        ).fetchall()
+        return [self._call_dict(row) for row in rows]
+
+    def transcripts_for(self, call_ids: list[str]) -> dict[str, list[dict]]:
+        """The transcript of each of these calls, line by line in order."""
+        reader = self._reader()
+        found: dict[str, list[dict]] = {call_id: [] for call_id in call_ids}
+        for start in range(0, len(call_ids), 500):
+            chunk = call_ids[start : start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in reader.execute(
+                f"SELECT call_id, role, text, at_seconds FROM messages WHERE call_id IN ({marks}) ORDER BY id",
+                chunk,
+            ):
+                found[row["call_id"]].append(dict(row))
+        return found
+
+    def first_calls_with(self, numbers: list[str]) -> dict[str, str]:
+        """When each of these numbers was first on a phone call with Oscar (UTC, as stored)."""
+        if not numbers:
+            return {}
+        reader = self._reader()
+        first: dict[str, str] = {}
+        for start in range(0, len(numbers), 500):
+            chunk = numbers[start : start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in reader.execute(
+                f"""
+                SELECT number, MIN(started_at) AS first FROM (
+                    SELECT from_number AS number, started_at FROM calls
+                        WHERE kind = 'phone_inbound' AND from_number IN ({marks})
+                    UNION ALL
+                    SELECT to_number AS number, started_at FROM calls
+                        WHERE kind = 'phone_outbound' AND to_number IN ({marks})
+                ) GROUP BY number
+                """,
+                (*chunk, *chunk),
+            ):
+                first[row["number"]] = row["first"]
+        return first
 
     def earlier_calls(self, number: str, *, before_id: str, limit: int = 3) -> list[dict]:
         """The latest phone calls with this number (to it or from it) that have a summary,
@@ -1061,7 +1162,10 @@ class Store:
 
     # Spreadsheets Oscar looks things up in (app/tables.py)
 
-    _TABLE_ABOUT = "id, name, description, private, file_name, headings, row_count, created_at, updated_at"
+    _TABLE_ABOUT = (
+        "id, name, description, private, file_name, headings, row_count, created_at, updated_at, "
+        "source_url, source_sheet, refreshed_at, refresh_error"
+    )
 
     @staticmethod
     def _table_about(row) -> dict:
@@ -1095,25 +1199,40 @@ class Store:
         return [{**self._table_about(row), "rows": json.loads(row["rows"])} for row in rows]
 
     def add_lookup_table(
-        self, *, name: str, description: str, private: bool, file_name: str, headings: list[str], rows: list[list[str]]
+        self,
+        *,
+        name: str,
+        description: str,
+        private: bool,
+        file_name: str,
+        headings: list[str],
+        rows: list[list[str]],
+        source_url: str = "",
+        source_sheet: str = "",
     ) -> dict:
         table_id = uuid.uuid4().hex
         now = utc_now()
         with self._lock:
             self._db.execute(
                 "INSERT INTO lookup_tables (id, name, description, private, file_name, headings, rows, row_count, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "created_at, updated_at, source_url, source_sheet, refreshed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     table_id, name, description, int(private), file_name,
                     json.dumps(headings, ensure_ascii=False), json.dumps(rows, ensure_ascii=False),
-                    len(rows), now, now,
+                    len(rows), now, now, source_url, source_sheet, now if source_url else "",
                 ),
             )
         return self.get_lookup_table(table_id)
 
     def update_lookup_table(self, table_id: str, **fields) -> dict | None:
-        """Change a sheet's name, description, privacy, or (with file_name, headings and rows) its rows."""
-        unknown = set(fields) - {"name", "description", "private", "file_name", "headings", "rows"}
+        """Change a sheet's name, description, privacy, or (with file_name, headings and rows) its rows,
+        or the Google Sheet it is read from. Being read again without a change leaves it as updated
+        when it last changed."""
+        unknown = set(fields) - {
+            "name", "description", "private", "file_name", "headings", "rows",
+            "source_url", "source_sheet", "refreshed_at", "refresh_error",
+        }
         if unknown:
             raise ValueError(f"Not fields of a sheet: {', '.join(sorted(unknown))}")
         values = dict(fields)
@@ -1124,7 +1243,8 @@ class Store:
         if "rows" in values:
             values["row_count"] = len(values["rows"])
             values["rows"] = json.dumps(values["rows"], ensure_ascii=False)
-        values["updated_at"] = utc_now()
+        if set(fields) - {"refreshed_at", "refresh_error"}:
+            values["updated_at"] = utc_now()
         assignments = ", ".join(f"{name} = ?" for name in values)
         with self._lock:
             self._db.execute(f"UPDATE lookup_tables SET {assignments} WHERE id = ?", (*values.values(), table_id))

@@ -569,3 +569,15 @@ def test_forgot_the_password_is_generic_help_with_no_server_command(tmp_path):
         for server_detail in ("set_keys", ".venv", "pm2", "autostart", "--password"):
             assert server_detail not in page.text
         assert "set_keys" not in LOCKED and ".venv" not in LOCKED
+
+
+def test_the_sign_in_page_asks_for_the_dashboards_own_stylesheet():
+    """Never an older version than the dashboard's, which a browser may still have kept."""
+    import re
+    from pathlib import Path
+
+    from app.signin import sign_in_page
+
+    index = (Path(__file__).resolve().parent.parent / "app" / "static" / "index.html").read_text()
+    wanted = re.search(r"/static/style\.css\?v=\d+", index).group(0)
+    assert wanted in sign_in_page().body.decode()

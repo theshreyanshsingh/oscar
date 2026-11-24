@@ -80,6 +80,17 @@ NOT_FROM_HERE = "This form has to be sent from Oscar's own page. Open Oscar's ad
 
 PAGE = Template((Path(__file__).resolve().parent / "pages" / "signin.html").read_text())
 
+
+def _style_version() -> str:
+    """The dashboard's own stylesheet version (in index.html), so the sign-in page never
+    asks for an older one a browser may still have."""
+    index = (Path(__file__).resolve().parent / "static" / "index.html").read_text()
+    found = re.search(r"/static/style\.css\?v=(\d+)", index)
+    return found.group(1) if found else "1"
+
+
+STYLE_VERSION = _style_version()
+
 # Cloudflare's addresses (https://www.cloudflare.com/ips/). A request from one of them came through
 # Cloudflare, so its CF-Connecting-IP header says who sent it; anyone else could write that header.
 CLOUDFLARE_NETWORKS = tuple(
@@ -321,7 +332,7 @@ class FailedSignIns:
 
 
 def _page(title: str, card: str, *, status: int, headers: dict | None = None) -> HTMLResponse:
-    body = PAGE.substitute(title=html.escape(title), card=card)
+    body = PAGE.substitute(title=html.escape(title), card=card, style_version=STYLE_VERSION)
     return HTMLResponse(
         body,
         status_code=status,

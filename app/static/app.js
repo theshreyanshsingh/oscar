@@ -356,6 +356,7 @@ async function loadSpending() {
     left.textContent = "—";
     note.textContent = "OpenRouter did not say just now.";
     pill.hidden = true;
+    fitNavSoon();
     return;
   }
   const spent = `${formatDollars(key.today)} spent today, ${formatDollars(key.this_month)} this month`;
@@ -363,6 +364,7 @@ async function loadSpending() {
     left.textContent = "No limit";
     note.textContent = `${spent}. The key has no spending limit of its own.`;
     pill.hidden = true;
+    fitNavSoon();
     return;
   }
   left.textContent = formatDollars(key.left);
@@ -370,7 +372,7 @@ async function loadSpending() {
   note.textContent = low
     ? `Calls are off until the limit resets or is raised. Limit ${formatDollars(key.limit)}${resets}.`
     : `of its ${formatDollars(key.limit)} limit${resets}. ${spent}, counting everything that uses the key.`;
-  pill.textContent = `Key: ${formatDollars(key.left)} left`;
+  setPill(pill, "Key", `${formatDollars(key.left)} left`);
   pill.classList.toggle("off", low);
   pill.hidden = false;
 }
@@ -526,23 +528,60 @@ async function testNotify() {
 
 // ---------- status & setup ----------
 
+// A status chip: its name, then its state. Where the top bar is short of room the state is
+// left out (its dot's colour still says it); the whole of it stays in the tooltip.
+function setPill(pill, name, state) {
+  const label = document.createElement("span");
+  label.className = "pill-name";
+  label.textContent = name;
+  const detail = document.createElement("span");
+  detail.className = "pill-state";
+  detail.textContent = `: ${state}`;
+  const words = document.createElement("span"); // one piece of text: the chip's gap is for its dot
+  words.append(label, detail);
+  pill.replaceChildren(words);
+  pill.title = `${name}: ${state}`;
+  fitNavSoon();
+}
+
+// The top bar on one line (style.css): shorter chips where all of them would not fit, then
+// closer gaps. Worked out from what the bar holds now (a fourth chip, Sign out) and its width.
+function fitNav() {
+  const nav = document.querySelector(".nav");
+  if (!nav) return;
+  nav.classList.remove("compact", "tight");
+  if (window.matchMedia("(max-width: 960px)").matches) return; // the phone menu has room
+  const row = document.querySelector(".status-row");
+  const fits = () => nav.scrollWidth <= nav.clientWidth + 1 && row.offsetHeight <= 40;
+  if (fits()) return;
+  nav.classList.add("compact");
+  if (!fits()) nav.classList.add("tight");
+}
+
+let navFrame = 0;
+function fitNavSoon() {
+  cancelAnimationFrame(navFrame);
+  navFrame = requestAnimationFrame(fitNav);
+}
+
 async function loadStatus() {
   const status = await api("/api/status");
   state.status = status;
 
   const agentPill = $("agent-pill");
-  agentPill.textContent = status.agent.ready ? "Calls: ready" : "Calls: key missing";
+  setPill(agentPill, "Calls", status.agent.ready ? "ready" : "key missing");
   agentPill.classList.toggle("off", !status.agent.ready);
 
   const phonePill = $("phone-pill");
-  phonePill.textContent = status.phone.enabled ? "Phone: ready" : "Phone: not set up";
+  setPill(phonePill, "Phone", status.phone.enabled ? "ready" : "not set up");
   phonePill.classList.toggle("off", !status.phone.enabled);
 
   // Sign out, when the dashboard asks for a password (app/signin.py).
   $("sign-out").hidden = !(status.dashboard && status.dashboard.password);
+  fitNavSoon();
 
   const searchPill = $("search-pill");
-  searchPill.textContent = status.search.enabled ? "Web search: on" : "Web search: off";
+  setPill(searchPill, "Web search", status.search.enabled ? "on" : "off");
   searchPill.classList.toggle("off", !status.search.enabled);
   $("whatsapp-search-hint").hidden = status.search.enabled;
 
@@ -964,6 +1003,9 @@ async function loadCalls({ older = false } = {}) {
   const exported = new URLSearchParams({ show: history.show });
   if (history.query) exported.set("q", history.query);
   $("history-export").href = `/api/calls.csv?${exported}`;
+  // The workbook has what was said on each call too, its times in this computer's time zone.
+  exported.set("tz", statsZone());
+  $("history-export-xlsx").href = `/api/calls.xlsx?${exported}`;
   const last = older ? state.calls.get(history.ids[history.ids.length - 1]) : null;
   if (last) {
     params.set("before_id", last.id);
@@ -1023,6 +1065,7 @@ function renderCalls() {
   }
   $("history-older").hidden = !history.more;
   $("history-export").hidden = !calls.length; // nothing to download
+  $("history-export-xlsx").hidden = !calls.length;
   $("history-count").textContent = calls.length
     ? `${calls.length} call${calls.length === 1 ? "" : "s"} shown${history.more ? ", older ones below" : ""}.`
     : "";
@@ -1126,10 +1169,20 @@ function renderCallRow(call) {
   });
   row.cells[4].className = "cost";
   row.cells[5].className = "wrap";
+  // On a phone each call is a compact card (style.css): what it was and with whom, then
+  // when, the summary, and its length and cost beside the button that opens it.
+  row.cells[0].classList.add("call-when");
+  row.cells[1].classList.add("call-kind");
+  row.cells[2].classList.add("call-number");
+  if (callNumber(call) === "—") row.cells[2].classList.add("no-number");
+  row.cells[3].classList.add("call-length");
+  row.cells[4].classList.add("call-cost");
+  row.cells[5].classList.add("call-status");
   row.insertBefore(summaryCell(call), row.cells[5]);
 
   const actions = document.createElement("td");
   actions.setAttribute("role", "cell");
+  actions.className = "call-actions";
   actions.dataset.label = "";
   const view = document.createElement("button");
   view.type = "button";
@@ -1194,6 +1247,7 @@ function summaryCell(call) {
     }
     cell.append(line);
   }
+  if (cell.textContent === "—") cell.classList.add("no-summary"); // nothing to show on a phone's card
   return cell;
 }
 
@@ -1506,6 +1560,8 @@ function onCallChanged(call) {
   const before = state.calls.get(call.id);
   if (!before && call.kind === "phone_inbound" && OPEN_STATUSES.has(call.status)) ringFor(call);
   if (before && before.cost !== call.cost) refreshSpendingSoon();
+  // A call starting, ending or being summed up changes Analytics.
+  if (!before || before.status !== call.status || before.summary_status !== call.summary_status) refreshStatsSoon();
   state.calls.set(call.id, call);
   const history = state.history;
   history.openTodos += Number(hasOpenTodo(call)) - Number(hasOpenTodo(before));
@@ -2570,6 +2626,749 @@ function setUpSpendChart() {
   });
 }
 
+// ---------- analytics (app/analytics.py) ----------
+
+// Which period and calls the owner last looked at, on this device.
+const STATS_CHOICE = "oscar.analytics";
+const KIND_SERIES = [
+  { key: "incoming", label: "Incoming", color: "var(--series-1)" },
+  { key: "outgoing", label: "Outgoing", color: "var(--series-2)" },
+  { key: "browser", label: "Browser", color: "var(--series-3)" },
+];
+const KIND_ONE = { incoming: "Incoming", outgoing: "Outgoing", browser: "Browser" };
+const ACTION_LABELS = [
+  ["web_searches", "Web searches"],
+  ["sheet_lookups", "Spreadsheet look-ups"],
+  ["put_through", "Put through to a person"],
+  ["voicemails_left", "Voicemails left"],
+  ["do_not_call", "Asked not to be called"],
+  ["summaries", "Summaries written"],
+  ["recorded", "Calls recorded"],
+  ["interrupted", "Times Oscar was talked over"],
+];
+const stats = { days: 30, kind: "all", data: null, asked: 0, timer: null, charts: {} };
+
+function statsZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
+function formatCount(value) {
+  return typeof value === "number" ? value.toLocaleString() : "—";
+}
+
+function formatShare(part, whole) {
+  return whole ? `${Math.round((part / whole) * 100)}%` : "—";
+}
+
+// A length of time in words: "45 s", "12 min", "3 h 05 min".
+function formatSpan(seconds) {
+  if (typeof seconds !== "number") return "—";
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+}
+
+function periodName(days) {
+  return days === 365 ? "12 months" : `${days} days`;
+}
+
+function localDay(iso) {
+  const [year, month, day] = iso.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+// How a figure changed on the period before: { text, tone } or null. `upIsGood` is
+// true, false, or null when neither way is better.
+function statDelta(now, before, upIsGood) {
+  if (typeof now !== "number" || typeof before !== "number") return null;
+  const period = `the ${periodName(stats.days)} before`;
+  if (now === before) return { text: `Same as ${period}`, tone: "flat" };
+  const up = now > before;
+  const tone = upIsGood === null ? "flat" : up === upIsGood ? "good" : "bad";
+  if (before === 0) return { text: `Up from none in ${period}`, tone, up };
+  const change = Math.round((Math.abs(now - before) / before) * 100);
+  return { text: `${change}% ${up ? "more" : "fewer"} than ${period}`, tone, up };
+}
+
+function statTile({ label, value, note, delta }) {
+  const tile = document.createElement("div");
+  tile.className = "stat-tile";
+  const name = document.createElement("p");
+  name.className = "stat-label";
+  name.textContent = label;
+  const figure = document.createElement("p");
+  figure.className = "stat-value";
+  figure.textContent = value;
+  tile.append(name, figure);
+  if (delta) {
+    const change = document.createElement("p");
+    change.className = `stat-delta ${delta.tone}`;
+    if (delta.up !== undefined) {
+      const arrow = document.createElement("span");
+      arrow.className = `stat-arrow ${delta.up ? "up" : "down"}`;
+      arrow.setAttribute("aria-hidden", "true");
+      change.append(arrow);
+    }
+    change.append(delta.text);
+    tile.append(change);
+  }
+  if (note) {
+    const more = document.createElement("p");
+    more.className = "stat-note";
+    more.textContent = note;
+    tile.append(more);
+  }
+  return tile;
+}
+
+function renderStatTiles(data) {
+  const now = data.totals;
+  const before = data.previous;
+  const kinds = stats.kind === "all" ? null : KIND_ONE[stats.kind];
+  const tiles = [
+    statTile({
+      label: kinds ? `${kinds} calls` : "Calls",
+      value: formatCount(now.calls),
+      delta: statDelta(now.calls, before.calls, null),
+      note: now.on_now ? `${now.on_now} going on now` : "",
+    }),
+    statTile({
+      label: "Conversations",
+      value: formatCount(now.conversations),
+      delta: statDelta(now.conversations, before.conversations, true),
+      note: now.calls ? `${formatShare(now.conversations, now.calls - now.on_now)} of calls: the other side spoke` : "",
+    }),
+    statTile({
+      label: "Average conversation",
+      value: typeof now.average_seconds === "number" ? formatDuration(now.average_seconds) : "—",
+      delta: statDelta(now.average_seconds, before.average_seconds, null),
+      note: now.talk_seconds ? `${formatSpan(now.talk_seconds)} of talking in all` : "",
+    }),
+  ];
+  if (stats.kind === "all" || stats.kind === "incoming") {
+    tiles.push(
+      statTile({
+        label: "Missed calls",
+        value: formatCount(now.missed),
+        delta: statDelta(now.missed, before.missed, false),
+        note: now.incoming ? `Of ${formatCount(now.incoming)} incoming: hung up or failed before speaking` : "No incoming calls",
+      }),
+    );
+  }
+  tiles.push(
+    statTile({
+      label: "To-dos",
+      value: now.todos_open ? `${formatCount(now.todos_open)} open` : formatCount(now.todos),
+      note: now.todos ? `${formatCount(now.todos)} from these calls, ${formatCount(now.todos - now.todos_open)} done` : "None from these calls",
+    }),
+    statTile({
+      label: "Cost",
+      value: now.cost ? formatCost(now.cost) : "$0",
+      delta: statDelta(now.cost, before.cost, null),
+      note: typeof now.cost_per_conversation === "number" && now.conversations
+        ? `${formatCost(now.cost_per_conversation)} a conversation`
+        : "",
+    }),
+  );
+  $("stat-tiles").style.setProperty("--tiles", String(tiles.length));
+  $("stat-tiles").replaceChildren(...tiles);
+}
+
+// A clean top for an axis: 1, 2, 5 or 10 times a power of ten, at or above `most`.
+function niceTop(most) {
+  if (!(most > 0)) return 1;
+  const power = 10 ** Math.floor(Math.log10(most));
+  for (const step of [1, 2, 5, 10]) if (step * power >= most) return step * power;
+  return 10 * power;
+}
+
+/* A column chart: one column a point, its series stacked from the baseline with a
+   2px gap between them. `points` are { short, long, values: {series: n}, lines: [..] }.
+   The pointer or the arrow keys show a point's figures above its column. */
+function renderColumns(name, container, points, series) {
+  const most = Math.max(0, ...points.map((point) => series.reduce((sum, one) => sum + (point.values[one.key] || 0), 0)));
+  const top = niceTop(most);
+  const chart = { points, active: -1 };
+  stats.charts[name] = chart;
+  container.replaceChildren();
+  container.classList.toggle("is-empty", !most);
+  const axis = document.createElement("div");
+  axis.className = "col-axis";
+  axis.setAttribute("aria-hidden", "true");
+  for (const value of [top, top / 2, 0]) {
+    const tick = document.createElement("span");
+    tick.textContent = Number.isInteger(value) ? value.toLocaleString() : "";
+    axis.append(tick);
+  }
+  const plot = document.createElement("div");
+  plot.className = "col-plot";
+  plot.style.gridTemplateColumns = `repeat(${points.length}, minmax(0, 1fr))`;
+  const every = Math.max(1, Math.ceil(points.length / (container.clientWidth < 520 ? 6 : 12)));
+  let peakShown = false;
+  points.forEach((point, index) => {
+    const slot = document.createElement("div");
+    slot.className = "col-slot";
+    slot.dataset.index = String(index);
+    const stack = document.createElement("div");
+    stack.className = "col-stack";
+    const total = series.reduce((sum, one) => sum + (point.values[one.key] || 0), 0);
+    // At least 4px, so a day with one call among many still shows.
+    stack.style.height = total ? `max(4px, ${((total / top) * 100).toFixed(2)}%)` : "0";
+    for (const one of series) {
+      const value = point.values[one.key] || 0;
+      if (!value) continue;
+      const piece = document.createElement("span");
+      piece.className = "col-piece";
+      piece.style.flexGrow = String(value);
+      piece.style.background = one.color;
+      stack.append(piece);
+    }
+    // The rounded end goes on the top piece only; the baseline stays square.
+    const pieces = stack.querySelectorAll(".col-piece");
+    if (pieces.length) pieces[pieces.length - 1].classList.add("top");
+    if (total && total === most && !peakShown) {
+      peakShown = true;
+      const peak = document.createElement("span");
+      peak.className = "col-peak";
+      peak.textContent = total.toLocaleString();
+      stack.append(peak);
+    }
+    const label = document.createElement("span");
+    label.className = "col-label";
+    const shown = index === points.length - 1 || (index % every === 0 && points.length - 1 - index >= every / 2);
+    label.textContent = shown ? point.short : "";
+    slot.append(stack, label);
+    slot.setAttribute("aria-hidden", "true");
+    plot.append(slot);
+  });
+  const tip = document.createElement("div");
+  tip.className = "bar-tip col-tip";
+  tip.hidden = true;
+  tip.setAttribute("aria-hidden", "true");
+  plot.append(tip);
+  container.append(axis, plot);
+  if (!most) {
+    const empty = document.createElement("p");
+    empty.className = "col-empty";
+    empty.textContent = `No calls in these ${periodName(stats.days)}.`;
+    container.append(empty);
+  }
+}
+
+function showColumn(name, container, index, { announce = false } = {}) {
+  const chart = stats.charts[name];
+  if (!chart) return;
+  const slots = container.querySelectorAll(".col-slot");
+  for (const slot of slots) slot.classList.toggle("active", Number(slot.dataset.index) === index);
+  chart.active = index;
+  const tip = container.querySelector(".col-tip");
+  const point = chart.points[index];
+  if (!point || !tip) {
+    if (tip) tip.hidden = true;
+    return;
+  }
+  tip.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = point.long;
+  tip.append(heading);
+  for (const line of point.lines) {
+    const row = document.createElement("span");
+    row.className = "tip-row";
+    if (line.color) {
+      const key = document.createElement("i");
+      key.style.background = line.color;
+      row.append(key);
+    }
+    const value = document.createElement("b");
+    value.textContent = line.value;
+    row.append(value, ` ${line.label}`);
+    tip.append(row);
+  }
+  tip.hidden = false;
+  const plot = container.querySelector(".col-plot");
+  const slot = slots[index];
+  const middle = slot.offsetLeft + slot.offsetWidth / 2;
+  const half = tip.offsetWidth / 2;
+  tip.style.left = `${Math.min(Math.max(middle, half), plot.clientWidth - half)}px`;
+  const stack = slot.querySelector(".col-stack");
+  const top = stack.getBoundingClientRect().top - plot.getBoundingClientRect().top;
+  tip.style.top = `${Math.max(top - 8, tip.offsetHeight)}px`;
+  if (announce) {
+    $(`${container.id}-live`).textContent =
+      `${point.long}: ${point.lines.map((line) => `${line.value} ${line.label}`).join(", ")}`;
+  }
+}
+
+function setUpColumns(name, container) {
+  container.addEventListener("pointermove", (event) => {
+    const slot = event.target.closest(".col-slot");
+    const chart = stats.charts[name];
+    if (slot && chart && Number(slot.dataset.index) !== chart.active) showColumn(name, container, Number(slot.dataset.index));
+  });
+  container.addEventListener("pointerleave", () => {
+    if (document.activeElement !== container) showColumn(name, container, -1);
+  });
+  container.addEventListener("focus", () => {
+    const chart = stats.charts[name];
+    if (chart) showColumn(name, container, chart.active >= 0 ? chart.active : chart.points.length - 1, { announce: true });
+  });
+  container.addEventListener("blur", () => showColumn(name, container, -1));
+  container.addEventListener("keydown", (event) => {
+    const chart = stats.charts[name];
+    if (!chart) return;
+    const last = chart.points.length - 1;
+    const moves = { ArrowLeft: chart.active - 1, ArrowRight: chart.active + 1, Home: 0, End: last };
+    if (!(event.key in moves)) return;
+    event.preventDefault();
+    const to = chart.active < 0 ? last : moves[event.key];
+    showColumn(name, container, Math.min(Math.max(to, 0), last), { announce: true });
+  });
+}
+
+function fillTable(table, headings, rows) {
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const heading of headings) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = heading;
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  for (const values of rows) {
+    const row = document.createElement("tr");
+    values.forEach((value, index) => {
+      const cell = document.createElement(index === 0 ? "th" : "td");
+      if (index === 0) cell.scope = "row";
+      if (value instanceof Node) cell.append(value);
+      else cell.textContent = value;
+      row.append(cell);
+    });
+    body.append(row);
+  }
+  table.replaceChildren(head, body);
+}
+
+function renderOverTime(data) {
+  const weekly = data.over_time.bucket === "week";
+  const series = stats.kind === "all" ? KIND_SERIES : KIND_SERIES.filter((one) => one.key === stats.kind);
+  const today = dayKey(new Date());
+  const points = data.over_time.points.map((point) => {
+    const date = localDay(point.date);
+    const long = weekly
+      ? `Week of ${date.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`
+      : dayName(date);
+    const short = weekly
+      ? date.toLocaleDateString(undefined, { day: "numeric", month: "short" })
+      : point.date === today ? "Today" : date.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+    const total = series.reduce((sum, one) => sum + point[one.key], 0);
+    const lines = [];
+    if (series.length > 1) {
+      for (const one of series) lines.push({ color: one.color, value: point[one.key], label: one.label.toLowerCase() });
+    } else {
+      lines.push({ value: total, label: total === 1 ? "call" : "calls" });
+    }
+    lines.push({ value: point.conversations, label: point.conversations === 1 ? "conversation" : "conversations" });
+    if (point.cost) lines.push({ value: formatCost(point.cost), label: "cost" });
+    return { short, long, lines, values: Object.fromEntries(series.map((one) => [one.key, point[one.key]])), point, total };
+  });
+  $("stat-days-title").textContent = weekly ? "Calls, week by week" : "Calls, day by day";
+  $("stat-days-help").textContent = `Use the left and right arrow keys to read each ${weekly ? "week" : "day"}.`;
+  const legend = $("stat-days-legend");
+  legend.hidden = series.length < 2;
+  legend.replaceChildren(
+    ...series.map((one) => {
+      const item = document.createElement("li");
+      const swatch = document.createElement("i");
+      swatch.style.background = one.color;
+      item.append(swatch, one.label);
+      return item;
+    }),
+  );
+  renderColumns("days", $("stat-days"), points, series);
+  fillTable(
+    $("stat-days-table"),
+    [weekly ? "Week" : "Day", ...series.map((one) => one.label), "Conversations", "Cost"],
+    points.map((one) => [
+      one.long,
+      ...series.map((kind) => String(one.point[kind.key])),
+      String(one.point.conversations),
+      one.point.cost ? formatCost(one.point.cost) : "$0",
+    ]),
+  );
+}
+
+function meterRow(name, value, most, figure) {
+  const row = document.createElement("div");
+  row.className = "meter-row";
+  const label = document.createElement("span");
+  label.className = "meter-name";
+  label.textContent = name;
+  const track = document.createElement("span");
+  track.className = "meter-track";
+  track.setAttribute("aria-hidden", "true");
+  const fill = document.createElement("span");
+  fill.className = "meter-fill";
+  fill.style.width = most ? `${Math.max((value / most) * 100, value ? 1.5 : 0).toFixed(2)}%` : "0";
+  track.append(fill);
+  const amount = document.createElement("span");
+  amount.className = "meter-figure";
+  amount.textContent = figure;
+  row.append(label, track, amount);
+  return row;
+}
+
+function emptyNote(text) {
+  const note = document.createElement("p");
+  note.className = "stat-empty";
+  note.textContent = text;
+  return note;
+}
+
+function renderOutcomes(data) {
+  const finished = data.outcomes.reduce((sum, one) => sum + one.count, 0);
+  const shown = data.outcomes.filter((one) => one.count).sort((a, b) => b.count - a.count);
+  const most = Math.max(0, ...shown.map((one) => one.count));
+  $("stat-outcomes").replaceChildren(
+    ...(shown.length
+      ? shown.map((one) => meterRow(one.label, one.count, most, `${one.count.toLocaleString()} · ${formatShare(one.count, finished)}`))
+      : [emptyNote(`No finished calls in these ${periodName(stats.days)}.`)]),
+  );
+}
+
+// Monday first, as app/analytics.py counts them, in this browser's language.
+function weekdayNames(style) {
+  const monday = new Date(2026, 10, 23);
+  return Array.from({ length: 7 }, (_, index) =>
+    new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + index).toLocaleDateString(undefined, { weekday: style }),
+  );
+}
+
+function hourName(hour) {
+  return new Date(2026, 0, 1, hour).toLocaleTimeString(undefined, { hour: "numeric" });
+}
+
+function renderHours(data) {
+  const grid = data.hours;
+  const most = Math.max(0, ...grid.flat());
+  const days = weekdayNames("short");
+  const longDays = weekdayNames("long");
+  const map = $("stat-hours");
+  const cells = [];
+  grid.forEach((row, day) => {
+    const name = document.createElement("span");
+    name.className = "heat-day";
+    name.textContent = days[day];
+    cells.push(name);
+    row.forEach((count, hour) => {
+      const cell = document.createElement("span");
+      // Five steps of one blue, darker for more; none is the lightest grey.
+      const level = count ? Math.min(5, Math.ceil((count / most) * 5)) : 0;
+      cell.className = `heat-cell heat-${level}`;
+      cell.dataset.tip = `${longDays[day]}, ${hourName(hour)}–${hourName((hour + 1) % 24)}: ${count} ${count === 1 ? "call" : "calls"}`;
+      cells.push(cell);
+    });
+  });
+  cells.push(document.createElement("span"));
+  for (let hour = 0; hour < 24; hour++) {
+    const label = document.createElement("span");
+    label.className = "heat-hour";
+    label.textContent = hour % 6 === 0 ? hourName(hour) : "";
+    cells.push(label);
+  }
+  const tip = document.createElement("div");
+  tip.className = "bar-tip heat-tip";
+  tip.hidden = true;
+  map.replaceChildren(...cells, tip);
+  let best = null;
+  grid.forEach((row, day) => row.forEach((count, hour) => {
+    if (count && (!best || count > best.count)) best = { day, hour, count };
+  }));
+  const which = stats.kind === "all" ? "calls" : `${KIND_ONE[stats.kind].toLowerCase()} calls`;
+  $("stat-hours-title").textContent = stats.kind === "outgoing" ? "When calls were made" : "When calls come in";
+  $("stat-hours-note").textContent = best
+    ? `Busiest: ${longDays[best.day]}s, ${hourName(best.hour)}–${hourName((best.hour + 1) % 24)} (${best.count} ${best.count === 1 ? "call" : "calls"}). Times are this computer's.`
+    : `No ${which} in these ${periodName(stats.days)}.`;
+  fillTable(
+    $("stat-hours-table"),
+    ["Day", ...Array.from({ length: 24 }, (_, hour) => hourName(hour))],
+    grid.map((row, day) => [longDays[day], ...row.map(String)]),
+  );
+}
+
+function setUpHeatmap() {
+  const map = $("stat-hours");
+  map.addEventListener("pointermove", (event) => {
+    const tip = map.querySelector(".heat-tip");
+    const cell = event.target.closest(".heat-cell");
+    for (const lit of map.querySelectorAll(".heat-cell.active")) if (lit !== cell) lit.classList.remove("active");
+    if (!tip) return;
+    if (!cell) {
+      tip.hidden = true;
+      return;
+    }
+    cell.classList.add("active");
+    tip.textContent = cell.dataset.tip;
+    tip.hidden = false;
+    const middle = cell.offsetLeft + cell.offsetWidth / 2;
+    const half = tip.offsetWidth / 2;
+    tip.style.left = `${Math.min(Math.max(middle, half), map.clientWidth - half)}px`;
+    tip.style.top = `${cell.offsetTop - 6}px`;
+  });
+  map.addEventListener("pointerleave", () => {
+    const tip = map.querySelector(".heat-tip");
+    if (tip) tip.hidden = true;
+    for (const lit of map.querySelectorAll(".heat-cell.active")) lit.classList.remove("active");
+  });
+}
+
+function renderLengths(data) {
+  const points = data.lengths.map((one) => ({
+    short: one.label.replace(" or more", "+"),
+    long: one.label,
+    values: { count: one.count },
+    lines: [{ value: one.count, label: one.count === 1 ? "conversation" : "conversations" }],
+  }));
+  renderColumns("lengths", $("stat-lengths"), points, [{ key: "count", color: "var(--series-1)" }]);
+  fillTable($("stat-lengths-table"), ["Length", "Conversations"], data.lengths.map((one) => [one.label, String(one.count)]));
+}
+
+// A figure in a list of them: its name above it, grouped so the grid keeps each pair together.
+function figureItem(list, label, value, note = "") {
+  const pair = document.createElement("div");
+  pair.className = "stat-figure";
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = value;
+  if (note) {
+    const small = document.createElement("span");
+    small.textContent = ` ${note}`;
+    detail.append(small);
+  }
+  pair.append(term, detail);
+  list.append(pair);
+}
+
+function renderActions(data) {
+  const actions = data.actions;
+  const list = $("stat-actions");
+  list.replaceChildren();
+  for (const [key, label] of ACTION_LABELS) {
+    const value = actions[key] || 0;
+    if (key === "put_through") {
+      figureItem(list, label, formatCount(value), value ? `(${formatCount(actions.put_through_answered)} answered)` : "");
+    } else if (key === "recorded") {
+      figureItem(list, label, formatCount(value), value ? `(${formatSpan(actions.recorded_seconds)})` : "");
+    } else {
+      figureItem(list, label, formatCount(value));
+    }
+  }
+}
+
+function showNumberInHistory(number) {
+  const search = $("history-search");
+  search.value = number;
+  search.dispatchEvent(new Event("input"));
+  $("history").scrollIntoView({ behavior: "smooth", block: "start" });
+  search.focus({ preventScroll: true });
+}
+
+function renderPeople(data) {
+  const people = data.people;
+  const list = $("stat-people");
+  list.replaceChildren();
+  figureItem(list, "Numbers", formatCount(people.numbers));
+  figureItem(list, "New", formatCount(people.new));
+  figureItem(list, "On more than one call", formatCount(people.repeat));
+  const wrap = $("stat-top-wrap");
+  wrap.hidden = !people.top.length;
+  if (!people.top.length) {
+    wrap.after(emptyNote(stats.kind === "browser" ? "Browser calls have no phone number." : `No phone calls in these ${periodName(stats.days)}.`));
+    return;
+  }
+  fillTable(
+    $("stat-top"),
+    ["Number", "Name", "Calls", "Talked", "Last call"],
+    people.top.map((one) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "link";
+      button.textContent = one.number;
+      button.title = "Show these calls in Call history";
+      button.addEventListener("click", () => showNumberInHistory(one.number));
+      return [button, one.name || "—", String(one.calls), one.talk_seconds ? formatSpan(one.talk_seconds) : "—", formatTime(one.last_at)];
+    }),
+  );
+}
+
+function renderFields(data) {
+  const box = $("stat-fields");
+  box.replaceChildren();
+  if (!data.fields.length) {
+    const note = emptyNote("");
+    note.append("Name what Oscar should note on every call (a reason for calling, a budget) under ");
+    const link = document.createElement("a");
+    link.href = "#agent";
+    link.textContent = "Agent settings";
+    note.append(link, ", and what callers said is counted here.");
+    box.append(note);
+    return;
+  }
+  for (const field of data.fields) {
+    const group = document.createElement("div");
+    group.className = "field-counts";
+    const title = document.createElement("p");
+    title.className = "field-name";
+    title.textContent = field.name;
+    group.append(title);
+    if (!field.values.length) {
+      group.append(emptyNote(`Nothing noted for this in these ${periodName(stats.days)}.`));
+    } else {
+      const most = field.values[0].count;
+      const meters = document.createElement("div");
+      meters.className = "meter-list";
+      for (const one of field.values) meters.append(meterRow(one.value, one.count, most, one.count.toLocaleString()));
+      if (field.other) meters.append(meterRow("Other answers", field.other, Math.max(most, field.other), field.other.toLocaleString()));
+      group.append(meters);
+    }
+    box.append(group);
+  }
+}
+
+function renderLists(data) {
+  const panel = $("stat-lists-panel");
+  panel.hidden = !data.lists.length;
+  if (!data.lists.length) return;
+  fillTable(
+    $("stat-lists"),
+    ["List", "People", "Answered", "Voicemail", "No answer or busy", "Failed", "Still to call", "Calls in period"],
+    data.lists.map((one) => {
+      const counts = one.counts || {};
+      const called = one.total - (counts.waiting || 0) - (counts.calling || 0) - (counts.skipped || 0);
+      return [
+        one.name,
+        formatCount(one.total),
+        `${formatCount(counts.answered || 0)} (${formatShare(counts.answered || 0, called)})`,
+        formatCount(counts.voicemail || 0),
+        formatCount((counts.no_answer || 0) + (counts.busy || 0)),
+        formatCount(counts.failed || 0),
+        formatCount((counts.waiting || 0) + (counts.calling || 0)),
+        formatCount(one.calls),
+      ];
+    }),
+  );
+}
+
+// A table wider than its card fades at the edge that has more to scroll to.
+function markScrollEdges(wrap) {
+  const more = wrap.scrollWidth - wrap.clientWidth;
+  wrap.classList.toggle("more-right", more > 4 && wrap.scrollLeft < more - 4);
+}
+
+function renderStats(data) {
+  for (const stale of document.querySelectorAll("#stat-people ~ .stat-empty")) stale.remove();
+  requestAnimationFrame(() => document.querySelectorAll(".keep-table").forEach(markScrollEdges));
+  renderStatTiles(data);
+  renderOverTime(data);
+  renderOutcomes(data);
+  renderHours(data);
+  renderLengths(data);
+  renderActions(data);
+  renderPeople(data);
+  renderFields(data);
+  renderLists(data);
+}
+
+function statsQuery() {
+  return new URLSearchParams({ days: String(stats.days), kind: stats.kind, tz: statsZone() }).toString();
+}
+
+async function loadStats() {
+  const asked = ++stats.asked;
+  const query = statsQuery();
+  $("stats-export").href = `/api/analytics.xlsx?${query}`;
+  // The last figures stay, faded, until the new ones come: nothing jumps.
+  $("stats").classList.add("is-loading");
+  $("stats").setAttribute("aria-busy", "true");
+  try {
+    const data = await api(`/api/analytics?${query}`);
+    if (asked !== stats.asked) return;
+    stats.data = data;
+    renderStats(data);
+    showError("stats-error", "");
+  } catch (error) {
+    if (asked === stats.asked) showError("stats-error", error.message);
+  } finally {
+    if (asked === stats.asked) {
+      $("stats").classList.remove("is-loading");
+      $("stats").setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+// A call ending changes the figures: they are worked out again a moment later.
+function refreshStatsSoon() {
+  clearTimeout(stats.timer);
+  stats.timer = setTimeout(() => loadStats().catch(() => {}), 3000);
+}
+
+function chooseStats(group, attribute, chip) {
+  for (const other of group.querySelectorAll(".chip")) other.setAttribute("aria-pressed", String(other === chip));
+  if (attribute === "days") stats.days = Number(chip.dataset.days);
+  else stats.kind = chip.dataset.kind;
+  try {
+    localStorage.setItem(STATS_CHOICE, JSON.stringify({ days: stats.days, kind: stats.kind }));
+  } catch {
+    // Not kept on this device: the choice still holds until the page is closed.
+  }
+  loadStats();
+}
+
+function setUpStats() {
+  try {
+    const kept = JSON.parse(localStorage.getItem(STATS_CHOICE) || "null");
+    if (kept && [7, 30, 90, 365].includes(kept.days)) stats.days = kept.days;
+    if (kept && kept.kind in { all: 1, ...KIND_ONE }) stats.kind = kept.kind;
+  } catch {
+    // Nothing kept: 30 days of all calls.
+  }
+  for (const [id, attribute] of [["stats-period", "days"], ["stats-kind", "kind"]]) {
+    const group = $(id);
+    for (const chip of group.querySelectorAll(".chip")) {
+      chip.setAttribute("aria-pressed", String(chip.dataset[attribute] === String(stats[attribute])));
+      chip.addEventListener("click", () => chooseStats(group, attribute, chip));
+    }
+  }
+  for (const wrap of document.querySelectorAll(".keep-table")) {
+    wrap.addEventListener("scroll", () => markScrollEdges(wrap), { passive: true });
+  }
+  // A "Show as a table" opened shows a table whose width is only known now.
+  for (const details of document.querySelectorAll("details.stat-table")) {
+    details.addEventListener("toggle", () => details.querySelectorAll(".keep-table").forEach(markScrollEdges));
+  }
+  window.addEventListener("resize", () => document.querySelectorAll(".keep-table").forEach(markScrollEdges));
+  setUpColumns("days", $("stat-days"));
+  setUpColumns("lengths", $("stat-lengths"));
+  setUpHeatmap();
+  // Column labels depend on the chart's width: drawn again when it changes.
+  let width = 0;
+  window.addEventListener("resize", () => {
+    const now = $("stat-days").clientWidth;
+    if (stats.data && Math.abs(now - width) > 40) {
+      width = now;
+      renderOverTime(stats.data);
+      renderLengths(stats.data);
+    }
+  });
+}
+
 // ---------- OpenRouter's models, as suggestions ----------
 
 async function loadModelSuggestions() {
@@ -2622,6 +3421,7 @@ const LIST_PREVIEW_DELAY_MS = 400;
 const DROP_NOTE = "or drop one here: a row for each person, with a column of phone numbers";
 
 const lists = {
+  link: null, // the Google Sheet the list's rows came from, to read another of its tabs
   byId: new Map(),
   people: new Map(), // list id -> its numbers, for the lists showing them
   open: new Set(), // lists showing their numbers
@@ -3187,6 +3987,7 @@ async function chooseListFile(file) {
   if (asked !== lists.fileAsked) return;
   lists.fileName = file.name;
   lists.workbook = read ? file : null;
+  lists.link = null;
   showSheets(read ? read.sheets : [], read ? read.sheet : "");
   $("list-file-name").textContent = file.name;
   $("list-drop-note").textContent = "Choose another file, or drop one here";
@@ -3198,15 +3999,48 @@ async function chooseListFile(file) {
   await useListRows(text);
 }
 
+async function chooseListLink() {
+  const url = $("list-link").value.trim();
+  if (!url) {
+    showError("list-error", "Paste the Google Sheet's link first.");
+    $("list-link").focus();
+    return;
+  }
+  showError("list-error", "");
+  const asked = ++lists.fileAsked;
+  const button = $("list-link-read");
+  button.disabled = true;
+  button.textContent = "Reading…";
+  try {
+    const read = await readSheetLink(url);
+    if (asked !== lists.fileAsked) return;
+    lists.fileName = read.title || "Google Sheet";
+    lists.workbook = null;
+    lists.link = read.source;
+    $("list-file").value = "";
+    showSheets(read.sheets, read.sheet);
+    $("list-file-name").textContent = `${lists.fileName} (Google Sheets)`;
+    $("list-drop-note").textContent = "Or choose a file instead";
+    $("list-drop").classList.add("chosen");
+    if (!$("list-name").value.trim()) $("list-name").value = lists.fileName;
+    await useListRows(read.csv);
+  } catch (error) {
+    if (asked === lists.fileAsked) showError("list-error", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Read it";
+  }
+}
+
 async function chooseSheet(sheet) {
   const file = lists.workbook;
-  if (!file) return;
+  if (!file && !lists.link) return;
   const asked = ++lists.fileAsked;
   const select = $("list-sheet");
   select.disabled = true;
   showError("list-error", "");
   try {
-    const read = await readWorkbook(file, sheet);
+    const read = lists.link ? await readSheetLink(lists.link, sheet) : await readWorkbook(file, sheet);
     if (asked !== lists.fileAsked) return;
     await useListRows(read.csv);
   } catch (error) {
@@ -3235,6 +4069,16 @@ function setUpListForm() {
     event.preventDefault();
     chooseListFile(event.dataTransfer.files[0]);
   });
+  $("list-link-toggle").addEventListener("click", () =>
+    toggleLinkBox($("list-link-toggle"), $("list-link-box"), $("list-link"), "Hide the link", "Use a Google Sheets link"),
+  );
+  $("list-link-read").addEventListener("click", chooseListLink);
+  $("list-link").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      chooseListLink();
+    }
+  });
   $("list-paste-toggle").addEventListener("click", () => {
     const paste = $("list-paste");
     paste.hidden = !paste.hidden;
@@ -3248,6 +4092,7 @@ function setUpListForm() {
     if (lists.fileName) {
       lists.fileName = "";
       lists.workbook = null;
+      lists.link = null;
       $("list-sheet-row").hidden = true;
       $("list-file-name").textContent = "Rows pasted below";
     }
@@ -3316,6 +4161,8 @@ function resetListForm() {
   lists.csv = "";
   lists.fileName = "";
   lists.workbook = null;
+  lists.link = null;
+  $("list-link").value = "";
   lists.fileAsked += 1;
   $("list-sheet-row").hidden = true;
   $("list-file-name").textContent = "Choose an Excel or CSV file";
@@ -4135,6 +4982,9 @@ const sheets = {
   busy: new Set(), // cards with a change on its way
   errors: new Map(), // card -> what went wrong last, kept when cards are drawn again
   fresh: new Set(), // cards just added: only they fade in (not every card, each time they are drawn)
+  link: null, // the Google Sheet chosen instead of a file: { source, sheet }
+  pages: new Map(), // card -> the rows it shows: { q, rows, found, total, loading, error }
+  typed: new Map(), // card -> what is typed in its row search (kept while its rows are drawn again)
 };
 
 function tableError(id, message) {
@@ -4160,6 +5010,22 @@ async function loadTables() {
   sheets.list = data.tables;
   sheets.most = data.most;
   renderTables();
+  // Rows shown may have changed (read again from Google Sheets, or replaced).
+  for (const id of sheets.open) {
+    if (sheets.list.some((table) => table.id === id)) loadTableRows(id, (sheets.pages.get(id) || {}).q || "");
+  }
+}
+
+// A Google Sheet's rows by its link, read by Oscar as an uploaded workbook's are (app/google_sheets.py).
+async function readSheetLink(url, sheet = "") {
+  return api("/api/sheets/link", { method: "POST", body: JSON.stringify({ url, sheet }) });
+}
+
+function toggleLinkBox(toggle, box, input, shownLabel, hiddenLabel) {
+  box.hidden = !box.hidden;
+  toggle.setAttribute("aria-expanded", String(!box.hidden));
+  toggle.textContent = box.hidden ? hiddenLabel : shownLabel;
+  if (!box.hidden) input.focus();
 }
 
 // A file's rows as CSV text: an Excel workbook is read by Oscar (one sheet), a CSV as it is.
@@ -4196,6 +5062,7 @@ async function chooseTableFile(file) {
   sheets.csv = read.csv;
   sheets.fileName = file.name;
   sheets.workbook = read.sheets.length ? file : null;
+  sheets.link = null;
   const select = $("table-sheet");
   select.replaceChildren(...read.sheets.map((name) => new Option(name, name)));
   select.value = read.sheet;
@@ -4207,15 +5074,53 @@ async function chooseTableFile(file) {
   await previewTable();
 }
 
+async function chooseTableLink() {
+  const url = $("table-link").value.trim();
+  if (!url) {
+    showError("table-error", "Paste the Google Sheet's link first.");
+    $("table-link").focus();
+    return;
+  }
+  showError("table-error", "");
+  const asked = ++sheets.fileAsked;
+  const button = $("table-link-read");
+  button.disabled = true;
+  button.textContent = "Reading…";
+  try {
+    const read = await readSheetLink(url);
+    if (asked !== sheets.fileAsked) return;
+    sheets.csv = read.csv;
+    sheets.fileName = read.title || "Google Sheet";
+    sheets.workbook = null;
+    sheets.link = { source: read.source, sheet: read.sheet };
+    $("table-file").value = "";
+    const select = $("table-sheet");
+    select.replaceChildren(...read.sheets.map((name) => new Option(name, name)));
+    select.value = read.sheet;
+    $("table-sheet-row").hidden = read.sheets.length < 2;
+    $("table-file-name").textContent = `${sheets.fileName} (Google Sheets)`;
+    $("table-drop-note").textContent = "Or choose a file instead";
+    $("table-drop").classList.add("chosen");
+    if (!$("table-name").value.trim()) $("table-name").value = nameFromFile(sheets.fileName, read.sheet);
+    await previewTable();
+  } catch (error) {
+    if (asked === sheets.fileAsked) showError("table-error", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Read it";
+  }
+}
+
 async function chooseTableSheet(sheet) {
-  if (!sheets.workbook) return;
+  if (!sheets.workbook && !sheets.link) return;
   const asked = ++sheets.fileAsked;
   const select = $("table-sheet");
   select.disabled = true;
   showError("table-error", "");
   try {
-    const read = await readWorkbook(sheets.workbook, sheet);
+    const read = sheets.link ? await readSheetLink(sheets.link.source, sheet) : await readWorkbook(sheets.workbook, sheet);
     if (asked !== sheets.fileAsked) return;
+    if (sheets.link) sheets.link.sheet = read.sheet;
     sheets.csv = read.csv;
     await previewTable();
   } catch (error) {
@@ -4300,6 +5205,8 @@ function resetTableForm() {
   sheets.csv = "";
   sheets.fileName = "";
   sheets.workbook = null;
+  sheets.link = null;
+  $("table-link").value = "";
   sheets.fileAsked += 1;
   sheets.previewAsked += 1;
   $("table-sheet-row").hidden = true;
@@ -4313,7 +5220,7 @@ async function addTable(event) {
   event.preventDefault();
   showError("table-error", "");
   if (!sheets.csv.trim()) {
-    showError("table-error", "Choose an Excel or CSV file first.");
+    showError("table-error", "Choose an Excel or CSV file, or read a Google Sheets link, first.");
     return;
   }
   if (!$("table-name").value.trim()) {
@@ -4333,6 +5240,8 @@ async function addTable(event) {
         private: $("table-private").checked,
         file_name: sheets.fileName,
         rows_csv: sheets.csv,
+        source_url: sheets.link ? sheets.link.source : "",
+        source_sheet: sheets.link ? sheets.link.sheet : "",
       }),
     });
     sheets.list = [...sheets.list.filter((other) => other.id !== table.id), table];
@@ -4366,6 +5275,11 @@ function renderTables() {
     }
     for (const table of sheets.list) box.append(tableCard(table));
   });
+  // A row search drawn again keeps its cursor at the end of what is typed.
+  const typing = document.activeElement;
+  if (typing && typing.classList.contains("table-rows-search")) {
+    typing.setSelectionRange(typing.value.length, typing.value.length);
+  }
   const full = sheets.list.length >= sheets.most;
   $("table-add").disabled = full;
   $("table-add").title = full ? `Oscar can have ${sheets.most} spreadsheets. Delete one to add another.` : "";
@@ -4403,10 +5317,19 @@ function tableCard(table) {
   const meta = document.createElement("p");
   meta.className = "list-meta";
   const updated = new Date(table.updated_at);
-  meta.textContent =
-    `${table.row_count.toLocaleString()} row${table.row_count === 1 ? "" : "s"}` +
-    (table.file_name ? ` · ${table.file_name}` : "") +
-    (Number.isNaN(updated.getTime()) ? "" : ` · ${updated.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`);
+  const rows = `${table.row_count.toLocaleString()} row${table.row_count === 1 ? "" : "s"}`;
+  if (table.source_url) {
+    // Read from Google Sheets: when it was last read (it is read again every 15 minutes).
+    const read = new Date(table.refreshed_at);
+    meta.textContent =
+      `${rows} · Google Sheets${table.source_sheet ? ` (${table.source_sheet})` : ""}` +
+      (Number.isNaN(read.getTime()) ? "" : ` · read ${timeAgo(read)}`);
+  } else {
+    meta.textContent =
+      rows +
+      (table.file_name ? ` · ${table.file_name}` : "") +
+      (Number.isNaN(updated.getTime()) ? "" : ` · ${updated.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`);
+  }
   titles.append(name, meta);
   head.append(titles);
   if (table.private) {
@@ -4438,8 +5361,14 @@ function tableCard(table) {
   actions.className = "list-actions";
   const showing = sheets.open.has(table.id);
   const toggle = button(showing ? "Hide rows" : "Show rows", "rows", () => {
-    if (sheets.open.has(table.id)) sheets.open.delete(table.id);
-    else sheets.open.add(table.id);
+    if (sheets.open.has(table.id)) {
+      sheets.open.delete(table.id);
+      sheets.pages.delete(table.id);
+      sheets.typed.delete(table.id);
+    } else {
+      sheets.open.add(table.id);
+      loadTableRows(table.id);
+    }
     renderTables();
   });
   toggle.setAttribute("aria-expanded", String(showing));
@@ -4462,8 +5391,31 @@ function tableCard(table) {
     if (yes) yes.focus();
   });
   remove.classList.add("danger");
-  actions.append(toggle, edit, replace, remove);
+  const download = document.createElement("a");
+  download.className = "link";
+  download.href = `/api/tables/${encodeURIComponent(table.id)}.xlsx`;
+  download.setAttribute("download", "");
+  download.textContent = "Download";
+  if (table.source_url) {
+    // From Google Sheets: read it again now, or open it there. A file put in its place unlinks it.
+    const again = button(sheets.busy.has(table.id) ? "Reading…" : "Read it again", "refresh", () => refreshTable(table.id));
+    const open = document.createElement("a");
+    open.className = "link";
+    open.href = table.source_url;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.textContent = "Open in Google Sheets";
+    actions.append(toggle, edit, again, open, download, remove);
+  } else {
+    actions.append(toggle, edit, replace, download, remove);
+  }
   card.append(actions);
+  if (table.refresh_error) {
+    const problem = document.createElement("p");
+    problem.className = "hint table-refresh-problem";
+    problem.textContent = `Could not read it from Google Sheets just now: ${table.refresh_error} Oscar answers from the rows it read last.`;
+    card.append(problem);
+  }
 
   if (sheets.confirming === table.id) {
     card.append(
@@ -4486,18 +5438,119 @@ function tableCard(table) {
     );
   }
   card.append(tableErrorLine(table.id));
-  if (showing) {
-    const rows = rowsTable(table.headings, table.sample, { caption: `First rows of ${table.name}` });
-    rows.classList.add("table-card-rows");
-    card.append(rows);
-    if (table.row_count > table.sample.length) {
-      const more = document.createElement("p");
-      more.className = "hint table-more";
-      more.textContent = `The first ${table.sample.length} of ${table.row_count.toLocaleString()} rows.`;
-      card.append(more);
-    }
-  }
+  if (showing) card.append(tableRowsBrowser(table));
   return card;
+}
+
+const TABLE_PAGE_ROWS = 25;
+
+// The card's rows: a page at a time, those with every word searched for.
+function tableRowsBrowser(table) {
+  const page = sheets.pages.get(table.id) || { q: "", rows: table.sample, found: table.row_count, total: table.row_count };
+  const box = document.createElement("div");
+  box.className = "table-browser";
+  if (table.row_count > TABLE_PAGE_ROWS) {
+    const searchId = `table-rows-search-${table.id}`;
+    const label = document.createElement("label");
+    label.className = "visually-hidden";
+    label.htmlFor = searchId;
+    label.textContent = `Search the rows of ${table.name}`;
+    const search = document.createElement("input");
+    search.type = "search";
+    search.id = searchId;
+    search.className = "table-rows-search";
+    search.placeholder = `Search ${table.row_count.toLocaleString()} rows`;
+    search.value = sheets.typed.has(table.id) ? sheets.typed.get(table.id) : page.q;
+    search.dataset.key = `rows-search-${table.id}`;
+    search.addEventListener("input", () => {
+      sheets.typed.set(table.id, search.value);
+      clearTimeout(search.timer);
+      search.timer = setTimeout(() => loadTableRows(table.id, search.value.trim()), 250);
+    });
+    box.append(label, search);
+  }
+  if (page.error) {
+    const error = document.createElement("p");
+    error.className = "error";
+    error.textContent = page.error;
+    box.append(error);
+  }
+  if (page.rows.length) {
+    const rows = rowsTable(table.headings, page.rows, { caption: `Rows of ${table.name}` });
+    rows.classList.add("table-card-rows");
+    box.append(rows);
+  }
+  const count = document.createElement("p");
+  count.className = "hint table-more";
+  count.setAttribute("aria-live", "polite");
+  count.textContent = page.q
+    ? page.found
+      ? `${page.found.toLocaleString()} of ${page.total.toLocaleString()} rows have "${page.q}"${page.rows.length < page.found ? `; showing ${page.rows.length.toLocaleString()}` : ""}.`
+      : `No row has "${page.q}".`
+    : page.rows.length < page.found
+      ? `Showing ${page.rows.length.toLocaleString()} of ${page.found.toLocaleString()} rows.`
+      : `All ${page.found.toLocaleString()} row${page.found === 1 ? "" : "s"}.`;
+  box.append(count);
+  if (page.rows.length < page.found) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "link";
+    more.textContent = page.loading ? "Loading…" : "Show more rows";
+    more.disabled = Boolean(page.loading);
+    more.dataset.key = `rows-more-${table.id}`;
+    more.addEventListener("click", () => loadTableRows(table.id, page.q, page.rows.length));
+    box.append(more);
+  }
+  return box;
+}
+
+async function loadTableRows(id, q = "", offset = 0) {
+  const before = sheets.pages.get(id);
+  const page = { q, rows: offset && before ? before.rows : [], found: before ? before.found : 0, total: before ? before.total : 0 };
+  page.loading = true;
+  page.asked = (before && before.asked ? before.asked : 0) + 1;
+  sheets.pages.set(id, page);
+  if (offset) renderTables();
+  const params = new URLSearchParams({ offset: String(offset), limit: String(TABLE_PAGE_ROWS) });
+  if (q) params.set("q", q);
+  try {
+    const data = await api(`/api/tables/${encodeURIComponent(id)}/rows?${params}`);
+    if (sheets.pages.get(id) !== page) return; // a newer search, or the rows were hidden
+    page.rows = [...page.rows, ...data.rows];
+    page.found = data.found;
+    page.total = data.total;
+    page.error = "";
+  } catch (error) {
+    if (sheets.pages.get(id) !== page) return;
+    page.error = error.message;
+  }
+  page.loading = false;
+  renderTables();
+}
+
+async function refreshTable(id) {
+  sheets.busy.add(id);
+  sheets.errors.delete(id);
+  renderTables();
+  try {
+    const { table } = await api(`/api/tables/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+    sheets.list = sheets.list.map((other) => (other.id === id ? table : other));
+    if (sheets.open.has(id)) loadTableRows(id, (sheets.pages.get(id) || {}).q || "");
+  } catch (error) {
+    sheets.errors.set(id, error.message);
+  } finally {
+    sheets.busy.delete(id);
+    renderTables();
+  }
+}
+
+// "3 min ago", "2 h ago", or the day.
+function timeAgo(date) {
+  const minutes = Math.round((Date.now() - date.getTime()) / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 24 * 60) return `${Math.round(minutes / 60)} h ago`;
+  return date.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
 function tableEditForm(table, button) {
@@ -4598,7 +5651,8 @@ async function replaceTableFile(file) {
     return;
   }
   sheets.replacing = null;
-  await changeTable(id, { rows_csv: read.csv, file_name: file.name });
+  await changeTable(id, { rows_csv: read.csv, file_name: file.name, source_url: "" });
+  if (sheets.open.has(id)) loadTableRows(id);
 }
 
 async function deleteTable(id) {
@@ -4682,6 +5736,16 @@ function setUpTables() {
   });
   $("table-form").addEventListener("submit", addTable);
   $("table-ask").addEventListener("submit", askTables);
+  $("table-link-toggle").addEventListener("click", () =>
+    toggleLinkBox($("table-link-toggle"), $("table-link-box"), $("table-link"), "Hide the link", "Use a Google Sheets link instead"),
+  );
+  $("table-link-read").addEventListener("click", chooseTableLink);
+  $("table-link").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      chooseTableLink();
+    }
+  });
   const replace = document.createElement("input");
   replace.type = "file";
   replace.id = "table-replace-file";
@@ -4698,6 +5762,8 @@ function setUpTables() {
 
 async function init() {
   revealOnScroll();
+  window.addEventListener("resize", fitNavSoon);
+  if (document.fonts) document.fonts.ready.then(fitNavSoon); // the bar's width changes as Inter arrives
   setUpMenu();
   setUpCounters();
   setUpHistory();
@@ -4731,6 +5797,7 @@ async function init() {
   listMicrophones();
   setUpRing();
   setUpSpendChart();
+  setUpStats();
   setUpListForm();
   setUpTables();
   setUpNumbers();
@@ -4774,6 +5841,7 @@ async function init() {
       loadCalls(),
       loadWhatsApp(),
       loadSpending(),
+      loadStats(),
       loadNotify(),
       loadBlocked(),
       loadLists(),
