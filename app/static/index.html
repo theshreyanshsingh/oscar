@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif&display=swap"
     />
-    <link rel="stylesheet" href="/static/style.css?v=24" />
+    <link rel="stylesheet" href="/static/style.css?v=25" />
   </head>
   <body>
     <a class="skip-link" href="#call">Skip to the call</a>
@@ -36,6 +36,7 @@
           <a href="#phone">Phone</a>
           <a href="#lists">Lists</a>
           <a href="#agent">Agent</a>
+          <a href="#data">Data</a>
           <a href="#whatsapp">WhatsApp</a>
           <a href="#history">History</a>
         </div>
@@ -637,6 +638,101 @@
         </div>
       </section>
 
+      <section class="section" id="data" aria-labelledby="data-heading">
+        <div class="title-grid reveal">
+          <div>
+            <p class="eyebrow">Spreadsheets</p>
+            <h2 class="title" id="data-heading">Oscar answers<br />from your sheets</h2>
+          </div>
+          <p class="title-side">
+            Give Oscar your price list, stock, orders or bookings. When a caller, or someone on
+            WhatsApp, asks about them, Oscar finds the rows and answers from them, never from a
+            guess.
+          </p>
+        </div>
+
+        <div class="tables-grid">
+          <form class="panel panel-soft table-form reveal" id="table-form" novalidate>
+            <h3 class="panel-title">Add a spreadsheet</h3>
+            <div class="list-fields">
+              <div class="field span-all">
+                <span class="field-label" id="table-file-label">File</span>
+                <label class="dropzone" id="table-drop" for="table-file">
+                  <input
+                    type="file"
+                    id="table-file"
+                    accept=".csv,.txt,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
+                    aria-labelledby="table-file-label"
+                  />
+                  <span class="dropzone-icon" aria-hidden="true"></span>
+                  <span class="dropzone-text">
+                    <span class="dropzone-title" id="table-file-name">Choose an Excel or CSV file</span>
+                    <span class="dropzone-note" id="table-drop-note">or drop one here: a row for each thing, with headings on top</span>
+                  </span>
+                </label>
+                <div class="list-sheet" id="table-sheet-row" hidden>
+                  <label class="field-label" for="table-sheet">Sheet</label>
+                  <select id="table-sheet"></select>
+                </div>
+                <div class="list-preview table-preview" id="table-preview" aria-live="polite" hidden></div>
+              </div>
+              <div class="field span-all">
+                <label class="field-label" for="table-name">Name</label>
+                <input id="table-name" maxlength="80" placeholder="Price list" required />
+              </div>
+              <div class="field span-all">
+                <label class="field-label" for="table-description">What it holds</label>
+                <input
+                  id="table-description"
+                  maxlength="500"
+                  placeholder="Every product we sell, its colours, price and how many are in stock"
+                  aria-describedby="table-description-hint"
+                />
+                <p class="hint" id="table-description-hint">
+                  One line, in plain words. It is how Oscar knows when to look in this sheet.
+                </p>
+              </div>
+              <div class="field span-all">
+                <label class="check">
+                  <input type="checkbox" id="table-private" />
+                  Private: about people
+                </label>
+                <p class="hint">
+                  For customers, orders or bookings. A caller only hears about the rows that have
+                  the number they are calling from, and someone on WhatsApp only about their own.
+                  Calls from this dashboard see every row.
+                </p>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="table-add"><span class="btn-label">Add spreadsheet</span></button>
+            </div>
+            <p class="error" id="table-error" role="alert" hidden></p>
+          </form>
+
+          <div class="lists-side">
+            <div class="tables" id="tables-cards">
+              <div class="lists-empty panel panel-outline">
+                <p class="panel-title">No spreadsheets yet</p>
+                <p class="hint">Each one you add shows here, with its columns and first rows.</p>
+              </div>
+            </div>
+
+            <form class="panel panel-outline table-ask reveal" id="table-ask" novalidate>
+              <h3 class="panel-title">Try a question</h3>
+              <p class="hint">Ask what a caller would. Oscar answers as it would on a call from this dashboard.</p>
+              <div class="table-ask-row">
+                <label class="visually-hidden" for="table-question">Question</label>
+                <input id="table-question" maxlength="300" placeholder="How much is a pool fence panel?" />
+                <button type="submit" class="secondary" id="table-ask-button">Ask</button>
+              </div>
+              <div class="table-answer" id="table-answer" aria-live="polite" hidden></div>
+              <p class="error" id="table-ask-error" role="alert" hidden></p>
+            </form>
+          </div>
+        </div>
+      </section>
+
       <section class="section" id="whatsapp" aria-labelledby="whatsapp-heading">
         <div class="title-grid reveal">
           <div>
@@ -976,6 +1072,6 @@
       </div>
     </footer>
 
-    <script src="/static/app.js?v=42"></script>
+    <script src="/static/app.js?v=43"></script>
   </body>
 </html>

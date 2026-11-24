@@ -38,7 +38,7 @@ from pipecat.tests.utils import SleepFrame, run_test
 
 from app import speech
 from app.script import ScriptLost
-from app.search import FactsRequest, LookupFailed, SearchRequest, Source, TransferRequest
+from app.search import FactsRequest, LookupFailed, SearchRequest, Source, TablesRequest, TransferRequest
 from app.speech import (
     ANSWER_ATTEMPTS,
     FACTS_FAILED_LINE,
@@ -142,8 +142,11 @@ class Lookup:
         further: str = "",
         can_search: bool = True,
         can_transfer: bool = False,
+        has_tables: bool = False,
     ):
         self.has_facts = has_facts
+        self.has_tables = has_tables
+        self.tables_asked: list[tuple[TablesRequest, list]] = []  # (request, earlier turns) of each
         self.can_search = can_search
         self.can_transfer = can_transfer
         self._further = further  # what a second search in the same turn is for, if there is one
@@ -181,6 +184,13 @@ class Lookup:
             await asyncio.gather(asyncio.sleep(self._answer_after), again(self._further))
             await searched(self._further, [])
         return self._answer
+
+    async def answer_from_tables(self, asked, earlier):
+        self.tables_asked.append((asked, earlier))
+        await asyncio.sleep(self._answer_after)
+        if self._failure:
+            raise LookupFailed(self._failure)
+        return self._answer, [SimpleNamespace(table="Price list", rows=2)]
 
     async def answer_from_facts(self, question, earlier):
         self.facts_asked.append((question, earlier))
@@ -311,6 +321,12 @@ async def run_voice(
     async def on_facts_failed(_, problem):
         facts_failures.append(problem)
 
+    tables_looked_up: list[tuple] = []  # (words, [(sheet, rows)], problem) of each
+
+    @service.event_handler("on_tables_looked_up")
+    async def on_tables_looked_up(_, words, found, problem):
+        tables_looked_up.append((words, found, problem))
+
     script_losses: list[str] = []  # why Oscar's place in its script could not be worked out
 
     @service.event_handler("on_script_lost")
@@ -351,6 +367,7 @@ async def run_voice(
         searches=searches,
         pages=pages,
         facts_failures=facts_failures,
+        tables_looked_up=tables_looked_up,
         script_losses=script_losses,
         closed=closed,
         searching=[frame.active for frame in up if isinstance(frame, SearchingFrame)],
@@ -2063,3 +2080,42 @@ async def test_without_a_number_to_put_through_to_nobody_is_put_through():
 )
 def test_what_counts_as_oscar_saying_it_is_putting_the_caller_through(said, putting_through):
     assert bool(speech._PUTTING_THROUGH.search(said)) is putting_through
+
+
+
+# The owner's spreadsheets
+
+ASKED_TABLES = TablesRequest(words="pool fence panel", question="How much is a pool fence panel?")
+PRICED = "A pool fence panel is three hundred and ten dollars."
+
+
+async def test_a_turn_about_what_the_spreadsheets_hold_is_answered_from_them():
+    context = LLMContext(messages=[{"role": "assistant", "content": "Hi, this is Oscar."}])
+    lookup = Lookup(ASKED_TABLES, answer=PRICED, has_tables=True, can_search=False)
+    call = await run_voice(
+        [*caller_turn(), SleepFrame(0.8)],
+        chat=saying_lines(),
+        lookup=lookup,
+        context=context,
+        reminder="(Keep your accent.)",
+        line_instructions=LINES,
+    )
+    assert call.errors == []
+    # The "one moment" line (recorded as the call began: it has spreadsheets), then the answer.
+    assert call.text == f"{HOLD_LINE} {PRICED}"
+    assert lookup.tables_asked == [(ASKED_TABLES, [{"role": "assistant", "content": "Hi, this is Oscar."}])]
+    assert call.tables_looked_up == [("pool fence panel", [("Price list", 2)], "")]
+    assert (lookup.asked, lookup.facts_asked, call.searches) == ([], [], [])
+    assert call.searching == [True, False]
+    # The speech model was handed the answer to say, never the rows.
+    assert call.chat[-1]["messages"][-1] == {"role": "user", "content": say_request(PRICED)}
+    assert lines_asked_for(call) == [HOLD_LINE, PRICED]
+
+
+async def test_spreadsheets_that_cannot_be_read_are_apologised_for_and_reported():
+    problem = "The spreadsheets could not be read: OpenRouter is out of credits."
+    lookup = Lookup(ASKED_TABLES, failure=problem, has_tables=True, can_search=False)
+    call = await run_voice([*caller_turn(), SleepFrame(0.8)], chat=saying_lines(), lookup=lookup)
+    assert call.text == f"{HOLD_LINE} {FACTS_FAILED_LINE}"
+    assert call.tables_looked_up == [("pool fence panel", [], problem)]
+    assert call.errors == []

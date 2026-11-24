@@ -82,7 +82,16 @@ from app.openrouter import (
     warm_up,
 )
 from app.script import ScriptKeeper, ScriptLost
-from app.search import Decision, FactsRequest, LookupFailed, SearchRequest, Source, TransferRequest, WebLookup
+from app.search import (
+    Decision,
+    FactsRequest,
+    LookupFailed,
+    SearchRequest,
+    Source,
+    TablesRequest,
+    TransferRequest,
+    WebLookup,
+)
 
 # The fastest speech-to-speech model OpenRouter offers. "openai/gpt-audio-mini"
 # costs far less per turn but starts speaking about 0.7 seconds later.
@@ -433,6 +442,8 @@ class OpenRouterVoiceService(AIService):
         self._place_task: asyncio.Task | None = None
         self._register_event_handler("on_web_search")
         self._register_event_handler("on_facts_failed")
+        # What a turn looked up in the owner's spreadsheets: (words, [(sheet, rows shown)], problem).
+        self._register_event_handler("on_tables_looked_up")
         self._register_event_handler("on_script_lost")
         self._register_event_handler("on_farewell_said")
         # The kind of closing line being said ("goodbye", "transfer", "voicemail"),
@@ -511,7 +522,11 @@ class OpenRouterVoiceService(AIService):
                 self.create_task(self._lookup.warm_up())
         # The "one moment" line is for searches and the fact sheet: a lookup that only
         # puts callers through never says it.
-        if self._lookup is not None and (getattr(self._lookup, "can_search", True) or self._lookup.has_facts):
+        if self._lookup is not None and (
+            getattr(self._lookup, "can_search", True)
+            or self._lookup.has_facts
+            or getattr(self._lookup, "has_tables", False)
+        ):
             recorded = self._recorded("hold-line", self._line_instructions, HOLD_LINE)
             if recorded:
                 self._hold_line = (recorded, HOLD_LINE)
@@ -787,6 +802,8 @@ class OpenRouterVoiceService(AIService):
             lookup = await self._reply_or_lookup([*history, *note, turn], deciding)
             if isinstance(lookup, FactsRequest):
                 await self._answer_from_the_facts(history, lookup)
+            elif isinstance(lookup, TablesRequest):
+                await self._answer_from_the_tables(history, lookup)
             elif isinstance(lookup, SearchRequest):
                 await self._answer_from_the_web(history, lookup)
             elif lookup is None and from_caller and self._lookup is not None and self._lookup.can_transfer:
@@ -929,6 +946,37 @@ class OpenRouterVoiceService(AIService):
             await self._say_line([*so_far, {"role": "assistant", "content": HOLD_LINE}], answer)
         finally:
             await self.push_frame(SearchingFrame(active=False), FrameDirection.UPSTREAM)
+
+    async def _answer_from_the_tables(self, history: list[dict], asked: TablesRequest) -> None:
+        """Say what the owner's spreadsheets answer, as for the fact sheet: the rows are found
+        and a text model writes the answer while the "one moment" line plays."""
+        earlier = history[1:]
+        so_far = [
+            {"role": "system", "content": self._line_instructions},
+            *earlier,
+            {"role": "user", "content": asked.question},
+        ]
+        await self.push_frame(SearchingFrame(active=True), FrameDirection.UPSTREAM)
+        try:
+            answer, _ = await asyncio.gather(self._read_the_tables(asked, earlier), self._hold_the_line(so_far))
+            await self._say_line([*so_far, {"role": "assistant", "content": HOLD_LINE}], answer)
+        finally:
+            await self.push_frame(SearchingFrame(active=False), FrameDirection.UPSTREAM)
+
+    async def _read_the_tables(self, asked: TablesRequest, earlier: list[dict]) -> str:
+        """What to tell the caller: the spreadsheets' answer, or that it could not be checked."""
+        problem, found = "", []
+        try:
+            answer, found = await self._lookup.answer_from_tables(asked, earlier)
+        except LookupFailed as exc:
+            answer, problem = FACTS_FAILED_LINE, str(exc)
+        except Exception as exc:  # the caller still gets an answer, if only an apology
+            logger.exception(f"{self}: answering from the spreadsheets broke")
+            answer, problem = FACTS_FAILED_LINE, f"The lookup broke unexpectedly ({exc!r})."
+        await self._call_event_handler(
+            "on_tables_looked_up", asked.words, [(part.table, part.rows) for part in found], problem
+        )
+        return answer
 
     async def _answer_from_the_web(self, history: list[dict], search: SearchRequest) -> None:
         """Look up what the caller asked and say what was found, as one reply."""

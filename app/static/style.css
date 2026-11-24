@@ -3590,3 +3590,172 @@ button.secondary.small {
     margin-bottom: 28px;
   }
 }
+
+/* ---------- spreadsheets Oscar looks things up in ---------- */
+
+.tables-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--gutter);
+}
+
+.table-form .panel-title {
+  margin-bottom: 20px;
+}
+
+.tables {
+  display: grid;
+  gap: var(--gutter);
+}
+
+.table-card {
+  gap: 12px;
+  animation: none;
+}
+
+.table-card.is-new {
+  animation: line-in 0.5s var(--ease) both;
+}
+
+.table-private {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #fff3e0;
+  color: #8a4b00;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.table-about {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.table-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.table-columns li {
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: var(--lavender);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+/* A sheet's rows: small, one line a row, the long cells cut short (their title shows them). */
+.sheet-rows {
+  margin-top: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--white);
+}
+
+.sheet-rows table {
+  font-size: 12.5px;
+}
+
+.sheet-rows th,
+.sheet-rows td {
+  max-width: 220px;
+  padding: 8px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheet-rows tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table-card-rows {
+  margin-top: 0;
+}
+
+.table-more {
+  margin: -4px 0 0;
+}
+
+.table-edit {
+  display: grid;
+  gap: 16px;
+}
+
+.table-ask .hint {
+  margin-top: 4px;
+}
+
+.table-ask-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.table-ask-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.table-answer {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--blue-soft);
+}
+
+.table-said-label {
+  margin: 0 0 4px;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.table-said {
+  margin: 0 0 10px;
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+}
+
+.table-answer .hint {
+  margin: 0;
+}
+
+/* Stacked where the call lists are. */
+@media (max-width: 960px) {
+  .tables-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .sheet-rows {
+    padding: 0 12px;
+  }
+
+  .sheet-rows tbody tr {
+    padding: 10px 0;
+  }
+
+  .sheet-rows td[data-label] {
+    grid-template-columns: 96px minmax(0, 1fr);
+    overflow-wrap: anywhere;
+  }
+
+  .table-ask-row {
+    flex-wrap: wrap;
+  }
+
+  .table-ask-row input {
+    flex-basis: 100%;
+  }
+}

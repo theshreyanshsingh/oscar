@@ -791,6 +791,42 @@ question about you; a text model writes the answer from the facts; the speaking
 model says it word for word. That is the same route a web search takes, and it
 needs no Firecrawl key.
 
+## Spreadsheets Oscar answers from
+
+Under **Data** on the dashboard, give Oscar a spreadsheet: an Excel workbook
+(`.xlsx`, choosing the sheet when it has several) or a CSV, with a row for each
+thing and headings on top. A price list, your stock, orders, bookings, a menu,
+branches and their hours. Up to 10 sheets of 10,000 rows each.
+
+- **Name** it and say in a line **what it holds** ("Every product we sell, its
+  colours, price and how many are in stock"). That line is how Oscar knows when
+  to look in it.
+- **On calls,** a question about what a sheet holds ("How much is a pool fence
+  panel?", "Do you have gates in stock?", "Where is order ORD-10234?") is
+  looked up in it. Oscar says "One moment, let me look that up." and answers
+  from the rows, the same way it answers from What Oscar knows. Each lookup is
+  noted in the call's transcript, with the sheets and how many rows were read.
+- **In WhatsApp,** the chat model can look rows up in the same sheets.
+- **A small sheet** (about 16,000 characters) is read whole, so "What's the
+  cheapest thing you sell?" or "How many do you have in blue?" can be answered.
+  **A big one** is searched: the rows that best match the caller's words, where
+  a rare word (a product name, an order number) counts for more than a common
+  one. Finding the rows takes milliseconds and needs no model.
+- **Private** is for sheets about people (customers, orders, bookings). A caller
+  is only told about the rows that have the number they are calling from (or,
+  on a call Oscar makes, the number it called), and someone on WhatsApp only
+  about the rows with their own number. Calls from the dashboard see every row.
+- **Try a question** on the Data page answers as a call from the dashboard
+  would, and shows the rows Oscar read.
+- **Phone numbers** in a sheet are read out one digit at a time, exactly as
+  written.
+
+Checked on the real models (2026-11-24) with nine caller lines spoken by a
+voice: the six about a price list and an orders sheet went to the sheets and
+were answered right (a price and when it is back in stock, stock, a colour,
+the cheapest item, an order by its number), and the weather, small talk and a
+joke did not.
+
 ## Script
 
 Under **Agent** on the dashboard, **Script** takes the steps of a call, one on
@@ -1245,6 +1281,7 @@ Caller ──audio──▶ transport ──▶ turn detection ──▶ the cal
 | `app/calls.py` | Call bookkeeping and live updates |
 | `app/campaigns.py` | Call lists: reading the rows, each call's instructions, and the dialer |
 | `app/sheets.py` | Excel workbooks for call lists, read into the same rows as a CSV |
+| `app/tables.py` | Spreadsheets Oscar answers from: reading them, finding the rows for a question, private rows |
 | `app/recording.py` | Call recordings: taken during the call, encoded when it ends, kept 90 days |
 | `app/backup.py` | The daily copy of the database |
 | `app/store.py` | SQLite storage and agent settings |

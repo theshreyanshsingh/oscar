@@ -44,6 +44,7 @@ from app.search import WebLookup
 from app.speech import EchoGate, FarewellFrame, GreetingFrame, OpenRouterVoiceService, Recordings
 from app.store import ACCENTS, AgentSettings, Store
 from app.summary import alert_if_missed, start_summary
+from app.tables import Table, tables_from
 
 # Input and output sample rates (Hz). Phone audio is 8 kHz.
 BROWSER_SAMPLE_RATES = (16000, 24000)
@@ -218,6 +219,22 @@ def earlier_calls_note(earlier: list[dict]) -> str:
     return EARLIER_CALLS_NOTE.format(calls="\n".join(lines)) if lines else ""
 
 
+def tables_for(store: Store) -> list[Table]:
+    """The owner's spreadsheets, as a call looks things up in them (app/tables.py)."""
+    return tables_from(store.lookup_tables_with_rows())
+
+
+def caller_for(store: Store, call_id: str) -> str | None:
+    """Whose rows a private spreadsheet may tell about on this call: the number calling in,
+    or the number called. None on a browser call: the owner trying Oscar out sees every row."""
+    call = store.get_call(call_id) or {}
+    if call.get("kind") == "phone_inbound":
+        return call.get("from_number") or ""
+    if call.get("kind") == "phone_outbound":
+        return call.get("to_number") or ""
+    return None
+
+
 def earlier_calls_for(store: Store, call_id: str) -> list[dict]:
     """The earlier calls with the other end of this phone call: the number that is
     calling in, or the number being called. None for a browser call."""
@@ -273,11 +290,17 @@ def line_instruction(agent: AgentSettings) -> str:
 
 
 def build_lookup(
-    cfg: Config, agent: AgentSettings, today: date, meter: CostMeter | None = None
+    cfg: Config,
+    agent: AgentSettings,
+    today: date,
+    meter: CostMeter | None = None,
+    tables: list[Table] = (),
+    caller: str | None = None,
 ) -> WebLookup | None:
-    """What a call can look things up in: the web with a Firecrawl key, and the owner's fact
-    sheet. It also decides when to put a caller through (AgentSettings.transfer_number)."""
-    if not cfg.search_enabled and not agent.knowledge.strip() and not agent.transfer_number:
+    """What a call can look things up in: the web with a Firecrawl key, the owner's fact
+    sheet and spreadsheets (`tables`, looked up for `caller`: see app/tables.py). It also
+    decides when to put a caller through (AgentSettings.transfer_number)."""
+    if not cfg.search_enabled and not agent.knowledge.strip() and not agent.transfer_number and not tables:
         return None
     return WebLookup(
         firecrawl_api_key=cfg.firecrawl_api_key if cfg.search_enabled else "",
@@ -290,6 +313,8 @@ def build_lookup(
         today=spoken_date(today),
         meter=meter,
         can_transfer=bool(agent.transfer_number),
+        tables=list(tables),
+        caller=caller,
     )
 
 
@@ -313,10 +338,13 @@ def build_voice(
     context: LLMContext,
     meter: CostMeter | None = None,
     earlier: list[dict] = (),
+    tables: list[Table] = (),
+    caller: str | None = None,
 ) -> OpenRouterVoiceService:
-    """`earlier` is the caller's number's earlier calls (CallStore.earlier_calls)."""
+    """`earlier` is the caller's number's earlier calls (CallStore.earlier_calls); `tables`
+    the owner's spreadsheets, looked up for `caller` (the other person's number)."""
     today = date.today()
-    lookup = build_lookup(cfg, agent, today, meter)
+    lookup = build_lookup(cfg, agent, today, meter, tables, caller)
     return OpenRouterVoiceService(
         api_key=cfg.openrouter_api_key,
         base_url=cfg.openrouter_base_url,
@@ -427,7 +455,10 @@ async def run_call(
             base_url=cfg.openrouter_base_url,
             spawn=calls.spawn,
         )
-        voice = build_voice(cfg, agent, context, meter, earlier_calls_for(calls.store, call_id))
+        tables = await asyncio.to_thread(tables_for, calls.store)
+        voice = build_voice(
+            cfg, agent, context, meter, earlier_calls_for(calls.store, call_id), tables, caller_for(calls.store, call_id)
+        )
         voice_activity, end_of_turn = await asyncio.to_thread(turn_detectors)
         aggregators = LLMContextAggregatorPair(
             context,
@@ -519,6 +550,18 @@ async def run_call(
             # Oscar has apologised to the caller; the owner should know why.
             logger.warning(f"Call {call_id}: could not answer from the fact sheet: {problem}")
             calls.note_error(call_id, f"Could not answer from what Oscar knows: {problem}")
+
+        @voice.event_handler("on_tables_looked_up")
+        async def on_tables_looked_up(service, words, found, problem):
+            if problem:
+                logger.warning(f"Call {call_id}: could not answer from the spreadsheets: {problem}")
+                calls.note_error(call_id, f"Could not answer from the spreadsheets: {problem}")
+                notes_waiting.append(f"Could not look in the spreadsheets. {problem}")
+            else:
+                shown = ", ".join(f"{name} ({rows} row{'' if rows == 1 else 's'})" for name, rows in found)
+                notes_waiting.append(f"Looked in the spreadsheets for: {words}. Read: {shown or 'nothing'}")
+            if not words_pending:
+                add_waiting_notes()
 
         @voice.event_handler("on_script_lost")
         async def on_script_lost(service, problem):

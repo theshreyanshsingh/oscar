@@ -57,6 +57,7 @@ class IncomingMessage:
     from_me: bool = False
     view_once: bool = False  # a view-once photo/video: never downloaded or described
     expiration: int = 0  # disappearing-messages timer of the chat, in seconds (0 = off)
+    sender_phone: str = ""  # the sender's phone number (digits), when WhatsApp gave it
 
     @property
     def summary(self) -> str:
@@ -71,6 +72,11 @@ def describe(kind: str, text: str) -> str:
         return text.strip()
     placeholder = KIND_PLACEHOLDERS.get(kind, "[message]")
     return f"{placeholder} {text.strip()}".strip()
+
+
+def sender_number(message: "IncomingMessage") -> str:
+    """The sender's phone number ("+61412345678"), or "" when WhatsApp gave only a private id (LID)."""
+    return f"+{message.sender_phone}" if message.sender_phone else ""
 
 
 def user_part(jid: str) -> str:
@@ -269,7 +275,10 @@ def build_system_prompt(
     own_number: bool = False,
     owner_name: str = "",
     knowledge: str = "",
+    tables: str = "",
 ) -> str:
+    """`tables`: what the owner's spreadsheets hold (app/tables.tables_summary), when the
+    model is offered the tool that looks rows up in them."""
     handle = name_handle(agent_name)
     where = f'the WhatsApp group "{chat_label}"' if is_group else f"a private WhatsApp chat with {chat_label}"
     if own_number:
@@ -316,6 +325,17 @@ def build_system_prompt(
             "Answer questions about them, such as hours, prices, address, services and bookings, "
             "only from these facts. If the facts do not cover such a question, say you don't have "
             "that information: do not guess, and do not search the web for it.",
+        ]
+    if tables.strip():
+        # The same spreadsheets Oscar looks things up in on calls (app/tables.py).
+        lines += [
+            "",
+            "The business's spreadsheets, which the look_up_spreadsheets tool looks things up in:",
+            tables.strip(),
+            "Look things up in them whenever someone asks about what they hold (a product, a "
+            "price, what is in stock, an order, a booking, a person), and answer what they hold "
+            "only from the rows it gives back. A private spreadsheet only gives back the rows "
+            "about the person writing: never say anything about anyone else in it.",
         ]
     if instructions.strip():
         lines += ["", "Extra instructions from the group's owner:", instructions.strip()]

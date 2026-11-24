@@ -395,6 +395,20 @@ class Store:
                     status_callback_method TEXT NOT NULL DEFAULT '',
                     connected_at TEXT NOT NULL
                 );
+                -- Spreadsheets Oscar looks things up in on calls and WhatsApp (app/tables.py):
+                -- the rows as JSON, read whole when a call starts.
+                CREATE TABLE IF NOT EXISTS lookup_tables (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    private INTEGER NOT NULL DEFAULT 0,
+                    file_name TEXT NOT NULL DEFAULT '',
+                    headings TEXT NOT NULL,
+                    rows TEXT NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 -- Numbers disconnected from Oscar in the dashboard: Oscar does not connect them
                 -- again by itself (when it starts, or on choosing one to call from) until
                 -- they are connected in the dashboard again (app/numbers.py).
@@ -1036,6 +1050,82 @@ class Store:
     def forget_number_connection(self, sid: str) -> None:
         with self._lock:
             self._db.execute("DELETE FROM number_connections WHERE sid = ?", (sid,))
+
+    # Spreadsheets Oscar looks things up in (app/tables.py)
+
+    _TABLE_ABOUT = "id, name, description, private, file_name, headings, row_count, created_at, updated_at"
+
+    @staticmethod
+    def _table_about(row) -> dict:
+        about = dict(row)
+        about["private"] = bool(about["private"])
+        about["headings"] = json.loads(about["headings"])
+        return about
+
+    def list_lookup_tables(self) -> list[dict]:
+        """The sheets, without their rows, oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._TABLE_ABOUT} FROM lookup_tables ORDER BY created_at, rowid"
+            ).fetchall()
+        return [self._table_about(row) for row in rows]
+
+    def get_lookup_table(self, table_id: str) -> dict | None:
+        """One sheet with its rows ("rows": a list of lists)."""
+        with self._lock:
+            row = self._db.execute("SELECT * FROM lookup_tables WHERE id = ?", (table_id,)).fetchone()
+        if row is None:
+            return None
+        table = self._table_about(row)
+        table["rows"] = json.loads(row["rows"])
+        return table
+
+    def lookup_tables_with_rows(self) -> list[dict]:
+        """Every sheet with its rows, as a call or WhatsApp reads them."""
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM lookup_tables ORDER BY created_at, rowid").fetchall()
+        return [{**self._table_about(row), "rows": json.loads(row["rows"])} for row in rows]
+
+    def add_lookup_table(
+        self, *, name: str, description: str, private: bool, file_name: str, headings: list[str], rows: list[list[str]]
+    ) -> dict:
+        table_id = uuid.uuid4().hex
+        now = utc_now()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO lookup_tables (id, name, description, private, file_name, headings, rows, row_count, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    table_id, name, description, int(private), file_name,
+                    json.dumps(headings, ensure_ascii=False), json.dumps(rows, ensure_ascii=False),
+                    len(rows), now, now,
+                ),
+            )
+        return self.get_lookup_table(table_id)
+
+    def update_lookup_table(self, table_id: str, **fields) -> dict | None:
+        """Change a sheet's name, description, privacy, or (with file_name, headings and rows) its rows."""
+        unknown = set(fields) - {"name", "description", "private", "file_name", "headings", "rows"}
+        if unknown:
+            raise ValueError(f"Not fields of a sheet: {', '.join(sorted(unknown))}")
+        values = dict(fields)
+        if "private" in values:
+            values["private"] = int(values["private"])
+        if "headings" in values:
+            values["headings"] = json.dumps(values["headings"], ensure_ascii=False)
+        if "rows" in values:
+            values["row_count"] = len(values["rows"])
+            values["rows"] = json.dumps(values["rows"], ensure_ascii=False)
+        values["updated_at"] = utc_now()
+        assignments = ", ".join(f"{name} = ?" for name in values)
+        with self._lock:
+            self._db.execute(f"UPDATE lookup_tables SET {assignments} WHERE id = ?", (*values.values(), table_id))
+        return self.get_lookup_table(table_id)
+
+    def delete_lookup_table(self, table_id: str) -> bool:
+        with self._lock:
+            cursor = self._db.execute("DELETE FROM lookup_tables WHERE id = ?", (table_id,))
+        return cursor.rowcount > 0
 
     def leave_number_alone(self, sid: str, phone_number: str) -> None:
         with self._lock:

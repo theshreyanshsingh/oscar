@@ -1618,6 +1618,7 @@ function connectEvents() {
     else if (data.type === "campaign_deleted") onListDeleted(data.id);
     else if (data.type === "do_not_call") loadLists().catch(() => {});
     else if (data.type === "numbers") loadNumbers().catch(() => {});
+    else if (data.type === "tables") loadTables().catch(() => {});
   };
 }
 
@@ -3921,6 +3922,584 @@ function setUpNumbers() {
 
 // ---------- start ----------
 
+// ---------- spreadsheets Oscar looks things up in (app/tables.py) ----------
+
+const sheets = {
+  list: [],
+  most: 10,
+  csv: "", // the rows of the file chosen in "Add a spreadsheet"
+  fileName: "",
+  workbook: null, // the Excel file chosen, to read another of its sheets
+  fileAsked: 0, // a file read that finishes after a newer choice is dropped
+  previewAsked: 0,
+  open: new Set(), // cards showing their first rows
+  editing: null, // the card being edited
+  confirming: null, // the card asking "Delete?"
+  replacing: null, // the card whose file is being replaced
+  busy: new Set(), // cards with a change on its way
+  errors: new Map(), // card -> what went wrong last, kept when cards are drawn again
+  fresh: new Set(), // cards just added: only they fade in (not every card, each time they are drawn)
+};
+
+function tableError(id, message) {
+  if (message) sheets.errors.set(id, message);
+  else sheets.errors.delete(id);
+  renderTables();
+}
+
+function tableErrorLine(id) {
+  const error = document.createElement("p");
+  error.className = "error";
+  error.id = `table-error-${id}`;
+  error.setAttribute("role", "alert");
+  error.textContent = sheets.errors.get(id) || "";
+  error.hidden = !error.textContent;
+  return error;
+}
+
+const SHEET_DROP_NOTE = "or drop one here: a row for each thing, with headings on top";
+
+async function loadTables() {
+  const data = await api("/api/tables");
+  sheets.list = data.tables;
+  sheets.most = data.most;
+  renderTables();
+}
+
+// A file's rows as CSV text: an Excel workbook is read by Oscar (one sheet), a CSV as it is.
+async function rowsOfFile(file, sheet = "") {
+  if (!SPREADSHEET_FILE.test(file.name)) {
+    if (file.size > 2_000_000) throw new Error("That file is over 2 MB. Keep the columns Oscar needs.");
+    return { csv: await file.text(), sheets: [], sheet: "" };
+  }
+  if (file.size > 10_000_000) throw new Error("That workbook is over 10 MB. Keep just the sheet Oscar needs.");
+  return readWorkbook(file, sheet);
+}
+
+function nameFromFile(fileName, sheet) {
+  const base = fileName.replace(/\.(csv|txt|xlsx|xlsm)$/i, "").replace(/[_-]+/g, " ").trim();
+  const name = sheet && !/^sheet\s*\d*$/i.test(sheet) ? sheet : base;
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+async function chooseTableFile(file) {
+  if (!file) return;
+  showError("table-error", "");
+  const asked = ++sheets.fileAsked;
+  $("table-file-name").textContent = `Reading ${file.name}…`;
+  let read;
+  try {
+    read = await rowsOfFile(file);
+  } catch (error) {
+    if (asked !== sheets.fileAsked) return;
+    $("table-file-name").textContent = sheets.fileName || "Choose an Excel or CSV file";
+    showError("table-error", error.message);
+    return;
+  }
+  if (asked !== sheets.fileAsked) return;
+  sheets.csv = read.csv;
+  sheets.fileName = file.name;
+  sheets.workbook = read.sheets.length ? file : null;
+  const select = $("table-sheet");
+  select.replaceChildren(...read.sheets.map((name) => new Option(name, name)));
+  select.value = read.sheet;
+  $("table-sheet-row").hidden = read.sheets.length < 2;
+  $("table-file-name").textContent = file.name;
+  $("table-drop-note").textContent = "Choose another file, or drop one here";
+  $("table-drop").classList.add("chosen");
+  if (!$("table-name").value.trim()) $("table-name").value = nameFromFile(file.name, read.sheet);
+  await previewTable();
+}
+
+async function chooseTableSheet(sheet) {
+  if (!sheets.workbook) return;
+  const asked = ++sheets.fileAsked;
+  const select = $("table-sheet");
+  select.disabled = true;
+  showError("table-error", "");
+  try {
+    const read = await readWorkbook(sheets.workbook, sheet);
+    if (asked !== sheets.fileAsked) return;
+    sheets.csv = read.csv;
+    await previewTable();
+  } catch (error) {
+    if (asked === sheets.fileAsked) showError("table-error", error.message);
+  } finally {
+    if (asked === sheets.fileAsked) select.disabled = false;
+  }
+}
+
+function rowsTable(headings, rows, { caption = "" } = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap sheet-rows";
+  const table = document.createElement("table");
+  if (caption) {
+    const words = document.createElement("caption");
+    words.className = "visually-hidden";
+    words.textContent = caption;
+    table.append(words);
+  }
+  const head = document.createElement("thead");
+  const top = document.createElement("tr");
+  for (const heading of headings) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = heading;
+    top.append(cell);
+  }
+  head.append(top);
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const line = document.createElement("tr");
+    row.forEach((value, column) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      cell.title = value;
+      cell.dataset.label = headings[column] || ""; // on phones each row is a card, values under their headings
+      line.append(cell);
+    });
+    body.append(line);
+  }
+  table.append(head, body);
+  wrap.append(table);
+  return wrap;
+}
+
+async function previewTable() {
+  const box = $("table-preview");
+  const asked = ++sheets.previewAsked;
+  if (!sheets.csv.trim()) {
+    box.hidden = true;
+    return;
+  }
+  try {
+    const preview = await api("/api/tables/preview", {
+      method: "POST",
+      body: JSON.stringify({ rows_csv: sheets.csv }),
+    });
+    if (asked !== sheets.previewAsked) return;
+    box.classList.remove("bad");
+    const title = document.createElement("p");
+    title.className = "preview-headline";
+    title.textContent = `${preview.count.toLocaleString()} row${preview.count === 1 ? "" : "s"}, ${preview.headings.length} column${preview.headings.length === 1 ? "" : "s"}`;
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "The first rows, as Oscar will read them:";
+    box.replaceChildren(title, hint, rowsTable(preview.headings, preview.sample.slice(0, 3), { caption: "First rows" }));
+  } catch (error) {
+    if (asked !== sheets.previewAsked) return;
+    box.classList.add("bad");
+    const title = document.createElement("p");
+    title.className = "preview-headline";
+    title.textContent = error.message;
+    box.replaceChildren(title);
+  }
+  box.hidden = false;
+}
+
+function resetTableForm() {
+  for (const id of ["table-name", "table-description"]) $(id).value = "";
+  $("table-private").checked = false;
+  $("table-file").value = "";
+  sheets.csv = "";
+  sheets.fileName = "";
+  sheets.workbook = null;
+  sheets.fileAsked += 1;
+  sheets.previewAsked += 1;
+  $("table-sheet-row").hidden = true;
+  $("table-file-name").textContent = "Choose an Excel or CSV file";
+  $("table-drop-note").textContent = SHEET_DROP_NOTE;
+  $("table-drop").classList.remove("chosen");
+  $("table-preview").hidden = true;
+}
+
+async function addTable(event) {
+  event.preventDefault();
+  showError("table-error", "");
+  if (!sheets.csv.trim()) {
+    showError("table-error", "Choose an Excel or CSV file first.");
+    return;
+  }
+  if (!$("table-name").value.trim()) {
+    showError("table-error", "Give the spreadsheet a name.");
+    $("table-name").focus();
+    return;
+  }
+  const button = $("table-add");
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    const { table } = await api("/api/tables", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("table-name").value,
+        description: $("table-description").value,
+        private: $("table-private").checked,
+        file_name: sheets.fileName,
+        rows_csv: sheets.csv,
+      }),
+    });
+    sheets.list = [...sheets.list.filter((other) => other.id !== table.id), table];
+    sheets.fresh.add(table.id);
+    renderTables();
+    resetTableForm();
+    const card = document.querySelector(`[data-table-id="${CSS.escape(table.id)}"]`);
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (error) {
+    showError("table-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderTables() {
+  const box = $("tables-cards");
+  keepFocus(box, () => {
+    box.replaceChildren();
+    if (!sheets.list.length) {
+      const empty = document.createElement("div");
+      empty.className = "lists-empty panel panel-outline";
+      const title = document.createElement("p");
+      title.className = "panel-title";
+      title.textContent = "No spreadsheets yet";
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = "Each one you add shows here, with its columns and first rows.";
+      empty.append(title, hint);
+      box.append(empty);
+    }
+    for (const table of sheets.list) box.append(tableCard(table));
+  });
+  const full = sheets.list.length >= sheets.most;
+  $("table-add").disabled = full;
+  $("table-add").title = full ? `Oscar can have ${sheets.most} spreadsheets. Delete one to add another.` : "";
+  $("table-ask-button").disabled = !sheets.list.length;
+}
+
+function tableCard(table) {
+  const card = document.createElement("article");
+  card.className = "list-card table-card panel panel-outline";
+  if (sheets.fresh.delete(table.id)) card.classList.add("is-new");
+  card.dataset.tableId = table.id;
+  const busy = sheets.busy.has(table.id);
+  const button = (label, key, handler, className = "link") => {
+    const element = document.createElement("button");
+    element.type = "button";
+    element.className = className;
+    element.textContent = label;
+    element.dataset.key = `${key}-${table.id}`;
+    element.disabled = busy;
+    element.addEventListener("click", handler);
+    return element;
+  };
+
+  if (sheets.editing === table.id) {
+    card.append(tableEditForm(table, button));
+    return card;
+  }
+
+  const head = document.createElement("div");
+  head.className = "list-head";
+  const titles = document.createElement("div");
+  const name = document.createElement("h3");
+  name.className = "list-name";
+  name.textContent = table.name;
+  const meta = document.createElement("p");
+  meta.className = "list-meta";
+  const updated = new Date(table.updated_at);
+  meta.textContent =
+    `${table.row_count.toLocaleString()} row${table.row_count === 1 ? "" : "s"}` +
+    (table.file_name ? ` · ${table.file_name}` : "") +
+    (Number.isNaN(updated.getTime()) ? "" : ` · ${updated.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`);
+  titles.append(name, meta);
+  head.append(titles);
+  if (table.private) {
+    const badge = document.createElement("span");
+    badge.className = "table-private";
+    badge.textContent = "Private";
+    badge.title = "Callers only hear about their own rows";
+    head.append(badge);
+  }
+  card.append(head);
+
+  if (table.description) {
+    const about = document.createElement("p");
+    about.className = "table-about";
+    about.textContent = table.description;
+    card.append(about);
+  }
+  const columns = document.createElement("ul");
+  columns.className = "table-columns";
+  columns.setAttribute("aria-label", "Columns");
+  for (const heading of table.headings) {
+    const item = document.createElement("li");
+    item.textContent = heading;
+    columns.append(item);
+  }
+  card.append(columns);
+
+  const actions = document.createElement("div");
+  actions.className = "list-actions";
+  const showing = sheets.open.has(table.id);
+  const toggle = button(showing ? "Hide rows" : "Show rows", "rows", () => {
+    if (sheets.open.has(table.id)) sheets.open.delete(table.id);
+    else sheets.open.add(table.id);
+    renderTables();
+  });
+  toggle.setAttribute("aria-expanded", String(showing));
+  const replace = button(sheets.replacing === table.id ? "Reading…" : "Replace file", "replace", () => {
+    sheets.replacing = table.id;
+    $("table-replace-file").value = "";
+    $("table-replace-file").click();
+  });
+  const edit = button("Edit", "edit", () => {
+    sheets.editing = table.id;
+    sheets.confirming = null;
+    renderTables();
+    const field = document.querySelector(`[data-key="edit-name-${CSS.escape(table.id)}"]`);
+    if (field) field.focus();
+  });
+  const remove = button("Delete", "delete", () => {
+    sheets.confirming = table.id;
+    renderTables();
+    const yes = document.querySelector(`[data-key="delete-table-yes-${CSS.escape(table.id)}"]`);
+    if (yes) yes.focus();
+  });
+  remove.classList.add("danger");
+  actions.append(toggle, edit, replace, remove);
+  card.append(actions);
+
+  if (sheets.confirming === table.id) {
+    card.append(
+      confirmBox({
+        id: `table-delete-${table.id}`,
+        text: `Delete "${table.name}"? Oscar stops looking things up in it straight away.`,
+        yesLabel: "Delete spreadsheet",
+        yesClass: "danger-button",
+        yesKey: `delete-table-yes-${table.id}`,
+        noLabel: "Keep it",
+        noKey: `delete-table-no-${table.id}`,
+        busy,
+        onYes: () => deleteTable(table.id),
+        onNo: () => {
+          sheets.confirming = null;
+          renderTables();
+          focusKey(`delete-${table.id}`);
+        },
+      }),
+    );
+  }
+  card.append(tableErrorLine(table.id));
+  if (showing) {
+    const rows = rowsTable(table.headings, table.sample, { caption: `First rows of ${table.name}` });
+    rows.classList.add("table-card-rows");
+    card.append(rows);
+    if (table.row_count > table.sample.length) {
+      const more = document.createElement("p");
+      more.className = "hint table-more";
+      more.textContent = `The first ${table.sample.length} of ${table.row_count.toLocaleString()} rows.`;
+      card.append(more);
+    }
+  }
+  return card;
+}
+
+function tableEditForm(table, button) {
+  const form = document.createElement("form");
+  form.className = "table-edit";
+  form.noValidate = true;
+  const field = (label, key, value, maxLength) => {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
+    const id = `${key}-${table.id}`;
+    const words = document.createElement("label");
+    words.className = "field-label";
+    words.htmlFor = id;
+    words.textContent = label;
+    const input = document.createElement("input");
+    input.id = id;
+    input.maxLength = maxLength;
+    input.value = value;
+    input.dataset.key = `${key}-${table.id}`;
+    wrap.append(words, input);
+    return [wrap, input];
+  };
+  const [nameField, name] = field("Name", "edit-name", table.name, 80);
+  const [aboutField, about] = field("What it holds", "edit-about", table.description, 500);
+  const privacy = document.createElement("label");
+  privacy.className = "check";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = table.private;
+  privacy.append(box, document.createTextNode(" Private: about people"));
+  const actions = document.createElement("div");
+  actions.className = "list-actions";
+  const save = button("Save", "edit-save", () => form.requestSubmit(), "secondary");
+  save.type = "submit";
+  const cancel = button("Cancel", "edit-cancel", () => {
+    sheets.editing = null;
+    renderTables();
+    focusKey(`edit-${table.id}`);
+  });
+  actions.append(save, cancel);
+  form.append(nameField, aboutField, privacy, actions, tableErrorLine(table.id));
+  form.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") cancel.click();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!name.value.trim()) {
+      sheets.errors.set(table.id, "Give the spreadsheet a name.");
+      const line = form.querySelector(".error");
+      line.textContent = "Give the spreadsheet a name.";
+      line.hidden = false;
+      name.focus();
+      return;
+    }
+    const done = await changeTable(table.id, { name: name.value, description: about.value, private: box.checked });
+    if (done) {
+      sheets.editing = null;
+      renderTables();
+      focusKey(`edit-${table.id}`);
+    }
+  });
+  return form;
+}
+
+async function changeTable(id, changes) {
+  sheets.busy.add(id);
+  sheets.errors.delete(id);
+  renderTables();
+  try {
+    const { table } = await api(`/api/tables/${id}`, { method: "PUT", body: JSON.stringify(changes) });
+    sheets.list = sheets.list.map((other) => (other.id === id ? table : other));
+    return true;
+  } catch (error) {
+    sheets.errors.set(id, error.message);
+    return false;
+  } finally {
+    sheets.busy.delete(id);
+    renderTables();
+  }
+}
+
+async function replaceTableFile(file) {
+  const id = sheets.replacing;
+  if (!file || !id) {
+    sheets.replacing = null;
+    return;
+  }
+  sheets.busy.add(id);
+  sheets.errors.delete(id);
+  renderTables();
+  let read;
+  try {
+    read = await rowsOfFile(file);
+  } catch (error) {
+    sheets.busy.delete(id);
+    sheets.replacing = null;
+    tableError(id, error.message);
+    return;
+  }
+  sheets.replacing = null;
+  await changeTable(id, { rows_csv: read.csv, file_name: file.name });
+}
+
+async function deleteTable(id) {
+  sheets.busy.add(id);
+  renderTables();
+  try {
+    await api(`/api/tables/${id}`, { method: "DELETE" });
+    sheets.list = sheets.list.filter((table) => table.id !== id);
+    sheets.confirming = null;
+    sheets.open.delete(id);
+  } catch (error) {
+    sheets.confirming = null;
+    sheets.errors.set(id, error.message);
+  } finally {
+    sheets.busy.delete(id);
+    renderTables();
+  }
+}
+
+async function askTables(event) {
+  event.preventDefault();
+  const question = $("table-question").value.trim();
+  showError("table-ask-error", "");
+  if (!question) {
+    $("table-question").focus();
+    return;
+  }
+  const button = $("table-ask-button");
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = "Asking…";
+  const box = $("table-answer");
+  try {
+    const { answer, found } = await api("/api/tables/ask", {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    });
+    const said = document.createElement("p");
+    said.className = "table-said";
+    said.textContent = answer;
+    const label = document.createElement("p");
+    label.className = "table-said-label";
+    label.textContent = `${state.agentSettings ? state.agentSettings.name : "Oscar"} would say`;
+    const parts = [label, said];
+    const read = found.filter((part) => part.rows);
+    const where = document.createElement("p");
+    where.className = "hint";
+    where.textContent = read.length
+      ? `From ${read.map((part) => `${part.table} (${part.rows} row${part.rows === 1 ? "" : "s"})`).join(", ")}:`
+      : "No rows matched the question.";
+    parts.push(where);
+    for (const part of read) {
+      parts.push(rowsTable(part.headings, part.cells.slice(0, 8), { caption: `Rows of ${part.table} Oscar read` }));
+    }
+    box.replaceChildren(...parts);
+    box.hidden = false;
+  } catch (error) {
+    showError("table-ask-error", error.message);
+  } finally {
+    button.disabled = !sheets.list.length;
+    button.textContent = "Ask";
+  }
+}
+
+function setUpTables() {
+  const drop = $("table-drop");
+  $("table-file").addEventListener("change", (event) => chooseTableFile(event.target.files[0]));
+  $("table-sheet").addEventListener("change", (event) => chooseTableSheet(event.target.value));
+  for (const type of ["dragenter", "dragover"]) {
+    drop.addEventListener(type, (event) => {
+      event.preventDefault();
+      drop.classList.add("over");
+    });
+  }
+  for (const type of ["dragleave", "drop"]) {
+    drop.addEventListener(type, () => drop.classList.remove("over"));
+  }
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault();
+    chooseTableFile(event.dataTransfer.files[0]);
+  });
+  $("table-form").addEventListener("submit", addTable);
+  $("table-ask").addEventListener("submit", askTables);
+  const replace = document.createElement("input");
+  replace.type = "file";
+  replace.id = "table-replace-file";
+  replace.accept = $("table-file").accept;
+  replace.hidden = true;
+  replace.addEventListener("change", (event) => replaceTableFile(event.target.files[0]));
+  // Cancelled: nothing is being replaced.
+  replace.addEventListener("cancel", () => {
+    sheets.replacing = null;
+    renderTables();
+  });
+  document.body.append(replace);
+}
+
 async function init() {
   revealOnScroll();
   setUpMenu();
@@ -3956,6 +4535,7 @@ async function init() {
   setUpRing();
   setUpSpendChart();
   setUpListForm();
+  setUpTables();
   setUpNumbers();
   setUpSignOut();
   loadModelSuggestions();
@@ -4000,6 +4580,7 @@ async function init() {
       loadNotify(),
       loadBlocked(),
       loadLists(),
+      loadTables(),
     ]);
     // A link to one call (?call=…) opens it.
     const linked = new URL(location.href).searchParams.get("call");

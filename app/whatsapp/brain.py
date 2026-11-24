@@ -2,13 +2,15 @@
 
 When Oscar may search the web, the model is offered a search tool. Each search
 it asks for is run through Firecrawl (app/search.py) and the pages found are
-handed back, until it answers.
+handed back, until it answers. With the owner's spreadsheets (app/tables.py) it
+is offered a tool to look rows up in them, answered the same way.
 """
 
 import asyncio
 import base64
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -42,6 +44,31 @@ WEB_SEARCH_TOOL = {
         },
     },
 }
+# What the model is offered when the owner has spreadsheets (app/tables.py).
+TABLES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "look_up_spreadsheets",
+        "description": (
+            "Look things up in the business's spreadsheets (listed in your instructions). "
+            "Returns the rows that match, or all of a small sheet's rows."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "words": {
+                    "type": "string",
+                    "description": (
+                        "What to look for, as it would be written in the sheet: names, numbers, "
+                        "codes, colours or kinds of thing."
+                    ),
+                }
+            },
+            "required": ["words"],
+        },
+    },
+}
+
 # How many times one reply may go back to search again, and how many searches
 # it may run each time. After that the model has to answer with what it has.
 MAX_SEARCH_ROUNDS = 3
@@ -111,18 +138,23 @@ def _tool_calls(message: dict) -> list[dict]:
     return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
 
 
-def _query(call: dict) -> str:
-    """What a tool call asks to search for. Empty when it is not a usable search."""
+def _argument(call: dict, tool: dict, name: str) -> str:
+    """One argument of a call of `tool`. Empty when the call is not a usable one of it."""
     function = call.get("function")
     function = function if isinstance(function, dict) else {}
-    if function.get("name") != WEB_SEARCH_TOOL["function"]["name"]:
+    if function.get("name") != tool["function"]["name"]:
         return ""
     try:
         arguments = json.loads(function.get("arguments") or "{}")
     except ValueError:
         return ""
-    query = arguments.get("query") if isinstance(arguments, dict) else None
-    return query.strip() if isinstance(query, str) else ""
+    value = arguments.get(name) if isinstance(arguments, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _query(call: dict) -> str:
+    """What a tool call asks to search for. Empty when it is not a usable search."""
+    return _argument(call, WEB_SEARCH_TOOL, "query")
 
 
 async def generate_reply(
@@ -139,6 +171,7 @@ async def generate_reply(
     search_problems: list[str] | None = None,
     base_url: str = DEFAULT_BASE_URL,
     client: httpx.AsyncClient | None = None,
+    look_up_rows: Callable[[str], str] | None = None,
 ) -> str:
     """Ask the model for a reply.
 
@@ -150,7 +183,11 @@ async def generate_reply(
     Searching needs a Firecrawl key as well as `web_search`. A search that
     fails does not fail the reply: the model is told, and the reason is added
     to `search_problems` for the dashboard.
+
+    `look_up_rows(words)` gives the rows of the owner's spreadsheets for some
+    words, as text: with it the model can look things up in them too.
     """
+    can_search = web_search and bool(firecrawl_api_key)
     if not api_key:
         raise BrainError("OPENROUTER_API_KEY is not set in .env.")
 
@@ -163,7 +200,8 @@ async def generate_reply(
         return await http.post(url, json=body, headers=headers)
 
     def payload(search: bool, with_images: bool) -> dict:
-        prompt = system_prompt if search or not web_search else (
+        # `search`: the model is offered its tools (the web, the spreadsheets).
+        prompt = system_prompt if search or not (web_search or look_up_rows) else (
             system_prompt_without_search or system_prompt
         )
         text = request_text if with_images or not images else request_text + NO_IMAGES_NOTE
@@ -176,12 +214,18 @@ async def generate_reply(
             "max_tokens": MAX_OUTPUT_TOKENS,
         }
         if search:
-            body["tools"] = [WEB_SEARCH_TOOL]
+            body["tools"] = [WEB_SEARCH_TOOL] * can_search + [TABLES_TOOL] * bool(look_up_rows)
         return body
 
     async def searched(call: dict, allowed: bool) -> dict:
         """The result of one search the model asked for, as the message it gets back."""
-        query = _query(call)
+        words = _argument(call, TABLES_TOOL, "words")
+        if words and look_up_rows is not None:
+            found = await asyncio.to_thread(look_up_rows, words) if allowed else (
+                "Nothing was looked up: that is too many lookups at once."
+            )
+            return {"role": "tool", "tool_call_id": call.get("id") or "", "content": found or "Nothing matched."}
+        query = _query(call) if can_search else ""
         if not query:
             found = "No search was run: the request gave nothing to search for."
         elif not allowed:
@@ -230,7 +274,7 @@ async def generate_reply(
 
     # (web search, photos), from the fullest request to the plainest.
     attempts: list[tuple[bool, bool]] = []
-    if web_search and firecrawl_api_key:
+    if can_search or look_up_rows is not None:
         attempts.append((True, bool(images)))
     attempts.append((False, bool(images)))
     if images:

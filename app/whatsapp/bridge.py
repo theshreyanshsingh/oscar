@@ -39,6 +39,7 @@ from neonize.utils.enum import ChatPresence, ChatPresenceMedia, Presence
 
 from app.config import Config
 from app.store import WHATSAPP_HEARTBEAT_SECONDS, Store
+from app.tables import look_up, tables_from, tables_summary
 from app.whatsapp import brain, voice
 from app.whatsapp.chat import (
     ChatMemory,
@@ -51,6 +52,7 @@ from app.whatsapp.chat import (
     is_too_old_to_answer,
     name_handle,
     oscar_label,
+    sender_number,
 )
 
 logger = logging.getLogger("oscar.whatsapp")
@@ -147,6 +149,15 @@ def parse_message(event: MessageEv) -> IncomingMessage | None:
     sender_ids = {_jid_user(source.Sender)}
     if source.HasField("SenderAlt"):
         sender_ids.add(_jid_user(source.SenderAlt))
+    # Of those, the one that is a phone number (the other kind is WhatsApp's private LID).
+    sender_phone = next(
+        (
+            _jid_user(jid)
+            for jid in (source.Sender, source.SenderAlt if source.HasField("SenderAlt") else None)
+            if jid is not None and jid.Server == "s.whatsapp.net" and _jid_user(jid).isdigit()
+        ),
+        "",
+    )
 
     mentioned: set[str] = set()
     quoted_sender = quoted_text = quoted_kind = ""
@@ -169,6 +180,7 @@ def parse_message(event: MessageEv) -> IncomingMessage | None:
         is_group=source.IsGroup,
         message_id=event.Info.ID,
         sender_ids=frozenset(filter(None, sender_ids)),
+        sender_phone=sender_phone,
         sender_name=event.Info.Pushname,
         timestamp=timestamp,
         text=text,
@@ -513,7 +525,15 @@ class WhatsAppBridge:
 
             now = datetime.now().astimezone()
 
-            def system_prompt(web_search: bool) -> str:
+            # The owner's spreadsheets, and whose rows a private one may give: the sender's
+            # (by their WhatsApp number), or every row for the owner writing on their own phone.
+            tables = tables_from(self.store.lookup_tables_with_rows())
+            caller = None if message.from_me else sender_number(message)
+
+            def look_up_rows(words: str) -> str:
+                return "\n\n".join(part.text for part in look_up(tables, words, caller))
+
+            def system_prompt(web_search: bool, with_tables: bool = True) -> str:
                 return build_system_prompt(
                     agent_name=agent.name,
                     chat_label=chat_label,
@@ -524,6 +544,7 @@ class WhatsAppBridge:
                     own_number=own_number,
                     owner_name=self._owner_name,
                     knowledge=agent.knowledge,
+                    tables=tables_summary(tables) if with_tables else "",
                 )
 
             # Searching is the owner's choice, and it needs a Firecrawl key.
@@ -549,14 +570,15 @@ class WhatsAppBridge:
                     base_url=self.cfg.openrouter_base_url,
                     model=agent.model,
                     system_prompt=system_prompt(can_search),
-                    # Used if the model turns out not to support web search.
-                    system_prompt_without_search=system_prompt(False),
+                    # Used if the model turns out not to support tools (search, spreadsheets).
+                    system_prompt_without_search=system_prompt(False, with_tables=False),
                     request_text=request_text,
                     images=images,
                     web_search=can_search,
                     firecrawl_api_key=self.cfg.firecrawl_api_key,
                     firecrawl_base_url=self.cfg.firecrawl_base_url,
                     search_problems=search_problems,
+                    look_up_rows=look_up_rows if tables else None,
                 )
                 reply = clean_reply(raw, agent.name) or SORRY_REPLY
                 if search_problems:

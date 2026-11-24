@@ -1509,3 +1509,75 @@ async def test_a_voice_note_that_cannot_be_made_out_is_asked_for_in_writing(setu
     assert setup.client.replies[0][0] == bridge_module.VOICE_UNCLEAR_REPLY
     (activity,) = setup.store.list_whatsapp_activity()
     assert why in activity["error"]
+
+
+# The owner's spreadsheets (app/tables.py)
+
+
+def add_orders(store, *, private: bool):
+    store.add_lookup_table(
+        name="Orders",
+        description="Every order and where it is",
+        private=private,
+        file_name="orders.xlsx",
+        headings=["Order", "Phone", "Status"],
+        rows=[["ORD-1", f"+{JAY_PHONE}", "Shipped"], ["ORD-2", f"+{ROMAN_PHONE}", "Packing"]],
+    )
+
+
+async def test_with_spreadsheets_the_model_can_look_rows_up_in_them(setup):
+    add_orders(setup.store, private=False)
+    await connect(setup)
+    await setup.bridge.handle_message(group_event("@oscar where is order ORD-2?"))
+    (call,) = setup.asked
+    assert '"Orders" (2 rows): Every order and where it is' in call["system_prompt"]
+    assert "look_up_spreadsheets" in call["system_prompt"]
+    # Told nothing of a tool it would not have if the model cannot take tools.
+    assert "look_up_spreadsheets" not in call["system_prompt_without_search"]
+    rows = call["look_up_rows"]("ORD-2")
+    assert "ORD-2 | +15705550111 | Packing" in rows
+
+
+async def test_a_private_spreadsheet_gives_whoever_writes_only_their_own_rows(setup):
+    add_orders(setup.store, private=True)
+    await connect(setup)
+    await setup.bridge.handle_message(group_event("@oscar where is my order?"))  # from Jay
+    (call,) = setup.asked
+    rows = call["look_up_rows"]("my order")
+    assert "ORD-1" in rows and "ORD-2" not in rows
+
+
+async def test_without_spreadsheets_the_model_is_offered_no_lookup(setup):
+    await connect(setup)
+    await setup.bridge.handle_message(group_event("@oscar hello"))
+    (call,) = setup.asked
+    assert call["look_up_rows"] is None and "look_up_spreadsheets" not in call["system_prompt"]
+
+
+async def test_the_model_is_offered_the_lookup_and_its_rows_go_back_to_it():
+    from app.whatsapp import brain
+
+    sent: list[dict] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body)
+        if len(sent) == 1:
+            call = {"id": "t1", "type": "function", "function": {"name": "look_up_spreadsheets", "arguments": '{"words": "ORD-2"}'}}
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [call]}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ORD-2 is being packed."}}]})
+
+    looked_for: list[str] = []
+
+    def look_up_rows(words: str) -> str:
+        looked_for.append(words)
+        return "Order | Status\nORD-2 | Packing"
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        reply = await brain.generate_reply(
+            api_key="sk-or-test", model="m", system_prompt="s", request_text="where is ORD-2?", images=[],
+            web_search=False, client=client, look_up_rows=look_up_rows,
+        )
+    assert reply == "ORD-2 is being packed." and looked_for == ["ORD-2"]
+    assert [tool["function"]["name"] for tool in sent[0]["tools"]] == ["look_up_spreadsheets"]
+    assert sent[1]["messages"][-1] == {"role": "tool", "tool_call_id": "t1", "content": "Order | Status\nORD-2 | Packing"}

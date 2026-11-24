@@ -24,7 +24,7 @@ from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCRequestHandler,
 )
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import agent as voice_agent
 from app.access import CloudflareAccess, RequireAccess
@@ -49,7 +49,16 @@ from app.costs import CALL_MINIMUM_DOLLARS, KeyCredit
 from app.numbers import NumbersError, TwilioNumbers, calls_from
 from app.preview import PreviewFailed, voice_sample
 from app.recording import finish_leftovers, forget_recording, prune, recording_path, recordings_folder
+from app.search import LookupFailed, TablesRequest, WebLookup
 from app.sheets import SHEET_MOST_BYTES, SheetError, other_spreadsheet, read_sheet
+from app.tables import (
+    TABLE_DESCRIPTION_CHARS,
+    TABLE_NAME_CHARS,
+    TABLE_TEXT_MOST,
+    TABLES_MOST,
+    TableError,
+    read_table,
+)
 from app.notify import SAMPLE_CALL, WebhookRefused, send_summary, summary_payload, webhook_url
 from app.config import (
     ROOT_DIR,
@@ -135,6 +144,38 @@ class NumberToBuy(BaseModel):
     phone_number: str = Field(pattern=r"^\+[1-9]\d{6,14}$")
 
 
+class LookupTableIn(BaseModel):
+    """A spreadsheet for Oscar to look things up in, as the dashboard sends it (app/tables.py)."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=TABLE_NAME_CHARS)
+    description: str = Field(default="", max_length=TABLE_DESCRIPTION_CHARS)
+    private: bool = False
+    file_name: str = Field(default="", max_length=200)
+    rows_csv: str = Field(min_length=1, max_length=TABLE_TEXT_MOST)
+
+
+class LookupTableChange(BaseModel):
+    """What changes about a spreadsheet: any of these; rows_csv replaces its rows."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=TABLE_NAME_CHARS)
+    description: str | None = Field(default=None, max_length=TABLE_DESCRIPTION_CHARS)
+    private: bool | None = None
+    file_name: str | None = Field(default=None, max_length=200)
+    rows_csv: str | None = Field(default=None, min_length=1, max_length=TABLE_TEXT_MOST)
+
+
+class LookupTableRows(BaseModel):
+    rows_csv: str = Field(min_length=1, max_length=TABLE_TEXT_MOST)
+
+
+class LookupTableQuestion(BaseModel):
+    question: str = Field(min_length=1, max_length=300)
+
+
 class CallsFrom(BaseModel):
     phone_number: str = Field(pattern=r"^\+[1-9]\d{6,14}$")
 
@@ -156,6 +197,8 @@ CALL_SETUP_FAILED = "The call could not be set up. Try again."
 TRYING_SETTINGS_NOTE = "Made with Agent settings that were not saved yet."
 # How many searches of the call history (and CSV downloads) run at once.
 SLOW_READS_AT_ONCE = 2
+# The first rows of a spreadsheet shown in the dashboard.
+TABLE_SAMPLE_ROWS = 5
 # The calls CSV is read this many calls at a time.
 CSV_PAGE_CALLS = 2000
 CSV_COLUMNS = [
@@ -912,6 +955,109 @@ def create_app(
             return await asyncio.to_thread(method, *args)
         except NumbersError as exc:
             raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+
+    # Spreadsheets Oscar looks things up in (app/tables.py)
+
+    def table_or_404(table_id: str) -> dict:
+        table = store.get_lookup_table(table_id)
+        if table is None:
+            raise HTTPException(status_code=404, detail="That spreadsheet is not there any more.")
+        return table
+
+    def rows_of(text: str) -> tuple[list[str], list[list[str]]]:
+        try:
+            return read_table(text)
+        except TableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    def table_view(table: dict) -> dict:
+        """A sheet for the dashboard: what it is, and its first rows."""
+        view = {key: value for key, value in table.items() if key != "rows"}
+        view["sample"] = table.get("rows", [])[:TABLE_SAMPLE_ROWS]
+        return view
+
+    def tables_changed() -> None:
+        bus.publish({"type": "tables"})
+
+    @app.get("/api/tables")
+    async def lookup_tables() -> dict:
+        tables = await asyncio.to_thread(store.lookup_tables_with_rows)
+        return {"tables": [table_view(table) for table in tables], "most": TABLES_MOST}
+
+    @app.post("/api/tables/preview")
+    async def preview_lookup_table(request: LookupTableRows) -> dict:
+        """What a sheet holds, before it is saved: its columns, how many rows, the first few."""
+        headings, rows = await asyncio.to_thread(rows_of, request.rows_csv)
+        return {"headings": headings, "count": len(rows), "sample": rows[:TABLE_SAMPLE_ROWS]}
+
+    @app.post("/api/tables")
+    async def add_lookup_table(request: LookupTableIn) -> dict:
+        if len(store.list_lookup_tables()) >= TABLES_MOST:
+            raise HTTPException(
+                status_code=400, detail=f"Oscar can have {TABLES_MOST} spreadsheets. Delete one to add another."
+            )
+        headings, rows = await asyncio.to_thread(rows_of, request.rows_csv)
+        table = store.add_lookup_table(
+            name=request.name,
+            description=request.description,
+            private=request.private,
+            file_name=request.file_name,
+            headings=headings,
+            rows=rows,
+        )
+        tables_changed()
+        return {"table": table_view(table)}
+
+    @app.put("/api/tables/{table_id}")
+    async def change_lookup_table(table_id: str, request: LookupTableChange) -> dict:
+        table_or_404(table_id)
+        changes = request.model_dump(exclude_none=True, exclude={"rows_csv"})
+        if request.rows_csv is not None:
+            changes["headings"], changes["rows"] = await asyncio.to_thread(rows_of, request.rows_csv)
+        table = store.update_lookup_table(table_id, **changes) if changes else table_or_404(table_id)
+        tables_changed()
+        return {"table": table_view(table)}
+
+    @app.delete("/api/tables/{table_id}")
+    async def delete_lookup_table(table_id: str) -> dict:
+        if not store.delete_lookup_table(table_id):
+            raise HTTPException(status_code=404, detail="That spreadsheet is not there any more.")
+        tables_changed()
+        return {"deleted": table_id}
+
+    @app.post("/api/tables/ask")
+    async def ask_lookup_tables(request: LookupTableQuestion) -> dict:
+        """Try a question: what Oscar would read in the spreadsheets and say, as on a browser call."""
+        require_agent_keys()
+        tables = await asyncio.to_thread(voice_agent.tables_for, store)
+        if not tables:
+            raise HTTPException(status_code=400, detail="Add a spreadsheet first.")
+        agent = store.get_agent()
+        lookup = WebLookup(
+            firecrawl_api_key="",
+            openrouter_api_key=cfg.openrouter_api_key,
+            openrouter_base_url=cfg.openrouter_base_url,
+            agent_name=agent.name,
+            agent_instructions=agent.system_prompt,
+            today=voice_agent.spoken_date(datetime.now().date()),
+            tables=tables,
+            caller=None,
+        )
+        try:
+            answer, found = await lookup.answer_from_tables(
+                TablesRequest(words=request.question, question=request.question), []
+            )
+        except LookupFailed as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        finally:
+            await lookup.aclose()
+        return {
+            "answer": answer,
+            "found": [
+                {"table": part.table, "rows": part.rows, "headings": part.headings, "cells": part.cells}
+                for part in found
+            ],
+        }
 
     @app.get("/api/numbers")
     async def phone_numbers() -> dict:
