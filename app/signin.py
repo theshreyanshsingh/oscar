@@ -26,7 +26,9 @@ Cloudflare Access (app/access.py) is an extra layer: when it is set up, a
 visitor needs both its sign-in and this one.
 
 A request Cloudflare received over plain http (its cf-visitor header says
-"http") is sent to the same address over https (HttpsOnly).
+"http") is sent to the same address over https (HttpsOnly), and every answer to
+a request that came over https tells the browser to use only https here for a
+year (Strict-Transport-Security).
 """
 
 import hashlib
@@ -47,7 +49,7 @@ from fastapi import APIRouter, Request
 from loguru import logger
 from starlette.requests import cookie_parser
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
 from app.access import is_open
@@ -219,11 +221,17 @@ def over_https(scope: Scope, public_host: str) -> bool:
 VALID_HOST = re.compile(r"[A-Za-z0-9.-]+(:\d{1,5})?|\[[0-9A-Fa-f:.]+\](:\d{1,5})?")
 
 
+# What the browser is told on an answer it got over https: use https here for the next year.
+HSTS = (b"strict-transport-security", b"max-age=31536000")
+
+
 class HttpsOnly:
     """Sends a request that reached Cloudflare over plain http to the same address over https (308).
 
     Only Cloudflare's own cf-visitor header is trusted for this, never
     X-Forwarded-Proto. /healthz and Twilio's webhooks answer either way.
+    An answer to a request that came over https carries Strict-Transport-Security
+    (browsers ignore it over http, so it isn't sent there).
     """
 
     def __init__(self, app: ASGIApp):
@@ -242,7 +250,24 @@ class HttpsOnly:
             url = f"https://{host}{path}" + (f"?{query}" if query else "")
             await RedirectResponse(url, status_code=308)(scope, receive, send)
             return
+        if scope["type"] == "http" and (scope.get("scheme") == "https" or cf_visitor_scheme(scope) == "https"):
+            await self.app(scope, receive, with_hsts(send))
+            return
         await self.app(scope, receive, send)
+
+
+def with_hsts(send: Send) -> Send:
+    """`send`, with Strict-Transport-Security added to the answer unless it already has one."""
+
+    async def sending(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            headers = list(message.get("headers", []))
+            if not any(name.lower() == HSTS[0] for name, _ in headers):
+                headers.append(HSTS)
+            message = {**message, "headers": headers}
+        await send(message)
+
+    return sending
 
 
 # Sessions

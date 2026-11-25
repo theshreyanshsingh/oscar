@@ -526,6 +526,18 @@ def test_only_cloudflares_header_sends_to_https(tmp_path):
         assert odd.status_code == 400
 
 
+
+def test_answers_over_https_tell_the_browser_to_keep_to_https(tmp_path):
+    with app_client(tmp_path, base_url="http://oscar.example.com", client=CLOUDFLARE_PEER) as client:
+        over_https = {"cf-visitor": '{"scheme":"https"}'}
+        for response in (client.get("/login", headers=over_https), client.get("/", headers=over_https), client.get("/healthz", headers=over_https)):
+            assert response.headers["strict-transport-security"] == "max-age=31536000"
+        # Over plain http (straight to the server, or a redirect from Cloudflare's http) it isn't sent.
+        assert "strict-transport-security" not in client.get("/login").headers
+        assert "strict-transport-security" not in client.get("/", headers={"cf-visitor": '{"scheme":"http"}'}).headers
+    with app_client(tmp_path, base_url="https://oscar.example.com") as client:
+        assert client.get("/login").headers["strict-transport-security"] == "max-age=31536000"
+
 # Nothing about the server's insides where visitors can see it
 
 
