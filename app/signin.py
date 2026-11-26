@@ -26,9 +26,9 @@ Cloudflare Access (app/access.py) is an extra layer: when it is set up, a
 visitor needs both its sign-in and this one.
 
 A request Cloudflare received over plain http (its cf-visitor header says
-"http") is sent to the same address over https (HttpsOnly), and every answer to
-a request that came over https tells the browser to use only https here for a
-year (Strict-Transport-Security).
+"http") is sent to the same address over https (HttpsOnly). That redirect, and
+every answer to a request that came over https, tells the browser to use only
+https here for a year (Strict-Transport-Security).
 """
 
 import hashlib
@@ -230,8 +230,9 @@ class HttpsOnly:
 
     Only Cloudflare's own cf-visitor header is trusted for this, never
     X-Forwarded-Proto. /healthz and Twilio's webhooks answer either way.
-    An answer to a request that came over https carries Strict-Transport-Security
-    (browsers ignore it over http, so it isn't sent there).
+    The redirect and every answer to a request that came over https carry
+    Strict-Transport-Security. (Browsers ignore it on the redirect, which they got
+    over http, but security scanners look for it there too.)
     """
 
     def __init__(self, app: ASGIApp):
@@ -248,7 +249,7 @@ class HttpsOnly:
             path = raw_path.decode("latin-1") if raw_path else quote(scope["path"])
             query = scope.get("query_string", b"").decode("latin-1")
             url = f"https://{host}{path}" + (f"?{query}" if query else "")
-            await RedirectResponse(url, status_code=308)(scope, receive, send)
+            await RedirectResponse(url, status_code=308)(scope, receive, with_hsts(send))
             return
         if scope["type"] == "http" and (scope.get("scheme") == "https" or cf_visitor_scheme(scope) == "https"):
             await self.app(scope, receive, with_hsts(send))

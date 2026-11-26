@@ -532,9 +532,10 @@ def test_answers_over_https_tell_the_browser_to_keep_to_https(tmp_path):
         over_https = {"cf-visitor": '{"scheme":"https"}'}
         for response in (client.get("/login", headers=over_https), client.get("/", headers=over_https), client.get("/healthz", headers=over_https)):
             assert response.headers["strict-transport-security"] == "max-age=31536000"
-        # Over plain http (straight to the server, or a redirect from Cloudflare's http) it isn't sent.
+        # The redirect from Cloudflare's http carries it too, for scanners; plain http straight to the server doesn't.
+        redirect = client.get("/", headers={"cf-visitor": '{"scheme":"http"}'})
+        assert (redirect.status_code, redirect.headers["strict-transport-security"]) == (308, "max-age=31536000")
         assert "strict-transport-security" not in client.get("/login").headers
-        assert "strict-transport-security" not in client.get("/", headers={"cf-visitor": '{"scheme":"http"}'}).headers
     with app_client(tmp_path, base_url="https://oscar.example.com") as client:
         assert client.get("/login").headers["strict-transport-security"] == "max-age=31536000"
 
